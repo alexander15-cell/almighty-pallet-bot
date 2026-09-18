@@ -1,0 +1,297 @@
+# 4 Guys 1 Pallet — Pallet Tracking Bot
+
+A Discord bot that turns pallet intake into a role-gated pipeline, with a
+live, auto-updating cost/profit card per pallet:
+
+```
+#pallet-discussion (per pallet, live finance/status card pinned)
+#data-entry (per pallet)
+        ↓
+[ SHARED across every pallet ]
+#automated-review (AI) → #queue-review → #awaiting-listing → #listed → #sold
+                                                                  ↓
+                                                          #10-day-alerts
+```
+
+Only **#pallet-discussion** and **#data-entry** are created per pallet.
+Everything from Automated Review onward is ONE channel shared by every
+pallet - this is deliberate, to keep total channel count from scaling with
+the number of pallets you run (Discord servers cap at 500 channels total).
+Every item's card always shows which pallet it belongs to.
+
+## What this bot does
+
+- Posts a **"Start New Pallet"** button. Clicking it creates a category with
+  **#pallet-discussion** (pinned live finance card) and **#data-entry**.
+- In **Data Entry**, the Data Entry role posts a photo + short note per item.
+  The bot logs it, deletes the original message, and sends it into the
+  shared Automated Review channel.
+- In **Automated Review** (shared, bot-only), Claude's vision model identifies
+  the item, drafts a title/description, and flags anything inconsistent
+  between the note and the photo. **Photos are never edited or regenerated.**
+  This step is optional - see "Running without AI review" below.
+- In **Queue Review** (shared), the Queue Review role approves, edits, or
+  rejects (sends back to that item's own pallet's Data Entry channel).
+- **Awaiting Listing** (shared) is where Listing Management manually creates
+  the real Vendoo/eBay/FB/website listing (see the Vendoo API limitation
+  below), then clicks "Mark as Listed."
+- **Listed** (shared) items get a "Mark as Sold" button - a single click,
+  no form, no price prompt. Operational speed was the whole point of
+  removing price entry from this button.
+- **Sold** (shared) items get a "Mark as Shipped" button (stays in the same
+  channel, just checks it off).
+- A background job checks every 12 hours for anything sitting in Listed for
+  10+ days and pings the shared **10-Day Alerts** channel, naming the pallet.
+
+## Financial tracking: decoupled from the operational buttons
+
+Two new roles handle cost/profit tracking **completely separately** from the
+Data Entry → Sold pipeline, so nobody doing warehouse work ever has to stop
+and type a number:
+
+- **Purchase Management** sets a pallet's total cost with `/setprice`.
+- **Finance Management** does everything Purchase can, plus:
+  - `/finance record-sale` - records (or corrects) an item's actual sale
+    price + platform, whenever the price is actually known. Not tied to the
+    Mark as Sold click at all.
+  - `/finance override-count` / `/finance clear-count-override` - manually
+    corrects the "items received" figure if the real/accounting count needs
+    to differ from what's been logged in Data Entry (e.g. junk that was
+    never entered).
+  - `/finance summary` - posts a fresh, non-pinned copy of the same numbers.
+
+Every pallet's **#pallet-discussion** channel gets a pinned card, posted as
+the very first message, that shows: cost, items received, cost-per-item,
+revenue so far, items priced, profit/loss vs. cost, a cost-recovery
+progress bar, and an item count per pipeline stage. This card **edits
+itself in place** every time something relevant changes - a new item is
+logged, an item moves stage, a price is set or corrected, or the received
+count is overridden. You never have to run a command to see current status;
+just look at the pinned message.
+
+## Important limitation: no Vendoo API
+
+Vendoo does not offer a public developer API, so this bot **cannot** push a
+listing into Vendoo automatically. "Awaiting Listing" exists specifically so
+a human can take the AI-approved title/description/photos and manually
+create the real listing, then click the button to confirm it's done.
+
+---
+
+## 1. Discord server setup (do this first, once)
+
+### Create the roles
+In Server Settings → Roles, create these six roles (exact names matter -
+they're referenced in `config.py`):
+- `Data Entry`
+- `Queue Review`
+- `Listing Management`
+- `Purchase Management`
+- `Finance Management`
+- `Pallet Admin`
+
+Queue Review, Listing Management, Purchase Management, and Finance
+Management are all screen-based work - none of them require being
+physically present for intake, so remote members can hold any of these
+roles freely.
+
+### Create the hub channel
+Create a text channel named exactly `new-pallet-tracking` (matches
+`HUB_CHANNEL_NAME` in `config.py`). This is where the "Start New Pallet"
+button lives - it doesn't need to be inside any category.
+
+### Create the bot application
+1. Go to https://discord.com/developers/applications → **New Application**
+2. Under **Bot**, click **Reset Token** and copy it - this is your `DISCORD_BOT_TOKEN`
+3. Under **Bot**, enable these **Privileged Gateway Intents**:
+   - Server Members Intent
+   - Message Content Intent
+4. Under **OAuth2 → URL Generator**, check scopes `bot` and `applications.commands`,
+   and under Bot Permissions check: Manage Channels, Manage Roles, Send Messages,
+   Manage Messages, Attach Files, Embed Links, Read Message History, Use Slash
+   Commands. Copy the generated URL and open it to invite the bot to your server.
+5. **Important:** in Server Settings → Roles, drag the bot's role **above** all
+   six roles you created above - Discord won't let a bot manage permissions for
+   roles ranked higher than its own.
+
+### Get your Server ID
+Enable Developer Mode (User Settings → Advanced), then right-click your
+server icon → Copy Server ID. This is your `DISCORD_GUILD_ID`.
+
+### Get an Anthropic API key (optional - can be added later)
+Only needed for AI-drafted descriptions. The bot runs fine without it -
+items skip straight from Data Entry to Queue Review with the raw note.
+Sign up at https://console.anthropic.com, create a key, add it to `.env` as
+`ANTHROPIC_API_KEY`, restart the bot. Billed separately from any Claude.ai
+subscription - pay-as-you-go based on usage.
+
+---
+
+## 2. Running the bot
+
+```bash
+cd pallet-bot
+python -m venv venv
+source venv/bin/activate        # on Windows: venv\Scripts\activate
+pip install -r requirements.txt
+
+cp .env.example .env
+# edit .env: fill in DISCORD_BOT_TOKEN and DISCORD_GUILD_ID.
+# ANTHROPIC_API_KEY can be left blank for now.
+
+python bot.py
+```
+
+Once it's running and logged in, run these slash commands **once, in this
+order**:
+
+```
+/setup-shared-channels    (in any channel - creates the shared pipeline category/channels)
+/setup-hub                (in #new-pallet-tracking - posts the Start New Pallet button)
+```
+
+`/setup-shared-channels` must be run before anyone clicks **Start New
+Pallet** - the button will refuse and tell you to run it first if you
+forget.
+
+### Running without AI review
+
+Leave `ANTHROPIC_API_KEY` blank in `.env`. Every item submitted in Data
+Entry skips the AI step and goes straight to Queue Review with the raw note
+as-is (Automated Review still gets a short "passed through" message for a
+visible record). To turn it on later: add the key to `.env` and restart -
+no code changes needed.
+
+### Running it 24/7 on your friend's server
+
+```ini
+# /etc/systemd/system/pallet-bot.service
+[Unit]
+Description=4 Guys 1 Pallet Discord Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/pallet-bot
+ExecStart=/path/to/pallet-bot/venv/bin/python bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable pallet-bot
+sudo systemctl start pallet-bot
+```
+
+**If the bot goes offline and comes back** (server reset, crash, manual
+restart - whatever), every button on every item still mid-pipeline keeps
+working. On every startup the bot reads the database for anything sitting
+in Queue Review, Awaiting Listing, Listed, or Sold and re-registers its
+buttons before anyone can click them. Nothing to configure - this just
+works. New slash commands can take a minute or two to show up in Discord's
+UI after a restart (a Discord client caching quirk, not a bug here).
+
+---
+
+## 3. How to use it day to day
+
+1. A Pallet Admin runs `/setup-shared-channels` once, ever (skip if already done).
+2. Anyone clicks **Start New Pallet** in `#new-pallet-tracking`, enters a
+   name (e.g. `Pallet-2026-014`) and optional notes. This creates
+   `#pallet-discussion` (with the pinned live status card) and `#data-entry`.
+3. **Purchase Management** runs `/setprice` inside the new pallet's category
+   to record what was paid.
+4. **Data Entry** posts one message per item in that pallet's `#data-entry`:
+   attach photo(s), type a short note in the same message, send. The card
+   automatically updates - "Items Received" ticks up.
+5. Within a few seconds it reappears in the shared `#queue-review`, labeled
+   with its pallet, with an AI-suggested title/description and any flags.
+6. **Queue Review** clicks **Approve**, **Edit**, or **Reject / Send Back**
+   (returns to that pallet's own Data Entry).
+7. Approved items land in the shared `#awaiting-listing`. **Listing
+   Management** creates the real listing, then clicks **Mark as Listed**.
+8. It moves to the shared `#listed` with a **Mark as Sold** button - one
+   click, no price prompt.
+9. **Finance Management** runs `/finance record-sale` (in that pallet's
+   category, any time - immediately or days later) to log the actual price.
+   The pinned card updates: revenue, profit/loss, and cost-recovery bar.
+10. Once shipped, click **Mark as Shipped** in `#sold`.
+11. If anything sits in `#listed` for 10+ days, `#10-day-alerts` pings,
+    naming the pallet.
+12. Anytime, check the pinned message at the top of a pallet's
+    `#pallet-discussion` for full current status, or run `/finance summary`
+    for a fresh non-pinned copy.
+
+---
+
+## 4. Admin commands (Pallet Admin role)
+
+- `/item delete <item_number>` - run inside a pallet's category. Soft-deletes
+  the item (best-effort deletes its current card from whichever channel it's
+  in) but keeps the full row and event history in the database for audit.
+- `/pallet archive` - run inside a pallet's category. Asks for confirmation,
+  then deletes that pallet's own channels (`#pallet-discussion`,
+  `#data-entry`). All item data stays in the database permanently - this
+  only removes the Discord side. If items are still mid-pipeline, they stay
+  visible in the shared channels (still labeled by pallet) even after the
+  pallet's own category is gone.
+- `/pallet list [include_archived]` - shows every pallet with item counts by
+  stage and active/archived status.
+- `/db-wipe` - **irreversible.** Requires both the Pallet Admin role AND real
+  Discord Administrator permission on the server (two independent locks).
+  Opens a form requiring you to type `DELETE EVERYTHING` exactly. On
+  confirmation: deletes every pallet's category/channels, purges messages
+  from the shared pipeline channels (best-effort - Discord won't bulk-delete
+  messages older than 14 days), and drops/recreates every database table.
+  The shared pipeline channels themselves are NOT deleted, since they're
+  reusable infrastructure - only their message history is cleared.
+
+---
+
+## 5. Database and future migration
+
+All state lives in a single SQLite file at `data/pallet_tracker.db` (see
+`database.py`). Every function that touches the database lives in that one
+file, so migrating to Postgres/MySQL later only means rewriting
+`database.py`'s internals.
+
+Tables:
+- **pallets** - one row per pallet, with cost, items-received override,
+  archive status, and the pinned finance message ID
+- **channel_map** - per-pallet channel IDs (discussion, data-entry only)
+- **shared_channels** - the one-row-per-stage mapping for the shared
+  pipeline channels, set once by `/setup-shared-channels`
+- **items** - one row per physical item: status, AI-generated text, sale
+  price/platform, and every relevant timestamp
+- **item_events** - an append-only audit log of every status change and
+  price recording, including deletions
+
+### Backing this up
+Since this is the only copy of your item/financial history, set up a
+periodic backup of the `data/` folder (database + all saved item photos) -
+a daily `cron` job copying it elsewhere, or syncing to cloud storage, is
+enough at this scale.
+
+---
+
+## 6. Known limitations / things to watch
+
+- **No live sync with Vendoo.** Hard platform limitation, not a bug here.
+- **AI review costs money per item** (Claude API usage). Cheap at your
+  current volume; monitor usage on the Anthropic console if it scales up.
+- **The bot must stay running** for the pipeline to move - if it's offline
+  when someone posts in Data Entry, that message just sits there until the
+  bot is back up (no retroactive backlog scan in this version).
+- **Role names must match `config.py` exactly.**
+- **Buttons survive restarts** - see the "Running it 24/7" section above.
+- **Double-click protection** - each stage-advancing action checks the
+  item's current status first, so near-simultaneous clicks get a clear
+  "already moved on" message instead of duplicating anything.
+- **`/setup-shared-channels` is a one-time setup step.** If you ever need to
+  move or recreate the shared channels, you'd need to update the
+  `shared_channels` table manually (there's no command for this yet, since
+  it should rarely be needed).

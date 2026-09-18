@@ -1,0 +1,594 @@
+"""
+Database layer for the pallet tracking bot.
+
+Uses SQLite via the standard library for zero-setup persistence.
+All access goes through the functions in this file, not raw SQL scattered
+through the bot code - this is deliberate, so that migrating to Postgres
+or MySQL later only requires rewriting this one file, not the whole bot.
+
+Schema:
+    pallets        - one row per pallet (a Discord category)
+    items          - one row per physical item, tracked through every stage
+    item_events    - an append-only audit log of every stage transition
+
+Item status values (stored as plain strings, see STATUS_* constants):
+    data_entry -> automated_review -> queue_review -> awaiting_listing
+        -> listed -> sold -> shipped
+    (an item can also be sent back to data_entry from queue_review if rejected,
+    or removed entirely via /item-delete, which sets status to "deleted"
+    rather than actually removing the row - so the audit trail survives)
+
+Note: pallet cost and item sale price ARE tracked here again (Purchase
+Management sets cost via /setprice, Finance Management records sale prices
+via /finance record-sale) - this is a deliberate reversal of an earlier
+decision to keep pricing out of Discord entirely. The difference this time:
+recording a sale price is fully decoupled from the operational "Mark as
+Sold" button, so warehouse-side clicking stays instant - only Finance
+Management, working at their own pace, ever has to type a number.
+"""
+import sqlite3
+import json
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+
+import config
+
+STATUS_DATA_ENTRY = "data_entry"
+STATUS_AUTOMATED_REVIEW = "automated_review"
+STATUS_QUEUE_REVIEW = "queue_review"
+STATUS_AWAITING_LISTING = "awaiting_listing"
+STATUS_LISTED = "listed"
+STATUS_SOLD = "sold"
+STATUS_SHIPPED = "shipped"
+STATUS_REJECTED = "rejected"  # sent back to data entry for redo
+STATUS_DELETED = "deleted"    # soft-deleted via /item-delete - row kept for audit trail
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@contextmanager
+def get_conn():
+    Path(config.DATABASE_PATH).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(config.DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _migrate_add_columns(conn):
+    """
+    Adds columns/tables introduced after the initial release, for anyone
+    upgrading a database that already has data in it. SQLite has no "ADD
+    COLUMN IF NOT EXISTS", so each ALTER is attempted and a "duplicate
+    column" error is treated as "already migrated" and ignored - anything
+    else re-raises.
+    """
+    migrations = [
+        "ALTER TABLE pallets ADD COLUMN archived INTEGER DEFAULT 0",
+        "ALTER TABLE pallets ADD COLUMN archived_at TEXT",
+        "ALTER TABLE pallets ADD COLUMN pallet_cost REAL",
+        "ALTER TABLE pallets ADD COLUMN cost_set_by INTEGER",
+        "ALTER TABLE pallets ADD COLUMN items_received_override INTEGER",
+        "ALTER TABLE pallets ADD COLUMN finance_message_id INTEGER",
+        "ALTER TABLE items ADD COLUMN sale_price REAL",
+        "ALTER TABLE items ADD COLUMN sale_platform TEXT",
+    ]
+    for stmt in migrations:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+
+
+def init_db():
+    """Create tables if they don't already exist. Safe to call on every startup."""
+    with get_conn() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS pallets (
+                id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+                name                     TEXT UNIQUE NOT NULL,
+                category_id              INTEGER UNIQUE NOT NULL,
+                created_by               INTEGER NOT NULL,
+                created_at               TEXT NOT NULL,
+                archived                 INTEGER DEFAULT 0,
+                archived_at              TEXT,
+                pallet_cost              REAL,
+                cost_set_by              INTEGER,
+                items_received_override  INTEGER,
+                finance_message_id       INTEGER,
+                notes                    TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS channel_map (
+                pallet_id       INTEGER NOT NULL REFERENCES pallets(id),
+                stage           TEXT NOT NULL,
+                channel_id      INTEGER NOT NULL,
+                PRIMARY KEY (pallet_id, stage)
+            );
+
+            -- One row per stage in config.SHARED_STAGE_CHANNELS. Created once
+            -- via /setup-shared-channels and used by every pallet, instead of
+            -- each pallet getting its own copy of these channels (keeps total
+            -- channel count from scaling with the number of pallets).
+            CREATE TABLE IF NOT EXISTS shared_channels (
+                stage           TEXT PRIMARY KEY,
+                channel_id      INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS items (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                pallet_id           INTEGER NOT NULL REFERENCES pallets(id),
+                item_number         INTEGER NOT NULL,
+                status              TEXT NOT NULL,
+                raw_description     TEXT,
+                photo_urls          TEXT,              -- JSON list of local file paths
+                ai_title            TEXT,
+                ai_description      TEXT,
+                ai_flags            TEXT,
+                submitted_by        INTEGER,
+                current_message_id  INTEGER,            -- message representing item in its CURRENT channel
+                listed_at           TEXT,
+                sold_at             TEXT,
+                sale_price          REAL,
+                sale_platform       TEXT,
+                shipped_at          TEXT,
+                stale_alert_sent    INTEGER DEFAULT 0,
+                created_at          TEXT NOT NULL,
+                updated_at          TEXT NOT NULL,
+                UNIQUE(pallet_id, item_number)
+            );
+
+            CREATE TABLE IF NOT EXISTS item_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id     INTEGER NOT NULL REFERENCES items(id),
+                from_status TEXT,
+                to_status   TEXT NOT NULL,
+                actor_id    INTEGER,
+                note        TEXT,
+                timestamp   TEXT NOT NULL
+            );
+            """
+        )
+        _migrate_add_columns(conn)
+
+
+# ---------------------------------------------------------------- pallets --
+
+def create_pallet(name: str, category_id: int, created_by: int, notes: str = None) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO pallets (name, category_id, created_by, created_at, notes) VALUES (?, ?, ?, ?, ?)",
+            (name, category_id, created_by, _now(), notes),
+        )
+        return cur.lastrowid
+
+
+def get_pallet_by_category(category_id: int):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM pallets WHERE category_id = ?", (category_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_pallet(pallet_id: int):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM pallets WHERE id = ?", (pallet_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_all_pallets(include_archived: bool = True):
+    """All pallets, newest first. Used by /pallet-list."""
+    with get_conn() as conn:
+        query = "SELECT * FROM pallets"
+        if not include_archived:
+            query += " WHERE archived = 0"
+        query += " ORDER BY id DESC"
+        rows = conn.execute(query).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_all_channel_ids_for_pallet(pallet_id: int) -> list[int]:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT channel_id FROM channel_map WHERE pallet_id = ?", (pallet_id,)).fetchall()
+        return [r["channel_id"] for r in rows]
+
+
+def archive_pallet(pallet_id: int):
+    """
+    Marks a pallet archived. Does NOT delete anything from the database -
+    items and their full history stay exactly as they are, permanently
+    queryable. The caller (admin_tools cog) is responsible for actually
+    deleting the pallet's Discord category/channels, since that's a Discord
+    API action, not a database one - this function only flips the flag.
+    """
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE pallets SET archived = 1, archived_at = ? WHERE id = ?",
+            (_now(), pallet_id),
+        )
+
+
+def map_channel(pallet_id: int, stage: str, channel_id: int):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO channel_map (pallet_id, stage, channel_id) VALUES (?, ?, ?)",
+            (pallet_id, stage, channel_id),
+        )
+
+
+# ------------------------------------------------------- shared channels --
+
+def set_shared_channel(stage: str, channel_id: int):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO shared_channels (stage, channel_id) VALUES (?, ?)",
+            (stage, channel_id),
+        )
+
+
+def get_shared_channel_id(stage: str):
+    with get_conn() as conn:
+        row = conn.execute("SELECT channel_id FROM shared_channels WHERE stage = ?", (stage,)).fetchone()
+        return row["channel_id"] if row else None
+
+
+def get_all_shared_channels() -> dict:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT stage, channel_id FROM shared_channels").fetchall()
+        return {r["stage"]: r["channel_id"] for r in rows}
+
+
+def is_shared_channels_setup() -> bool:
+    existing = get_all_shared_channels()
+    return all(stage in existing for stage in config.SHARED_STAGE_CHANNELS)
+
+
+def get_stage_channel_id(pallet_id: int, stage: str):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT channel_id FROM channel_map WHERE pallet_id = ? AND stage = ?",
+            (pallet_id, stage),
+        ).fetchone()
+        return row["channel_id"] if row else None
+
+
+def resolve_channel_id(pallet_id: int, stage: str):
+    """
+    The single lookup item_flow.py should use for "what channel does this
+    stage live in for this pallet". Transparently routes to the shared,
+    server-wide channel for stages in config.SHARED_STAGE_CHANNELS, or the
+    pallet's own per-pallet channel otherwise (data-entry, discussion) -
+    callers don't need to know or care which kind a stage is.
+    """
+    if stage in config.SHARED_STAGE_CHANNELS:
+        return get_shared_channel_id(stage)
+    return get_stage_channel_id(pallet_id, stage)
+
+
+def get_pallet_id_for_channel(channel_id: int):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT pallet_id FROM channel_map WHERE channel_id = ?", (channel_id,)
+        ).fetchone()
+        return row["pallet_id"] if row else None
+
+
+def get_stage_for_channel(channel_id: int):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT stage FROM channel_map WHERE channel_id = ?", (channel_id,)
+        ).fetchone()
+        return row["stage"] if row else None
+
+
+# ------------------------------------------------------------------ items --
+
+def create_item(pallet_id: int, raw_description: str, photo_urls: list, submitted_by: int) -> int:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(item_number), 0) + 1 AS n FROM items WHERE pallet_id = ?",
+            (pallet_id,),
+        ).fetchone()
+        item_number = row["n"]
+        now = _now()
+        cur = conn.execute(
+            """INSERT INTO items
+               (pallet_id, item_number, status, raw_description, photo_urls,
+                submitted_by, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                pallet_id, item_number, STATUS_DATA_ENTRY, raw_description,
+                json.dumps(photo_urls), submitted_by, now, now,
+            ),
+        )
+        item_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO item_events (item_id, from_status, to_status, actor_id, timestamp) VALUES (?, ?, ?, ?, ?)",
+            (item_id, None, STATUS_DATA_ENTRY, submitted_by, now),
+        )
+        return item_id
+
+
+def get_item(item_id: int):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_item_by_message(channel_id: int, message_id: int):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM items WHERE current_message_id = ?", (message_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_status(item_id: int, new_status: str, actor_id: int = None, note: str = None,
+                   new_message_id: int = None):
+    with get_conn() as conn:
+        current = conn.execute("SELECT status FROM items WHERE id = ?", (item_id,)).fetchone()
+        old_status = current["status"] if current else None
+        now = _now()
+
+        fields = ["status = ?", "updated_at = ?"]
+        values = [new_status, now]
+
+        if new_message_id is not None:
+            fields.append("current_message_id = ?")
+            values.append(new_message_id)
+        if new_status == STATUS_LISTED:
+            fields.append("listed_at = ?")
+            values.append(now)
+        if new_status == STATUS_SOLD:
+            fields.append("sold_at = ?")
+            values.append(now)
+        if new_status == STATUS_SHIPPED:
+            fields.append("shipped_at = ?")
+            values.append(now)
+
+        values.append(item_id)
+        conn.execute(f"UPDATE items SET {', '.join(fields)} WHERE id = ?", values)
+        conn.execute(
+            """INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (item_id, old_status, new_status, actor_id, note, now),
+        )
+
+
+def resubmit_item(item_id: int, raw_description: str, photo_urls: list, submitted_by: int):
+    """
+    Used when someone replies to a REJECTED item's "sent back for redo" card
+    with corrected photos/notes. Updates the SAME row in place (same
+    item_number, same audit history) and moves it back to data_entry, rather
+    than create_item() making a brand-new row - which was the bug where a
+    resubmission counted as a second item and the original rejected card
+    was left orphaned in Data Entry forever.
+
+    Clears the old AI fields too, since a resubmission likely has different
+    photos/description and the stale AI draft shouldn't carry over.
+    """
+    with get_conn() as conn:
+        conn.execute(
+            """UPDATE items SET raw_description = ?, photo_urls = ?, submitted_by = ?,
+               ai_title = NULL, ai_description = NULL, ai_flags = NULL, updated_at = ?
+               WHERE id = ?""",
+            (raw_description, json.dumps(photo_urls), submitted_by, _now(), item_id),
+        )
+    update_status(item_id, STATUS_DATA_ENTRY, actor_id=submitted_by, note="Resubmitted after rejection")
+
+
+def soft_delete_item(item_id: int, actor_id: int):
+    """
+    Used by /item-delete. Keeps the row (and its full item_events history)
+    but marks it deleted, so admin cleanup never silently erases audit trail.
+    Does not touch Discord - the caller is responsible for deleting the
+    actual message, since that requires knowing which channel it's in.
+    """
+    update_status(item_id, STATUS_DELETED, actor_id=actor_id, note="Deleted by admin")
+
+
+def get_item_by_pallet_and_number(pallet_id: int, item_number: int):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM items WHERE pallet_id = ? AND item_number = ?",
+            (pallet_id, item_number),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_open_items_for_reconnect():
+    """
+    Every item currently sitting in a stage that has live buttons attached
+    to its message (queue_review, awaiting_listing, listed, sold-awaiting-
+    shipment). Called once on bot startup to re-register persistent views -
+    without this, buttons on any item that was mid-pipeline when the bot
+    last restarted stop working.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT * FROM items
+               WHERE status IN (?, ?, ?, ?) AND current_message_id IS NOT NULL""",
+            (STATUS_QUEUE_REVIEW, STATUS_AWAITING_LISTING, STATUS_LISTED, STATUS_SOLD),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_pallet_financials(pallet_id: int):
+    """
+    Full financial + pipeline snapshot for a pallet:
+      - items_received: items_received_override if Finance set one,
+        otherwise a live count of non-deleted items logged for this pallet
+      - cost_per_item: pallet_cost / items_received
+      - revenue_so_far: sum of sale_price across every item that has one set
+        (regardless of status - Finance can record a price whenever)
+      - profit_so_far / cost_recovery_pct: only computed once a cost is set
+      - status_counts: item counts by pipeline stage, for the "where's
+        everything sitting" part of the live card
+    This is what both /finance summary and the auto-updating pinned message
+    in #pallet-discussion are built from - one function, one source of truth.
+    """
+    pallet = get_pallet(pallet_id)
+    with get_conn() as conn:
+        received_row = conn.execute(
+            "SELECT COUNT(*) AS n FROM items WHERE pallet_id = ? AND status != ?",
+            (pallet_id, STATUS_DELETED),
+        ).fetchone()
+        revenue_row = conn.execute(
+            "SELECT COUNT(*) AS n_priced, COALESCE(SUM(sale_price), 0) AS revenue "
+            "FROM items WHERE pallet_id = ? AND sale_price IS NOT NULL",
+            (pallet_id,),
+        ).fetchone()
+        counts = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM items WHERE pallet_id = ? GROUP BY status",
+            (pallet_id,),
+        ).fetchall()
+
+    items_received = pallet.get("items_received_override")
+    if items_received is None:
+        items_received = received_row["n"]
+
+    cost = pallet.get("pallet_cost")
+    cost_per_item = (cost / items_received) if (cost and items_received) else None
+    revenue = revenue_row["revenue"] or 0.0
+    n_priced = revenue_row["n_priced"]
+
+    return {
+        "pallet": pallet,
+        "items_received": items_received,
+        "items_received_is_override": pallet.get("items_received_override") is not None,
+        "cost": cost,
+        "cost_per_item": cost_per_item,
+        "items_priced": n_priced,
+        "revenue_so_far": revenue,
+        "avg_sale_price": (revenue / n_priced) if n_priced else None,
+        "profit_so_far": (revenue - cost) if cost is not None else None,
+        "cost_recovery_pct": (revenue / cost * 100) if cost else None,
+        "broke_even": (cost is not None and revenue >= cost),
+        "status_counts": {r["status"]: r["n"] for r in counts},
+    }
+
+
+def set_pallet_cost(pallet_id: int, cost: float, actor_id: int):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE pallets SET pallet_cost = ?, cost_set_by = ? WHERE id = ?",
+            (cost, actor_id, pallet_id),
+        )
+
+
+def set_items_received_override(pallet_id: int, count: int):
+    with get_conn() as conn:
+        conn.execute("UPDATE pallets SET items_received_override = ? WHERE id = ?", (count, pallet_id))
+
+
+def clear_items_received_override(pallet_id: int):
+    with get_conn() as conn:
+        conn.execute("UPDATE pallets SET items_received_override = NULL WHERE id = ?", (pallet_id,))
+
+
+def record_item_sale(item_id: int, price: float, platform: str, actor_id: int):
+    """
+    Sets (or overwrites/corrects) an item's sale price and platform. Used by
+    /finance record-sale for both the first recording and later corrections -
+    deliberately NOT tied to the item's pipeline status, since Finance may
+    record or fix a price at a different pace than the operational Mark as
+    Sold click.
+    """
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE items SET sale_price = ?, sale_platform = ?, updated_at = ? WHERE id = ?",
+            (price, platform, _now(), item_id),
+        )
+        conn.execute(
+            "INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp) "
+            "VALUES (?, NULL, (SELECT status FROM items WHERE id = ?), ?, ?, ?)",
+            (item_id, item_id, actor_id, f"Sale price recorded: ${price:.2f} on {platform}", _now()),
+        )
+
+
+def set_finance_message(pallet_id: int, message_id: int):
+    with get_conn() as conn:
+        conn.execute("UPDATE pallets SET finance_message_id = ? WHERE id = ?", (message_id, pallet_id))
+
+
+def save_ai_review(item_id: int, title: str, description: str, flags: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE items SET ai_title = ?, ai_description = ?, ai_flags = ?, updated_at = ? WHERE id = ?",
+            (title, description, flags, _now(), item_id),
+        )
+
+
+def update_description(item_id: int, new_description: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE items SET ai_description = ?, updated_at = ? WHERE id = ?",
+            (new_description, _now(), item_id),
+        )
+
+
+def get_stale_listed_items(days_threshold: int):
+    """Items still STATUS_LISTED for >= days_threshold days that haven't been alerted on yet."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT * FROM items
+               WHERE status = ? AND stale_alert_sent = 0
+               AND listed_at IS NOT NULL
+               AND julianday('now') - julianday(listed_at) >= ?""",
+            (STATUS_LISTED, days_threshold),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_stale_alert_sent(item_id: int):
+    with get_conn() as conn:
+        conn.execute("UPDATE items SET stale_alert_sent = 1 WHERE id = ?", (item_id,))
+
+
+def get_pallet_summary(pallet_id: int):
+    """Quick counts by status per pallet - used by /pallet-list."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM items WHERE pallet_id = ? GROUP BY status",
+            (pallet_id,),
+        ).fetchall()
+        return {r["status"]: r["n"] for r in rows}
+
+
+# -------------------------------------------------------------- DANGER ZONE --
+
+def get_all_category_ids() -> list[int]:
+    """Every pallet category_id ever created - used by /db-wipe to clean up
+    Discord after the database itself is wiped."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT category_id FROM pallets").fetchall()
+        return [r["category_id"] for r in rows]
+
+
+def wipe_database():
+    """
+    Drops and recreates every table, permanently erasing all pallets, items,
+    and event history. This is called ONLY after the multi-step confirmation
+    in admin_tools.py (typed confirmation phrase + role + Discord Administrator
+    permission) - this function itself does no confirmation of its own and
+    will wipe immediately when called, so nothing should call it directly
+    outside that confirmed flow.
+    """
+    with get_conn() as conn:
+        conn.executescript(
+            """
+            DROP TABLE IF EXISTS item_events;
+            DROP TABLE IF EXISTS items;
+            DROP TABLE IF EXISTS channel_map;
+            DROP TABLE IF EXISTS pallets;
+            """
+        )
+    init_db()  # immediately recreate empty tables so the bot keeps working
