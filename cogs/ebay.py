@@ -70,7 +70,7 @@ class Ebay(commands.Cog):
 
     @ebay_group.command(
         name="confirm-listed",
-        description="Confirm item(s) from the eBay batch are actually live, moving them to Listed. Run inside that pallet's category.",
+        description="Confirm eBay batch item(s) are live, moving them to Listed. Run inside that pallet's category.",
     )
     @app_commands.describe(item_number="A single item's number to confirm (omit to confirm every pending item in this pallet)")
     async def confirm_listed(self, interaction: discord.Interaction, item_number: int = None):
