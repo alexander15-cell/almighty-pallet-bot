@@ -38,6 +38,7 @@ STATUS_DATA_ENTRY = "data_entry"
 STATUS_AUTOMATED_REVIEW = "automated_review"
 STATUS_QUEUE_REVIEW = "queue_review"
 STATUS_AWAITING_LISTING = "awaiting_listing"
+STATUS_PENDING_EBAY_UPLOAD = "pending_ebay_upload"  # added to the eBay CSV batch, not yet confirmed live
 STATUS_LISTED = "listed"
 STATUS_SOLD = "sold"
 STATUS_SHIPPED = "shipped"
@@ -155,6 +156,23 @@ def init_db():
                 actor_id    INTEGER,
                 note        TEXT,
                 timestamp   TEXT NOT NULL
+            );
+
+            -- One row per item, captured during Queue Review approval (see the
+            -- eBay listing modal in item_flow.py) - everything needed to list
+            -- the item on eBay besides the description/photos already on the
+            -- items row itself. item_specifics is a JSON object since which
+            -- attributes apply (brand, size, color, ...) varies by category.
+            CREATE TABLE IF NOT EXISTS ebay_listing_data (
+                item_id         INTEGER PRIMARY KEY REFERENCES items(id),
+                ebay_title      TEXT NOT NULL,
+                category_id     TEXT NOT NULL,
+                condition_id    TEXT NOT NULL,
+                price           REAL NOT NULL,
+                item_specifics  TEXT,
+                set_by          INTEGER,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
             );
             """
         )
@@ -404,6 +422,55 @@ def get_item_by_pallet_and_number(pallet_id: int, item_number: int):
         return dict(row) if row else None
 
 
+def get_items_by_status_for_pallet(pallet_id: int, status: str):
+    """Used by /ebay confirm-listed's bulk (whole-pallet) mode."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM items WHERE pallet_id = ? AND status = ? ORDER BY item_number",
+            (pallet_id, status),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ------------------------------------------------------- eBay listing data --
+
+def save_ebay_listing_data(item_id: int, ebay_title: str, category_id: str, condition_id: str,
+                            price: float, item_specifics: dict, actor_id: int = None):
+    """
+    Upserts the eBay fields captured for this item during Queue Review
+    approval. Keyed one-to-one on item_id, so re-approving (or editing later)
+    just overwrites the previous values rather than accumulating rows.
+    """
+    with get_conn() as conn:
+        now = _now()
+        conn.execute(
+            """INSERT INTO ebay_listing_data
+                   (item_id, ebay_title, category_id, condition_id, price, item_specifics,
+                    set_by, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(item_id) DO UPDATE SET
+                   ebay_title = excluded.ebay_title,
+                   category_id = excluded.category_id,
+                   condition_id = excluded.condition_id,
+                   price = excluded.price,
+                   item_specifics = excluded.item_specifics,
+                   set_by = excluded.set_by,
+                   updated_at = excluded.updated_at""",
+            (item_id, ebay_title, category_id, condition_id, price, json.dumps(item_specifics),
+             actor_id, now, now),
+        )
+
+
+def get_ebay_listing_data(item_id: int):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM ebay_listing_data WHERE item_id = ?", (item_id,)).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        data["item_specifics"] = json.loads(data["item_specifics"]) if data["item_specifics"] else {}
+        return data
+
+
 def get_open_items_for_reconnect():
     """
     Every item currently sitting in a stage that has live buttons attached
@@ -586,6 +653,7 @@ def wipe_database():
         conn.executescript(
             """
             DROP TABLE IF EXISTS item_events;
+            DROP TABLE IF EXISTS ebay_listing_data;
             DROP TABLE IF EXISTS items;
             DROP TABLE IF EXISTS channel_map;
             DROP TABLE IF EXISTS pallets;

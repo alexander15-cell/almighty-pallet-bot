@@ -34,6 +34,8 @@ from discord.ext import commands, tasks
 import config
 import database as db
 import ai_review
+import ebay_api
+import ebay_csv
 import finance_utils
 
 PHOTO_DIR = Path("data/photos")
@@ -115,6 +117,120 @@ class EditDescriptionModal(discord.ui.Modal, title="Edit Listing Description"):
         await interaction.message.edit(embeds=all_embeds)
 
 
+class EbayConditionSelectView(discord.ui.View):
+    """
+    First step of Approve: a plain button click can't collect a dropdown
+    value (Discord modals only support text inputs, not selects), so
+    Approve shows this ephemeral select first - picking a condition opens
+    EbayListingModal for the rest of the eBay fields.
+    """
+
+    def __init__(self, item_id: int):
+        super().__init__(timeout=300)
+        self.item_id = item_id
+        self.select = discord.ui.Select(
+            placeholder="Select this item's eBay condition...",
+            options=[
+                discord.SelectOption(label=label, value=condition_id)
+                for condition_id, label in config.EBAY_CONDITIONS
+            ],
+        )
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        condition_id = self.select.values[0]
+        await interaction.response.send_modal(EbayListingModal(self.item_id, condition_id))
+
+
+class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
+    """
+    Second step of Approve. Title/category/price are required (minimum
+    needed to eventually list on eBay either way); item specifics are
+    freeform "Key: Value" lines, one per attribute, and can be left blank.
+    Description and photos are reused as-is from Data Entry - not re-entered
+    here.
+    """
+
+    def __init__(self, item_id: int, condition_id: str):
+        super().__init__()
+        self.item_id = item_id
+        self.condition_id = condition_id
+        item = db.get_item(item_id)
+        existing = db.get_ebay_listing_data(item_id)
+
+        specifics_default = ""
+        if existing and existing.get("item_specifics"):
+            specifics_default = "\n".join(f"{k}: {v}" for k, v in existing["item_specifics"].items())
+
+        self.ebay_title = discord.ui.TextInput(
+            label="eBay Title (max 80 chars)",
+            default=(existing["ebay_title"] if existing else (item.get("ai_title") or "")[:80]),
+            max_length=80,
+        )
+        self.category_id = discord.ui.TextInput(
+            label="eBay Category ID",
+            default=(existing["category_id"] if existing else ""),
+            max_length=20,
+        )
+        self.price = discord.ui.TextInput(
+            label="Price (USD)",
+            default=(f"{existing['price']:.2f}" if existing else ""),
+            max_length=12,
+        )
+        self.item_specifics = discord.ui.TextInput(
+            label="Item Specifics (one per line: Key: Value)",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            default=specifics_default,
+            max_length=1000,
+        )
+        self.add_item(self.ebay_title)
+        self.add_item(self.category_id)
+        self.add_item(self.price)
+        self.add_item(self.item_specifics)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        title = self.ebay_title.value.strip()
+        category_id = self.category_id.value.strip()
+        price_raw = self.price.value.strip()
+
+        errors = []
+        if not title:
+            errors.append("Title is required.")
+        if not category_id:
+            errors.append("Category ID is required.")
+        price = None
+        try:
+            price = float(price_raw)
+            if price < 0:
+                errors.append("Price can't be negative.")
+        except ValueError:
+            errors.append("Price must be a number.")
+
+        if errors:
+            await interaction.response.send_message(
+                "⚠️ Couldn't save eBay listing data:\n" + "\n".join(f"- {e}" for e in errors) +
+                "\n\nClick **Approve** again to retry.",
+                ephemeral=True,
+            )
+            return
+
+        specifics = {}
+        for line in self.item_specifics.value.splitlines():
+            if ":" not in line:
+                continue
+            key, _, value = line.partition(":")
+            key, value = key.strip(), value.strip()
+            if key and value:
+                specifics[key] = value
+
+        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
+        await cog.finalize_ebay_approval(
+            interaction, self.item_id, self.condition_id, title, category_id, price, specifics,
+        )
+
+
 class QueueReviewView(discord.ui.View):
     """Buttons shown on each item card sitting in the shared Queue Review channel."""
 
@@ -128,7 +244,7 @@ class QueueReviewView(discord.ui.View):
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.green, emoji="✅")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
-        await cog.move_to_awaiting_listing(interaction, self.item_id)
+        await cog.prompt_ebay_condition(interaction, self.item_id)
 
     @discord.ui.button(label="Edit", style=discord.ButtonStyle.blurple, emoji="✏️")
     async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -141,13 +257,37 @@ class QueueReviewView(discord.ui.View):
 
 
 class AwaitingListingView(discord.ui.View):
+    """
+    Three ways an approved item actually gets listed:
+      - Add to eBay Batch: appends it to the CSV batch for eBay's Seller Hub
+        bulk-upload tool (no API call) and moves it to pending-ebay-upload.
+      - List on eBay (API): the live direct-API path, only shown at all once
+        config.EBAY_ENABLED is True (real eBay dev credentials are set).
+      - Mark Listed (Other): unchanged manual path for FB Marketplace/website/
+        anything else - moves straight to Listed.
+    """
+
     def __init__(self, item_id: int):
         super().__init__(timeout=None)
         self.item_id = item_id
-        self.mark_listed.custom_id = f"pallet_bot:mark_listed:{item_id}"
+        self.add_to_batch.custom_id = f"pallet_bot:ebay_batch:{item_id}"
+        self.list_via_api.custom_id = f"pallet_bot:ebay_api_list:{item_id}"
+        self.mark_listed_other.custom_id = f"pallet_bot:mark_listed:{item_id}"
+        if not config.EBAY_ENABLED:
+            self.remove_item(self.list_via_api)
 
-    @discord.ui.button(label="Mark as Listed", style=discord.ButtonStyle.green, emoji="🏷️")
-    async def mark_listed(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Add to eBay Batch", style=discord.ButtonStyle.blurple, emoji="🛒")
+    async def add_to_batch(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
+        await cog.add_to_ebay_batch(interaction, self.item_id)
+
+    @discord.ui.button(label="List on eBay (API)", style=discord.ButtonStyle.gray, emoji="🔌")
+    async def list_via_api(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
+        await cog.list_on_ebay_api(interaction, self.item_id)
+
+    @discord.ui.button(label="Mark Listed (Other)", style=discord.ButtonStyle.green, emoji="🏷️")
+    async def mark_listed_other(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
         await cog.move_to_listed(interaction, self.item_id)
 
@@ -368,7 +508,8 @@ class ItemFlow(commands.Cog):
 
     # ------------------------------------------------------------ movement --
 
-    async def move_to_awaiting_listing(self, interaction: discord.Interaction, item_id: int):
+    async def prompt_ebay_condition(self, interaction: discord.Interaction, item_id: int):
+        """Step 1 of Approve: role/status checks, then the condition select."""
         if not await self._require_role(interaction, config.ROLE_QUEUE_REVIEW):
             return
         item = db.get_item(item_id)
@@ -378,16 +519,171 @@ class ItemFlow(commands.Cog):
                 f"Someone likely clicked at the same time as you.", ephemeral=True
             )
             return
+        await interaction.response.send_message(
+            "Select this item's eBay condition to continue approving - you'll enter "
+            "title/category/price/specifics next.",
+            view=EbayConditionSelectView(item_id),
+            ephemeral=True,
+        )
+
+    async def finalize_ebay_approval(self, interaction: discord.Interaction, item_id: int, condition_id: str,
+                                      title: str, category_id: str, price: float, specifics: dict):
+        """Step 2 of Approve, called from EbayListingModal.on_submit: saves the
+        eBay data and actually moves the item to Awaiting Listing."""
+        item = db.get_item(item_id)
+        if item["status"] != db.STATUS_QUEUE_REVIEW:
+            await interaction.response.send_message(
+                f"This item was already moved on (current status: {item['status']}). "
+                f"Someone likely clicked at the same time as you.", ephemeral=True
+            )
+            return
+
+        db.save_ebay_listing_data(
+            item_id, ebay_title=title, category_id=category_id, condition_id=condition_id,
+            price=price, item_specifics=specifics, actor_id=interaction.user.id,
+        )
+
         pallet_id = item["pallet_id"]
         channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "awaiting-listing"))
         view = AwaitingListingView(item_id)
         msg = await send_item_card(channel, item, view=view)
         db.update_status(item_id, db.STATUS_AWAITING_LISTING, actor_id=interaction.user.id, new_message_id=msg.id)
-        await interaction.message.delete()
+
+        # The modal's interaction isn't attached to the original queue-review
+        # card message (unlike a direct button click), so that card has to be
+        # fetched and removed explicitly instead of via interaction.message.
+        old_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "queue-review"))
+        if old_channel and item.get("current_message_id"):
+            try:
+                old_msg = await old_channel.fetch_message(item["current_message_id"])
+                await old_msg.delete()
+            except (discord.NotFound, discord.HTTPException):
+                pass
+
+        condition_label = config.EBAY_CONDITION_LABELS.get(condition_id, condition_id)
         await interaction.response.send_message(
-            f"Approved. Moved to <#{channel.id}> for listing.", ephemeral=True
+            f"Approved. eBay listing data saved (condition: **{condition_label}**, "
+            f"${price:.2f}). Moved to <#{channel.id}> for listing.",
+            ephemeral=True,
         )
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
+
+    async def add_to_ebay_batch(self, interaction: discord.Interaction, item_id: int):
+        """'Add to eBay Batch' - the CSV fallback path. Never calls any eBay
+        API; just appends a row and moves the item to pending-ebay-upload
+        until an admin confirms via /ebay confirm-listed that eBay actually
+        processed the uploaded CSV."""
+        if not await self._require_role(interaction, config.ROLE_LISTING_MGMT):
+            return
+        item = db.get_item(item_id)
+        if item["status"] != db.STATUS_AWAITING_LISTING:
+            await interaction.response.send_message(
+                f"This item was already moved on (current status: {item['status']}).", ephemeral=True
+            )
+            return
+        listing = db.get_ebay_listing_data(item_id)
+        if not listing:
+            await interaction.response.send_message(
+                "No eBay listing data was captured for this item during Queue Review "
+                "(it may predate this feature). Use **Mark Listed (Other)** instead, or "
+                "have Queue Review re-approve it with the eBay details filled in.",
+                ephemeral=True,
+            )
+            return
+
+        ebay_csv.append_item_to_batch(item, listing)
+
+        pallet_id = item["pallet_id"]
+        channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "pending-ebay-upload"))
+        msg = await send_item_card(
+            channel, item,
+            extra_text="🛒 Added to the eBay CSV batch - waiting for someone to run "
+                       "/ebay export-batch, upload it in Seller Hub, then confirm with "
+                       "/ebay confirm-listed.",
+        )
+        db.update_status(item_id, db.STATUS_PENDING_EBAY_UPLOAD, actor_id=interaction.user.id, new_message_id=msg.id)
+        await interaction.message.delete()
+        await interaction.response.send_message(
+            f"Added to the eBay batch CSV. Moved to <#{channel.id}> pending upload confirmation.",
+            ephemeral=True,
+        )
+        await finance_utils.refresh_finance_message(self.bot, pallet_id)
+
+    async def list_on_ebay_api(self, interaction: discord.Interaction, item_id: int):
+        """'List on eBay (API)' - the direct-API path, only reachable at all
+        once config.EBAY_ENABLED is True (the button is removed from the view
+        otherwise). See ebay_api.py - it's currently a stub pending eBay
+        developer API approval."""
+        if not config.EBAY_ENABLED:
+            await interaction.response.send_message("Direct eBay API listing isn't enabled.", ephemeral=True)
+            return
+        if not await self._require_role(interaction, config.ROLE_LISTING_MGMT):
+            return
+        item = db.get_item(item_id)
+        if item["status"] != db.STATUS_AWAITING_LISTING:
+            await interaction.response.send_message(
+                f"This item was already moved on (current status: {item['status']}).", ephemeral=True
+            )
+            return
+        listing = db.get_ebay_listing_data(item_id)
+        if not listing:
+            await interaction.response.send_message(
+                "No eBay listing data was captured for this item during Queue Review.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            result = await ebay_api.create_listing(item, listing)
+        except NotImplementedError as e:
+            await interaction.followup.send(f"⚠️ {e}", ephemeral=True)
+            return
+        except Exception as e:
+            await interaction.followup.send(f"eBay API listing failed: {e}", ephemeral=True)
+            return
+
+        pallet_id = item["pallet_id"]
+        channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
+        view = ListedView(item_id)
+        msg = await send_item_card(
+            channel, item, view=view,
+            extra_text=f"✅ Listed live on eBay (item ID: {result.get('ebay_item_id', '?')}).",
+        )
+        db.update_status(item_id, db.STATUS_LISTED, actor_id=interaction.user.id, new_message_id=msg.id)
+        try:
+            await interaction.message.delete()
+        except discord.HTTPException:
+            pass
+        await interaction.followup.send(f"Listed live on eBay. See <#{channel.id}>.", ephemeral=True)
+        await finance_utils.refresh_finance_message(self.bot, pallet_id)
+
+    async def confirm_ebay_pending_item(self, item: dict, actor_id: int) -> bool:
+        """
+        Used by /ebay confirm-listed (cogs/ebay.py) once someone has checked
+        that an item from the CSV batch actually went live on eBay - there's
+        no live API to detect this automatically. Moves it from
+        pending_ebay_upload straight to Listed. Returns False (does nothing)
+        if the item isn't actually pending anymore.
+        """
+        if item["status"] != db.STATUS_PENDING_EBAY_UPLOAD:
+            return False
+
+        pallet_id = item["pallet_id"]
+        old_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "pending-ebay-upload"))
+        if old_channel and item.get("current_message_id"):
+            try:
+                old_msg = await old_channel.fetch_message(item["current_message_id"])
+                await old_msg.delete()
+            except (discord.NotFound, discord.HTTPException):
+                pass
+
+        listed_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
+        view = ListedView(item["id"])
+        msg = await send_item_card(
+            listed_channel, item, view=view, extra_text="✅ Confirmed live on eBay from batch upload.",
+        )
+        db.update_status(item["id"], db.STATUS_LISTED, actor_id=actor_id, new_message_id=msg.id)
+        return True
 
     async def reject_to_data_entry(self, interaction: discord.Interaction, item_id: int):
         if not await self._require_role(interaction, config.ROLE_QUEUE_REVIEW):

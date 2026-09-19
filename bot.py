@@ -27,6 +27,7 @@ COGS = [
     "cogs.item_flow",
     "cogs.admin_tools",
     "cogs.finance",
+    "cogs.ebay",
 ]
 
 
