@@ -9,8 +9,8 @@ live, auto-updating cost/profit card per pallet:
         ↓
 [ SHARED across every pallet ]
 #automated-review (AI) → #queue-review → #awaiting-listing → #listed → #sold
-                                                                  ↓
-                                                          #10-day-alerts
+                                                    ↓               ↑      ↓
+                                          #pending-ebay-upload ------      #10-day-alerts
 ```
 
 Only **#pallet-discussion** and **#data-entry** are created per pallet.
@@ -32,9 +32,24 @@ Every item's card always shows which pallet it belongs to.
   This step is optional - see "Running without AI review" below.
 - In **Queue Review** (shared), the Queue Review role approves, edits, or
   rejects (sends back to that item's own pallet's Data Entry channel).
-- **Awaiting Listing** (shared) is where Listing Management manually creates
-  the real Vendoo/eBay/FB/website listing (see the Vendoo API limitation
-  below), then clicks "Mark as Listed."
+  Approving opens a condition dropdown followed by a modal to capture
+  everything needed to list the item on eBay later - title, category ID,
+  price, and freeform item specifics (brand/size/color/etc). Only
+  title/category/condition/price are required; the rest can be filled in
+  later. Description and photos are reused as-is from Data Entry.
+- **Awaiting Listing** (shared) is where Listing Management actually lists
+  the item, via whichever of three buttons fits:
+  - **Add to eBay Batch** - appends the item (using the eBay data captured
+    above) as a row to a local CSV matching eBay's Seller Hub bulk-upload /
+    File Exchange template, no API call. Moves the item to
+    **#pending-ebay-upload** until an admin runs `/ebay export-batch` to
+    grab the file, upload it in Seller Hub, and (once eBay actually shows it
+    live) `/ebay confirm-listed` to move it into #listed.
+  - **List on eBay (API)** - the direct eBay API path. Only shows up once
+    `EBAY_ENABLED` is true (see "Running without the eBay API" below);
+    currently a stub pending eBay developer API approval.
+  - **Mark Listed (Other)** - unchanged manual path for FB Marketplace,
+    website, or anywhere else - moves straight to #listed.
 - **Listed** (shared) items get a "Mark as Sold" button - a single click,
   no form, no price prompt. Operational speed was the whole point of
   removing price entry from this button.
@@ -69,12 +84,18 @@ logged, an item moves stage, a price is set or corrected, or the received
 count is overridden. You never have to run a command to see current status;
 just look at the pinned message.
 
-## Important limitation: no Vendoo API
+## Important limitation: no Vendoo API, and eBay has two paths
 
 Vendoo does not offer a public developer API, so this bot **cannot** push a
-listing into Vendoo automatically. "Awaiting Listing" exists specifically so
-a human can take the AI-approved title/description/photos and manually
-create the real listing, then click the button to confirm it's done.
+listing into Vendoo automatically - use **Mark Listed (Other)** for those
+(and FB Marketplace, website, or anywhere else) after listing manually.
+
+eBay is different: this bot ships with a CSV batch fallback (**Add to eBay
+Batch**, matching eBay's Seller Hub bulk-upload / File Exchange template)
+that works today with no API access at all, plus a direct-API path (**List
+on eBay (API)**) that's wired in but stubbed out (see `ebay_api.py`) until
+the eBay developer API application is approved - see "Running without the
+eBay API" below.
 
 ---
 
@@ -162,6 +183,16 @@ as-is (Automated Review still gets a short "passed through" message for a
 visible record). To turn it on later: add the key to `.env` and restart -
 no code changes needed.
 
+### Running without the eBay API
+
+Leave `EBAY_APP_ID`, `EBAY_CERT_ID`, `EBAY_DEV_ID`, and `EBAY_USER_TOKEN`
+blank in `.env` (the default). **List on eBay (API)** simply won't appear on
+Awaiting Listing cards - use **Add to eBay Batch** instead, which needs no
+API access at all. Once eBay's developer API application is approved and all
+four values are set, restart the bot and the API button reappears - though
+`ebay_api.py` itself still needs a real integration written before it does
+anything.
+
 ### Running it 24/7 on your friend's server
 
 ```ini
@@ -210,19 +241,33 @@ UI after a restart (a Discord client caching quirk, not a bug here).
    automatically updates - "Items Received" ticks up.
 5. Within a few seconds it reappears in the shared `#queue-review`, labeled
    with its pallet, with an AI-suggested title/description and any flags.
-6. **Queue Review** clicks **Approve**, **Edit**, or **Reject / Send Back**
-   (returns to that pallet's own Data Entry).
+6. **Queue Review** clicks **Edit** or **Reject / Send Back** (returns to
+   that pallet's own Data Entry), or **Approve** - which first asks for the
+   eBay condition (dropdown), then opens a form for eBay title, category ID,
+   price, and item specifics (title/category/condition/price are required;
+   specifics can be left blank).
 7. Approved items land in the shared `#awaiting-listing`. **Listing
-   Management** creates the real listing, then clicks **Mark as Listed**.
-8. It moves to the shared `#listed` with a **Mark as Sold** button - one
+   Management** picks one of three buttons:
+   - **Add to eBay Batch** - appends the item to the local eBay CSV batch, no
+     API call. Moves it to `#pending-ebay-upload` to wait for someone to
+     actually upload that CSV.
+   - **List on eBay (API)** - only shown if the eBay developer API is
+     configured and enabled (see "Running without the eBay API" above).
+   - **Mark Listed (Other)** - for FB Marketplace, website, or anywhere else
+     listed manually.
+8. Items added to the eBay batch: a Pallet Admin runs `/ebay export-batch`
+   whenever ready, uploads the attached CSV in eBay Seller Hub, then once
+   eBay actually shows those listings live, runs `/ebay confirm-listed` to
+   move them from `#pending-ebay-upload` into `#listed`.
+9. However it got there, `#listed` items get a **Mark as Sold** button - one
    click, no price prompt.
-9. **Finance Management** runs `/finance record-sale` (in that pallet's
-   category, any time - immediately or days later) to log the actual price.
-   The pinned card updates: revenue, profit/loss, and cost-recovery bar.
-10. Once shipped, click **Mark as Shipped** in `#sold`.
-11. If anything sits in `#listed` for 10+ days, `#10-day-alerts` pings,
+10. **Finance Management** runs `/finance record-sale` (in that pallet's
+    category, any time - immediately or days later) to log the actual price.
+    The pinned card updates: revenue, profit/loss, and cost-recovery bar.
+11. Once shipped, click **Mark as Shipped** in `#sold`.
+12. If anything sits in `#listed` for 10+ days, `#10-day-alerts` pings,
     naming the pallet.
-12. Anytime, check the pinned message at the top of a pallet's
+13. Anytime, check the pinned message at the top of a pallet's
     `#pallet-discussion` for full current status, or run `/finance summary`
     for a fresh non-pinned copy.
 
@@ -249,6 +294,14 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   messages older than 14 days), and drops/recreates every database table.
   The shared pipeline channels themselves are NOT deleted, since they're
   reusable infrastructure - only their message history is cleared.
+- `/ebay export-batch` - downloads the accumulated eBay CSV batch as a
+  Discord attachment, then archives and clears it so the next **Add to eBay
+  Batch** click starts a fresh file.
+- `/ebay confirm-listed [item_number]` - run inside a pallet's category.
+  Confirms that item (or, with no `item_number`, every item in that pallet
+  still waiting) actually went live on eBay after a CSV batch upload, moving
+  it from `#pending-ebay-upload` to `#listed`. There's no live API to detect
+  this automatically, so it's a manual confirmation after checking Seller Hub.
 
 ---
 
@@ -267,14 +320,21 @@ Tables:
   pipeline channels, set once by `/setup-shared-channels`
 - **items** - one row per physical item: status, AI-generated text, sale
   price/platform, and every relevant timestamp
+- **ebay_listing_data** - one row per item, captured during Queue Review
+  approval: eBay title, category ID, condition, price, and item specifics
+  (stored as JSON, since which attributes apply varies by category)
 - **item_events** - an append-only audit log of every status change and
   price recording, including deletions
 
+The eBay CSV batch itself is **not** in the database - it's a plain CSV file
+at `data/ebay_batch.csv` (see `ebay_csv.py`), archived to
+`data/ebay_batch_archive/` on each `/ebay export-batch`.
+
 ### Backing this up
 Since this is the only copy of your item/financial history, set up a
-periodic backup of the `data/` folder (database + all saved item photos) -
-a daily `cron` job copying it elsewhere, or syncing to cloud storage, is
-enough at this scale.
+periodic backup of the `data/` folder (database, all saved item photos, and
+the eBay batch CSV + its archive) - a daily `cron` job copying it elsewhere,
+or syncing to cloud storage, is enough at this scale.
 
 ---
 
@@ -294,4 +354,13 @@ enough at this scale.
 - **`/setup-shared-channels` is a one-time setup step.** If you ever need to
   move or recreate the shared channels, you'd need to update the
   `shared_channels` table manually (there's no command for this yet, since
-  it should rarely be needed).
+  it should rarely be needed). If you're adding this after already running
+  the bot, run it again to create just the new `#pending-ebay-upload`
+  channel - it skips any channel that already exists.
+- **The eBay CSV batch doesn't include photo URLs.** Photos are saved to
+  local disk by Data Entry, not to a public URL eBay's bulk upload can
+  fetch, so `PicURL` is left blank in the exported CSV - attach photos in
+  Seller Hub yourself, or fill `PicURL` in before uploading.
+- **`/ebay confirm-listed` is a manual step.** There's no live eBay API to
+  automatically detect that an uploaded CSV batch was actually processed, so
+  someone has to check Seller Hub and confirm it by hand.

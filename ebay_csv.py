@@ -1,0 +1,130 @@
+"""
+CSV fallback for getting items onto eBay without a live API integration -
+this is what "Add to eBay Batch" (cogs/item_flow.py's AwaitingListingView)
+writes to, and what /ebay export-batch (cogs/ebay.py) hands over.
+
+Columns follow eBay's classic File Exchange "Add" template for a single
+fixed-price listing (Action/CustomLabel/Category/Title/ConditionID/.../
+Quantity), with item specifics appended as dynamic "C:<Name>" columns -
+eBay's own File Exchange convention for per-listing item specifics, since
+which attributes apply (brand, size, color, ...) varies by category and
+can't be fixed columns.
+
+PicURL is deliberately left blank: photos are saved to local disk by Data
+Entry (see item_flow.photo_dir_for), not to a public URL eBay's bulk upload
+can fetch, so whoever processes the batch still needs to attach photos in
+Seller Hub (or fill PicURL in by hand) before uploading.
+
+This lives outside any single cog, same as finance_utils.py, because both
+item_flow.py (writes rows) and ebay.py (exports/archives the file) need the
+same logic.
+"""
+import csv
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+
+import config
+
+BATCH_CSV_PATH = Path(config.EBAY_BATCH_CSV_PATH)
+ARCHIVE_DIR = Path(config.EBAY_BATCH_ARCHIVE_DIR)
+
+# Fixed columns every row has, in eBay File Exchange's expected order. The
+# "Add" action line + these fields are enough for a basic fixed-price
+# listing; anyone uploading the batch can extend it with more of eBay's
+# optional columns (shipping profile, store category, etc.) before uploading.
+BASE_FIELDS = [
+    "Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)",
+    "CustomLabel",
+    "*Category",
+    "*Title",
+    "*ConditionID",
+    "PicURL",
+    "*Description",
+    "*Format",
+    "*Duration",
+    "*StartPrice",
+    "*Quantity",
+]
+
+
+def _custom_label(item: dict) -> str:
+    """
+    A stable, human-traceable SKU for this item - also used as the key for
+    "is this item already a row in the current batch" so re-adding an item
+    (e.g. after Queue Review data was corrected) replaces its row instead of
+    duplicating it.
+    """
+    return f"pallet-{item['pallet_id']}-item-{item['item_number']}"
+
+
+def _read_existing_rows() -> tuple[list, list]:
+    if not BATCH_CSV_PATH.exists():
+        return list(BASE_FIELDS), []
+    with BATCH_CSV_PATH.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or BASE_FIELDS)
+        rows = list(reader)
+    return fieldnames, rows
+
+
+def append_item_to_batch(item: dict, listing: dict) -> None:
+    """
+    Appends one row for `item` (an items table dict) using `listing` (an
+    ebay_listing_data dict from database.get_ebay_listing_data) to the batch
+    CSV. Grows the header with new C:<Specific> columns as needed so every
+    row written so far still lines up under the same columns.
+    """
+    fieldnames, rows = _read_existing_rows()
+
+    specifics = listing.get("item_specifics") or {}
+    for key in specifics:
+        field = f"C:{key}"
+        if field not in fieldnames:
+            fieldnames.append(field)
+
+    custom_label = _custom_label(item)
+    row = {field: "" for field in fieldnames}
+    row.update({
+        "Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)": "Add",
+        "CustomLabel": custom_label,
+        "*Category": listing["category_id"],
+        "*Title": listing["ebay_title"],
+        "*ConditionID": listing["condition_id"],
+        "PicURL": "",
+        "*Description": item.get("ai_description") or item.get("raw_description") or "",
+        "*Format": "FixedPrice",
+        "*Duration": "GTC",
+        "*StartPrice": f"{listing['price']:.2f}",
+        "*Quantity": "1",
+    })
+    for key, value in specifics.items():
+        row[f"C:{key}"] = value
+
+    rows = [r for r in rows if r.get("CustomLabel") != custom_label]
+    rows.append(row)
+
+    BATCH_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with BATCH_CSV_PATH.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({field: r.get(field, "") for field in fieldnames})
+
+
+def export_and_archive() -> Path | None:
+    """
+    Returns a Path to a copy of the current batch CSV (for attaching to
+    Discord), then archives it under ARCHIVE_DIR with a timestamped name and
+    clears the live file so the next "Add to eBay Batch" click starts a
+    fresh batch. Returns None if the batch is currently empty.
+    """
+    if not BATCH_CSV_PATH.exists() or BATCH_CSV_PATH.stat().st_size == 0:
+        return None
+
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    archived_path = ARCHIVE_DIR / f"ebay_batch_{timestamp}.csv"
+    shutil.copyfile(BATCH_CSV_PATH, archived_path)
+    BATCH_CSV_PATH.unlink()
+    return archived_path
