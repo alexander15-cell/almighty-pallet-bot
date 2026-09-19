@@ -19,12 +19,16 @@ which pallet an item belongs to.
 Photos are saved to local disk the moment they're submitted, so every
 later repost (to automated-review, queue-review, etc.) re-uploads from
 disk rather than depending on Discord's CDN links surviving after the
-originating message is deleted.
+originating message is deleted. If config.R2_ENABLED, each photo is also
+uploaded to Cloudflare R2 for a durable public URL (see r2_storage.py) -
+used by the eBay CSV batch export, which can't rely on Discord's links
+either.
 
 Any change that affects the numbers on a pallet's live finance/status card
 (item received, item moved stage) triggers finance_utils.refresh_finance_message
 so that card never goes stale.
 """
+import asyncio
 import json
 from pathlib import Path
 
@@ -37,6 +41,7 @@ import ai_review
 import ebay_api
 import ebay_csv
 import finance_utils
+import r2_storage
 
 PHOTO_DIR = Path("data/photos")
 
@@ -121,8 +126,10 @@ class EbayConditionSelectView(discord.ui.View):
     """
     First step of Approve: a plain button click can't collect a dropdown
     value (Discord modals only support text inputs, not selects), so
-    Approve shows this ephemeral select first - picking a condition opens
-    EbayListingModal for the rest of the eBay fields.
+    Approve shows this ephemeral select first. EBAY_DEFAULT_CONDITION_ID
+    comes pre-highlighted since most liquidation items land there, but any
+    other option is still one click away. Picking a condition moves to the
+    category select (step 2).
     """
 
     def __init__(self, item_id: int):
@@ -131,7 +138,10 @@ class EbayConditionSelectView(discord.ui.View):
         self.select = discord.ui.Select(
             placeholder="Select this item's eBay condition...",
             options=[
-                discord.SelectOption(label=label, value=condition_id)
+                discord.SelectOption(
+                    label=label, value=condition_id,
+                    default=(condition_id == config.EBAY_DEFAULT_CONDITION_ID),
+                )
                 for condition_id, label in config.EBAY_CONDITIONS
             ],
         )
@@ -140,22 +150,75 @@ class EbayConditionSelectView(discord.ui.View):
 
     async def _on_select(self, interaction: discord.Interaction):
         condition_id = self.select.values[0]
-        await interaction.response.send_modal(EbayListingModal(self.item_id, condition_id))
+        await interaction.response.edit_message(
+            content="Now select this item's eBay category...",
+            view=EbayCategorySelectView(self.item_id, condition_id),
+        )
+
+
+class EbayCategorySelectView(discord.ui.View):
+    """
+    Second step of Approve: a category select menu built from
+    config.EBAY_CATEGORIES, sorted by how often each has actually been
+    picked (database.get_ebay_category_counts) - most-used first, unused/new
+    categories alphabetically after. Discord select menus cap out at 25
+    options; if EBAY_CATEGORIES ever grows past that, only the 25 most-used
+    show here (logged to console) until pagination gets added. Picking a
+    category opens EbayListingModal for the remaining fields.
+    """
+
+    MAX_OPTIONS = 25
+
+    def __init__(self, item_id: int, condition_id: str):
+        super().__init__(timeout=300)
+        self.item_id = item_id
+        self.condition_id = condition_id
+
+        counts = db.get_ebay_category_counts()
+        ranked = sorted(
+            config.EBAY_CATEGORIES.items(),
+            key=lambda name_and_id: (-counts.get(name_and_id[1], 0), name_and_id[0].lower()),
+        )
+        truncated = len(ranked) > self.MAX_OPTIONS
+        if truncated:
+            print(
+                f"[item_flow] config.EBAY_CATEGORIES has {len(config.EBAY_CATEGORIES)} entries, "
+                f"over Discord's {self.MAX_OPTIONS}-option select limit - only the "
+                f"{self.MAX_OPTIONS} most-used are shown. Needs pagination."
+            )
+            ranked = ranked[:self.MAX_OPTIONS]
+
+        self.select = discord.ui.Select(
+            placeholder="Select this item's eBay category..." + (" (list truncated)" if truncated else ""),
+            options=[
+                discord.SelectOption(label=name[:100], value=category_id)
+                for name, category_id in ranked
+            ],
+        )
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        category_id = self.select.values[0]
+        await interaction.response.send_modal(
+            EbayListingModal(self.item_id, self.condition_id, category_id)
+        )
 
 
 class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
     """
-    Second step of Approve. Title/category/price are required (minimum
-    needed to eventually list on eBay either way); item specifics are
-    freeform "Key: Value" lines, one per attribute, and can be left blank.
-    Description and photos are reused as-is from Data Entry - not re-entered
-    here.
+    Third step of Approve. Title/price are required (condition and category
+    were already picked in steps 1-2, and are required too since they're
+    selects, not optional text fields); item specifics are freeform
+    "Key: Value" lines, one per attribute, and can be left blank. Description
+    and photos are reused as-is from Data Entry - not re-entered here.
     """
 
-    def __init__(self, item_id: int, condition_id: str):
+    def __init__(self, item_id: int, condition_id: str, category_id: str):
         super().__init__()
         self.item_id = item_id
         self.condition_id = condition_id
+        self.category_id = category_id
         item = db.get_item(item_id)
         existing = db.get_ebay_listing_data(item_id)
 
@@ -167,11 +230,6 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
             label="eBay Title (max 80 chars)",
             default=(existing["ebay_title"] if existing else (item.get("ai_title") or "")[:80]),
             max_length=80,
-        )
-        self.category_id = discord.ui.TextInput(
-            label="eBay Category ID",
-            default=(existing["category_id"] if existing else ""),
-            max_length=20,
         )
         self.price = discord.ui.TextInput(
             label="Price (USD)",
@@ -186,20 +244,16 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
             max_length=1000,
         )
         self.add_item(self.ebay_title)
-        self.add_item(self.category_id)
         self.add_item(self.price)
         self.add_item(self.item_specifics)
 
     async def on_submit(self, interaction: discord.Interaction):
         title = self.ebay_title.value.strip()
-        category_id = self.category_id.value.strip()
         price_raw = self.price.value.strip()
 
         errors = []
         if not title:
             errors.append("Title is required.")
-        if not category_id:
-            errors.append("Category ID is required.")
         price = None
         try:
             price = float(price_raw)
@@ -227,7 +281,7 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
 
         cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
         await cog.finalize_ebay_approval(
-            interaction, self.item_id, self.condition_id, title, category_id, price, specifics,
+            interaction, self.item_id, self.condition_id, self.category_id, title, price, specifics,
         )
 
 
@@ -426,6 +480,27 @@ class ItemFlow(commands.Cog):
             with db.get_conn() as conn:
                 conn.execute("UPDATE items SET photo_urls = ? WHERE id = ?", (json.dumps(saved_paths), item_id))
 
+        # Local copy above is what Discord item cards render from (send_item_card
+        # reads local files). This adds a second, durable copy in R2 so anything
+        # that needs to stay valid long-term (the eBay CSV's PicURL, future item
+        # records) doesn't depend on Discord's attachment links, which expire
+        # once the originating message is gone. Best-effort: one failed upload
+        # doesn't block Data Entry, it just leaves that photo's URL empty.
+        # boto3 is synchronous, so each upload runs in a thread rather than
+        # blocking the bot's event loop (and every other server it's in) for
+        # however long the network call takes.
+        if config.R2_ENABLED:
+            public_urls = []
+            for local_path in saved_paths:
+                object_key = f"items/{item_id}/{Path(local_path).name}"
+                try:
+                    url = await asyncio.to_thread(r2_storage.upload_photo, local_path, object_key)
+                    public_urls.append(url)
+                except Exception as e:
+                    print(f"[item_flow] R2 upload failed for item {item_id} ({local_path}): {e}")
+                    public_urls.append(None)
+            db.update_photo_public_urls(item_id, public_urls)
+
         try:
             await message.delete()
         except discord.HTTPException:
@@ -527,8 +602,8 @@ class ItemFlow(commands.Cog):
         )
 
     async def finalize_ebay_approval(self, interaction: discord.Interaction, item_id: int, condition_id: str,
-                                      title: str, category_id: str, price: float, specifics: dict):
-        """Step 2 of Approve, called from EbayListingModal.on_submit: saves the
+                                      category_id: str, title: str, price: float, specifics: dict):
+        """Step 3 of Approve, called from EbayListingModal.on_submit: saves the
         eBay data and actually moves the item to Awaiting Listing."""
         item = db.get_item(item_id)
         if item["status"] != db.STATUS_QUEUE_REVIEW:
@@ -542,6 +617,7 @@ class ItemFlow(commands.Cog):
             item_id, ebay_title=title, category_id=category_id, condition_id=condition_id,
             price=price, item_specifics=specifics, actor_id=interaction.user.id,
         )
+        db.record_ebay_category_use(category_id)
 
         pallet_id = item["pallet_id"]
         channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "awaiting-listing"))

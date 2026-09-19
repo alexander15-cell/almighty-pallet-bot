@@ -173,20 +173,32 @@ EBAY_USER_TOKEN = os.getenv("EBAY_USER_TOKEN")
 EBAY_ENABLED = bool(EBAY_APP_ID and EBAY_CERT_ID and EBAY_DEV_ID and EBAY_USER_TOKEN)
 
 # eBay's Condition ID values (https://developer.ebay.com - ConditionEnum),
-# restricted to the ones that actually apply to liquidation-pallet resale.
-# Shown as a Discord select menu when approving an item in Queue Review.
+# narrowed to the ones that actually come up in liquidation/overstock resale.
+# Shown as a Discord select menu when approving an item in Queue Review, with
+# EBAY_DEFAULT_CONDITION_ID pre-highlighted since most items land there.
 EBAY_CONDITIONS = [
     ("1000", "New"),
     ("1500", "New other (see details)"),
-    ("2000", "Certified Refurbished"),
-    ("2500", "Seller Refurbished"),
+    ("1750", "New with defects"),
     ("3000", "Used"),
-    ("4000", "Very Good"),
-    ("5000", "Good"),
-    ("6000", "Acceptable"),
     ("7000", "For parts or not working"),
 ]
 EBAY_CONDITION_LABELS = dict(EBAY_CONDITIONS)
+EBAY_DEFAULT_CONDITION_ID = "1500"  # "New other (see details)" - most liquidation items land here
+
+# ---- eBay category picker ----
+# name -> eBay leaf category ID. Fill this in with your real categories -
+# these two are just placeholders so the select menu has something to show.
+# Shown as a Discord select menu when approving an item in Queue Review,
+# sorted by how often each has actually been picked (see
+# database.get_ebay_category_counts) so your most-used categories stay on
+# top. Discord select menus cap out at 25 options - if this grows past that,
+# say so and we'll add pagination (for now, only the 25 most-used show, with
+# a console warning so it doesn't fail silently).
+EBAY_CATEGORIES = {
+    "Example Category A": "11450",
+    "Example Category B": "58058",
+}
 
 # ---- eBay CSV batch (Seller Hub bulk upload / File Exchange fallback) ----
 # Accumulates one row per item added via "Add to eBay Batch" until an admin
@@ -194,6 +206,25 @@ EBAY_CONDITION_LABELS = dict(EBAY_CONDITIONS)
 # archives + clears it so the next batch starts clean.
 EBAY_BATCH_CSV_PATH = os.getenv("EBAY_BATCH_CSV_PATH", "data/ebay_batch.csv")
 EBAY_BATCH_ARCHIVE_DIR = os.getenv("EBAY_BATCH_ARCHIVE_DIR", "data/ebay_batch_archive")
+
+# ---- Cloudflare R2 image hosting (optional, see r2_storage.py) ----
+# Gives each Data Entry photo a durable public URL for the eBay CSV batch's
+# PicURL column and anything else that needs to stay valid long-term -
+# Discord's own attachment links expire once the originating message is
+# deleted, which happens routinely as items move through the pipeline.
+R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID")
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY")
+R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME")
+R2_PUBLIC_URL_BASE = os.getenv("R2_PUBLIC_URL_BASE")  # e.g. https://pub-xxxx.r2.dev - no trailing slash
+
+# Whether photo uploads to R2 are active. False (the normal case until all
+# five values above are set) - Data Entry still saves the local copy either
+# way (that's what Discord item cards render from), it just skips the R2
+# upload/public-URL step, and the eBay CSV's PicURL column stays blank.
+R2_ENABLED = bool(
+    R2_ACCOUNT_ID and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY and R2_BUCKET_NAME and R2_PUBLIC_URL_BASE
+)
 
 # ---- Database wipe confirmation phrase ----
 # The exact text an admin must type to confirm a full database wipe.

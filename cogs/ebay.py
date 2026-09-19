@@ -58,10 +58,15 @@ class Ebay(commands.Cog):
 
         pending_channel_id = db.get_shared_channel_id("pending-ebay-upload")
         pending_channel_mention = f"<#{pending_channel_id}>" if pending_channel_id else "#pending-ebay-upload"
+        pic_url_note = (
+            "PicURL is filled in from R2-hosted photo URLs where available."
+            if config.R2_ENABLED else
+            "PicURL is blank (R2 photo hosting isn't configured), so add photos in Seller Hub "
+            "or fill PicURL in yourself before uploading."
+        )
         await interaction.response.send_message(
             "📄 eBay batch CSV attached. Upload it in Seller Hub's bulk upload / File Exchange "
-            "tool - PicURL is blank since photos are only saved locally, so add photos in Seller "
-            "Hub or fill PicURL in yourself before uploading. The batch has been cleared - the "
+            f"tool - {pic_url_note} The batch has been cleared - the "
             "next **Add to eBay Batch** click starts a new one. Once eBay actually shows these "
             f"listings live, run `/ebay confirm-listed` to move them out of {pending_channel_mention}.",
             file=discord.File(path, filename=path.name),

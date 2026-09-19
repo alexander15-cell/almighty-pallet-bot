@@ -80,6 +80,7 @@ def _migrate_add_columns(conn):
         "ALTER TABLE pallets ADD COLUMN finance_message_id INTEGER",
         "ALTER TABLE items ADD COLUMN sale_price REAL",
         "ALTER TABLE items ADD COLUMN sale_platform TEXT",
+        "ALTER TABLE items ADD COLUMN photo_public_urls TEXT",
     ]
     for stmt in migrations:
         try:
@@ -132,6 +133,7 @@ def init_db():
                 status              TEXT NOT NULL,
                 raw_description     TEXT,
                 photo_urls          TEXT,              -- JSON list of local file paths
+                photo_public_urls   TEXT,              -- JSON list of durable R2 public URLs (same order as photo_urls, see r2_storage.py)
                 ai_title            TEXT,
                 ai_description      TEXT,
                 ai_flags            TEXT,
@@ -173,6 +175,15 @@ def init_db():
                 set_by          INTEGER,
                 created_at      TEXT NOT NULL,
                 updated_at      TEXT NOT NULL
+            );
+
+            -- One row per eBay category ID that's ever been picked during
+            -- Queue Review approval. Lets the category select menu in
+            -- item_flow.py sort config.EBAY_CATEGORIES by actual usage
+            -- (most-picked first) instead of a fixed order.
+            CREATE TABLE IF NOT EXISTS ebay_category_usage (
+                category_id     TEXT PRIMARY KEY,
+                use_count       INTEGER NOT NULL DEFAULT 0
             );
             """
         )
@@ -471,6 +482,38 @@ def get_ebay_listing_data(item_id: int):
         return data
 
 
+def record_ebay_category_use(category_id: str):
+    """Bumps this category's pick count - called once per successful Queue
+    Review approval, so the category select menu can sort by actual usage."""
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO ebay_category_usage (category_id, use_count) VALUES (?, 1)
+               ON CONFLICT(category_id) DO UPDATE SET use_count = use_count + 1""",
+            (category_id,),
+        )
+
+
+def get_ebay_category_counts() -> dict:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT category_id, use_count FROM ebay_category_usage").fetchall()
+        return {r["category_id"]: r["use_count"] for r in rows}
+
+
+def update_photo_public_urls(item_id: int, urls: list):
+    """
+    Stores each photo's durable R2 public URL, same order/index as
+    photo_urls (a None in place of a URL means that photo's upload failed or
+    R2 wasn't enabled at the time). Set once at Data Entry time - see
+    r2_storage.py and item_flow.on_message - and read by the eBay CSV batch
+    export for PicURL instead of relying on any local path or Discord link.
+    """
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE items SET photo_public_urls = ? WHERE id = ?",
+            (json.dumps(urls), item_id),
+        )
+
+
 def get_open_items_for_reconnect():
     """
     Every item currently sitting in a stage that has live buttons attached
@@ -654,6 +697,7 @@ def wipe_database():
             """
             DROP TABLE IF EXISTS item_events;
             DROP TABLE IF EXISTS ebay_listing_data;
+            DROP TABLE IF EXISTS ebay_category_usage;
             DROP TABLE IF EXISTS items;
             DROP TABLE IF EXISTS channel_map;
             DROP TABLE IF EXISTS pallets;

@@ -32,10 +32,14 @@ Every item's card always shows which pallet it belongs to.
   This step is optional - see "Running without AI review" below.
 - In **Queue Review** (shared), the Queue Review role approves, edits, or
   rejects (sends back to that item's own pallet's Data Entry channel).
-  Approving opens a condition dropdown followed by a modal to capture
-  everything needed to list the item on eBay later - title, category ID,
-  price, and freeform item specifics (brand/size/color/etc). Only
-  title/category/condition/price are required; the rest can be filled in
+  Approving walks through three steps to capture everything needed to list
+  the item on eBay later: a condition dropdown (`config.EBAY_CONDITIONS` -
+  New / New other / New with defects / Used / For parts, with "New other"
+  pre-selected since most liquidation items land there), a category dropdown
+  (`config.EBAY_CATEGORIES`, sorted by how often each has actually been
+  picked so your most-used categories stay on top), then a short form for
+  title, price, and freeform item specifics (brand/size/color/etc). Only
+  title/category/condition/price are required; specifics can be filled in
   later. Description and photos are reused as-is from Data Entry.
 - **Awaiting Listing** (shared) is where Listing Management actually lists
   the item, via whichever of three buttons fits:
@@ -193,6 +197,17 @@ four values are set, restart the bot and the API button reappears - though
 `ebay_api.py` itself still needs a real integration written before it does
 anything.
 
+### Running without R2
+
+Leave `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
+`R2_BUCKET_NAME`, and `R2_PUBLIC_URL_BASE` blank in `.env` (the default).
+Data Entry still saves photos locally either way - that's what Discord item
+cards render from - it just skips uploading a second copy to R2, and the
+eBay CSV batch's `PicURL` column stays blank (see the known limitation
+below). Once all five values are set, restart the bot: every photo saved
+from then on gets uploaded to R2 automatically, no other setup needed.
+Photos saved before R2 was configured are not retroactively uploaded.
+
 ### Running it 24/7 on your friend's server
 
 ```ini
@@ -242,10 +257,11 @@ UI after a restart (a Discord client caching quirk, not a bug here).
 5. Within a few seconds it reappears in the shared `#queue-review`, labeled
    with its pallet, with an AI-suggested title/description and any flags.
 6. **Queue Review** clicks **Edit** or **Reject / Send Back** (returns to
-   that pallet's own Data Entry), or **Approve** - which first asks for the
-   eBay condition (dropdown), then opens a form for eBay title, category ID,
-   price, and item specifics (title/category/condition/price are required;
-   specifics can be left blank).
+   that pallet's own Data Entry), or **Approve** - which asks for the eBay
+   condition (dropdown, defaults to "New other"), then the eBay category
+   (dropdown, your most-used categories first), then opens a form for eBay
+   title, price, and item specifics (title/category/condition/price are
+   required; specifics can be left blank).
 7. Approved items land in the shared `#awaiting-listing`. **Listing
    Management** picks one of three buttons:
    - **Add to eBay Batch** - appends the item to the local eBay CSV batch, no
@@ -319,10 +335,13 @@ Tables:
 - **shared_channels** - the one-row-per-stage mapping for the shared
   pipeline channels, set once by `/setup-shared-channels`
 - **items** - one row per physical item: status, AI-generated text, sale
-  price/platform, and every relevant timestamp
+  price/platform, local + R2 public photo URLs, and every relevant timestamp
 - **ebay_listing_data** - one row per item, captured during Queue Review
   approval: eBay title, category ID, condition, price, and item specifics
   (stored as JSON, since which attributes apply varies by category)
+- **ebay_category_usage** - one row per eBay category ID ever picked, with a
+  running count - lets the category select menu sort `config.EBAY_CATEGORIES`
+  by actual usage instead of a fixed order
 - **item_events** - an append-only audit log of every status change and
   price recording, including deletions
 
@@ -357,10 +376,10 @@ or syncing to cloud storage, is enough at this scale.
   it should rarely be needed). If you're adding this after already running
   the bot, run it again to create just the new `#pending-ebay-upload`
   channel - it skips any channel that already exists.
-- **The eBay CSV batch doesn't include photo URLs.** Photos are saved to
-  local disk by Data Entry, not to a public URL eBay's bulk upload can
-  fetch, so `PicURL` is left blank in the exported CSV - attach photos in
-  Seller Hub yourself, or fill `PicURL` in before uploading.
+- **The eBay CSV batch's photo URLs depend on R2 being configured.** Without
+  `R2_ENABLED` (see "Running without R2" above), `PicURL` is left blank in
+  the exported CSV - attach photos in Seller Hub yourself, or fill `PicURL`
+  in before uploading. With R2 configured, it's filled in automatically.
 - **`/ebay confirm-listed` is a manual step.** There's no live eBay API to
   automatically detect that an uploaded CSV batch was actually processed, so
   someone has to check Seller Hub and confirm it by hand.

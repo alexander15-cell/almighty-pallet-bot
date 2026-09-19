@@ -10,16 +10,19 @@ eBay's own File Exchange convention for per-listing item specifics, since
 which attributes apply (brand, size, color, ...) varies by category and
 can't be fixed columns.
 
-PicURL is deliberately left blank: photos are saved to local disk by Data
-Entry (see item_flow.photo_dir_for), not to a public URL eBay's bulk upload
-can fetch, so whoever processes the batch still needs to attach photos in
-Seller Hub (or fill PicURL in by hand) before uploading.
+PicURL uses the item's first Cloudflare R2 public photo URL (see
+r2_storage.py, config.R2_ENABLED) if one was uploaded at Data Entry time.
+If R2 isn't configured, PicURL is left blank - photos are only saved to
+local disk in that case, not to a public URL eBay's bulk upload can fetch,
+so whoever processes the batch still needs to attach photos in Seller Hub
+(or fill PicURL in by hand) before uploading.
 
 This lives outside any single cog, same as finance_utils.py, because both
 item_flow.py (writes rows) and ebay.py (exports/archives the file) need the
 same logic.
 """
 import csv
+import json
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,6 +86,9 @@ def append_item_to_batch(item: dict, listing: dict) -> None:
         if field not in fieldnames:
             fieldnames.append(field)
 
+    public_urls = json.loads(item.get("photo_public_urls") or "[]")
+    pic_url = next((u for u in public_urls if u), "")
+
     custom_label = _custom_label(item)
     row = {field: "" for field in fieldnames}
     row.update({
@@ -91,7 +97,7 @@ def append_item_to_batch(item: dict, listing: dict) -> None:
         "*Category": listing["category_id"],
         "*Title": listing["ebay_title"],
         "*ConditionID": listing["condition_id"],
-        "PicURL": "",
+        "PicURL": pic_url,
         "*Description": item.get("ai_description") or item.get("raw_description") or "",
         "*Format": "FixedPrice",
         "*Duration": "GTC",
