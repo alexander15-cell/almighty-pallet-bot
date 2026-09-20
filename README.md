@@ -26,10 +26,12 @@ Every item's card always shows which pallet it belongs to.
 - In **Data Entry**, the Data Entry role posts a photo + short note per item.
   The bot logs it, deletes the original message, and sends it into the
   shared Automated Review channel.
-- In **Automated Review** (shared, bot-only), Claude's vision model identifies
-  the item, drafts a title/description, and flags anything inconsistent
-  between the note and the photo. **Photos are never edited or regenerated.**
-  This step is optional - see "Running without AI review" below.
+- In **Automated Review** (shared, bot-only), a vision model identifies the
+  item, drafts a title/description, and flags anything inconsistent between
+  the note and the photo - Claude's cloud API by default, or a local Ollama
+  model (see "Running with the Ollama backend" below) if you'd rather avoid
+  per-item API cost. **Photos are never edited or regenerated.** This step
+  is optional - see "Running without AI review" below.
 - In **Queue Review** (shared), the Queue Review role approves, edits, or
   rejects (sends back to that item's own pallet's Data Entry channel).
   Approving walks through three steps to capture everything needed to list
@@ -144,11 +146,13 @@ Enable Developer Mode (User Settings → Advanced), then right-click your
 server icon → Copy Server ID. This is your `DISCORD_GUILD_ID`.
 
 ### Get an Anthropic API key (optional - can be added later)
-Only needed for AI-drafted descriptions. The bot runs fine without it -
-items skip straight from Data Entry to Queue Review with the raw note.
-Sign up at https://console.anthropic.com, create a key, add it to `.env` as
-`ANTHROPIC_API_KEY`, restart the bot. Billed separately from any Claude.ai
-subscription - pay-as-you-go based on usage.
+Only needed for AI-drafted descriptions with the default cloud backend. The
+bot runs fine without it - items skip straight from Data Entry to Queue
+Review with the raw note. Sign up at https://console.anthropic.com, create a
+key, add it to `.env` as `ANTHROPIC_API_KEY`, restart the bot. Billed
+separately from any Claude.ai subscription - pay-as-you-go based on usage.
+(There's also a local, free alternative - see "Running with the Ollama
+backend" below.)
 
 ---
 
@@ -181,11 +185,44 @@ forget.
 
 ### Running without AI review
 
-Leave `ANTHROPIC_API_KEY` blank in `.env`. Every item submitted in Data
-Entry skips the AI step and goes straight to Queue Review with the raw note
-as-is (Automated Review still gets a short "passed through" message for a
-visible record). To turn it on later: add the key to `.env` and restart -
-no code changes needed.
+Leave `ANTHROPIC_API_KEY` blank in `.env` (and leave `AI_REVIEW_BACKEND` at
+its default, `anthropic`). Every item submitted in Data Entry skips the AI
+step and goes straight to Queue Review with the raw note as-is (Automated
+Review still gets a short "passed through" message for a visible record).
+To turn it on later: add the key to `.env` and restart - no code changes
+needed.
+
+### Running with the Ollama backend
+
+An alternative to the cloud API: Automated Review can run entirely against
+a local [Ollama](https://ollama.com) server instead, with no API key and no
+per-item cost.
+
+1. Install Ollama and pull a vision-capable model (`moondream` is the
+   default - small and fast, good for a first try):
+   ```bash
+   ollama pull moondream
+   ```
+2. Make sure `ollama serve` is running (the default install usually starts
+   it automatically) - it listens on `http://localhost:11434` by default.
+3. In `.env`, set `AI_REVIEW_BACKEND=ollama`. `OLLAMA_BASE_URL` and
+   `OLLAMA_VISION_MODEL` only need setting if you're not using the defaults
+   above (a different port/host, or a different pulled model).
+4. Restart the bot.
+
+**Expect a real quality/speed trade-off.** `moondream` is a ~1.8B-parameter
+model built mainly for image captioning, not a general instruction-following
+model like Claude - titles/descriptions will read rougher, mismatch-flagging
+is less reliable, and depending on your hardware, generation may be similar
+to or slower than the cloud call despite running locally. Queue Review's
+**Edit** button exists for exactly this kind of touch-up. If a review ever
+fails (Ollama not running, model not pulled, bad JSON out of the model), it
+falls back to the raw submitted note, same as any other AI hiccup - nothing
+gets stuck.
+
+Switch back to the cloud model any time by setting `AI_REVIEW_BACKEND=anthropic`
+(or removing the line - that's the default) and restarting - no code changes
+needed either way.
 
 ### Running without the eBay API
 
@@ -360,8 +397,11 @@ or syncing to cloud storage, is enough at this scale.
 ## 6. Known limitations / things to watch
 
 - **No live sync with Vendoo.** Hard platform limitation, not a bug here.
-- **AI review costs money per item** (Claude API usage). Cheap at your
-  current volume; monitor usage on the Anthropic console if it scales up.
+- **AI review costs money per item on the default `anthropic` backend**
+  (Claude API usage). Cheap at your current volume; monitor usage on the
+  Anthropic console if it scales up. Switch to the local `ollama` backend
+  (see "Running with the Ollama backend" above) to avoid this entirely, at
+  the cost of noticeably rougher output quality.
 - **The bot must stay running** for the pipeline to move - if it's offline
   when someone posts in Data Entry, that message just sits there until the
   bot is back up (no retroactive backlog scan in this version).

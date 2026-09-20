@@ -54,10 +54,23 @@ async def main():
     if not config.DISCORD_BOT_TOKEN:
         raise SystemExit("DISCORD_BOT_TOKEN is not set. Check your .env file.")
     if not config.AI_ENABLED:
-        log.warning(
-            "No ANTHROPIC_API_KEY set - running WITHOUT AI review. "
-            "Items will skip straight from Data Entry to Queue Review. "
-            "Add ANTHROPIC_API_KEY to .env later to turn AI review on."
+        if config.AI_REVIEW_BACKEND == "anthropic":
+            log.warning(
+                "No ANTHROPIC_API_KEY set - running WITHOUT AI review. "
+                "Items will skip straight from Data Entry to Queue Review. "
+                "Add ANTHROPIC_API_KEY to .env later to turn AI review on."
+            )
+        else:
+            log.warning(
+                f"AI_REVIEW_BACKEND is set to '{config.AI_REVIEW_BACKEND}', which isn't "
+                "'anthropic' or 'ollama' - running WITHOUT AI review. Items will skip "
+                "straight from Data Entry to Queue Review."
+            )
+    elif config.AI_REVIEW_BACKEND == "ollama":
+        log.info(
+            f"AI review running against local Ollama ({config.OLLAMA_BASE_URL}, "
+            f"model={config.OLLAMA_VISION_MODEL}) - make sure Ollama is running and "
+            "the model is pulled, or each review will fail and fall back to the raw note."
         )
 
     db.init_db()

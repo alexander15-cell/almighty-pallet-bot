@@ -9,14 +9,41 @@ load_dotenv()
 
 # ---- Secrets (set these in a .env file, never hardcode them) ----
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")  # optional - see AI_ENABLED below
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")  # optional - only used by the "anthropic" backend below
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))  # your server's ID
 
-# Whether the Automated Review (AI) step is active. Automatically turns on
-# the moment a real ANTHROPIC_API_KEY is added to .env - nothing else needs
-# to change. While this is False, items skip straight from Data Entry to
-# Queue Review, carrying forward the raw note as-is.
-AI_ENABLED = bool(ANTHROPIC_API_KEY)
+# ---- Automated Review (AI) backend ----
+# "anthropic" (default) - Claude's cloud vision API, requires ANTHROPIC_API_KEY.
+# "ollama"    - a local Ollama server (https://ollama.com), no API key or
+#               per-item cost, but noticeably lower quality/speed than the
+#               cloud model (see ai_review.py). Switch back any time by
+#               changing this value in .env and restarting.
+AI_REVIEW_BACKEND = os.getenv("AI_REVIEW_BACKEND", "anthropic").strip().lower()
+
+# Only used when AI_REVIEW_BACKEND == "ollama" - a local Ollama server
+# running a vision-capable model. No API key needed since it's a local HTTP
+# server; just make sure Ollama is running and the model is pulled
+# (`ollama pull moondream`) before switching AI_REVIEW_BACKEND to "ollama".
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "moondream")
+
+# Whether the Automated Review (AI) step is active:
+#   - "anthropic" backend: on the moment a real ANTHROPIC_API_KEY is set.
+#   - "ollama" backend: always on - there's no key to check for a local
+#     server, so this trusts that Ollama is actually running with
+#     OLLAMA_VISION_MODEL pulled (see "Running with the Ollama backend" in
+#     the README). If it isn't, review_item() fails per-item and falls back
+#     to the raw note, same as any other AI hiccup.
+#   - anything else: off, so a typo in AI_REVIEW_BACKEND fails safe instead
+#     of silently calling the wrong backend.
+# While this is False, items skip straight from Data Entry to Queue Review,
+# carrying forward the raw note as-is.
+if AI_REVIEW_BACKEND == "ollama":
+    AI_ENABLED = True
+elif AI_REVIEW_BACKEND == "anthropic":
+    AI_ENABLED = bool(ANTHROPIC_API_KEY)
+else:
+    AI_ENABLED = False
 
 # ---- Fixed channel name used for the "click to start a new pallet" button ----
 HUB_CHANNEL_NAME = "new-pallet-tracking"
@@ -148,8 +175,8 @@ STALE_CHECK_INTERVAL_HOURS = 12  # how often the background job checks for stale
 # ---- Database ----
 DATABASE_PATH = os.getenv("DATABASE_PATH", "data/pallet_tracker.db")
 
-# ---- AI review model ----
-AI_MODEL = "claude-sonnet-5"
+# ---- AI review model (only used by the "anthropic" backend) ----
+ANTHROPIC_MODEL = "claude-sonnet-5"
 
 # All possible item status values, in pipeline order - used by /pallet-list
 # to display a consistent stage-by-stage count regardless of which stages
