@@ -197,19 +197,30 @@ def _derived_ollama_model_name() -> str:
 def _ensure_ollama_ctx_model(model_name: str) -> None:
     """
     Blocking HTTP call to Ollama's /api/create endpoint - run via
-    asyncio.to_thread. Creates `model_name` (FROM config.OLLAMA_VISION_MODEL,
-    with num_ctx baked in via a Modelfile PARAMETER line) if it doesn't
-    already exist; Ollama treats re-creating an identical model as a cheap
-    no-op, but _ensured_ollama_models still short-circuits repeat calls
-    within this process.
+    asyncio.to_thread. Creates `model_name` (from config.OLLAMA_VISION_MODEL,
+    with num_ctx baked in as a model parameter) if it doesn't already exist;
+    Ollama treats re-creating an identical model as a cheap no-op, but
+    _ensured_ollama_models still short-circuits repeat calls within this
+    process.
+
+    Sends both the current ("model"/"from"/"parameters") and legacy
+    ("name"/"modelfile") /api/create field names - Ollama changed this
+    schema at some point (older versions want a Modelfile string under
+    "name"/"modelfile"; newer ones reject that with "neither 'from' or
+    'files' was specified" and want "from"/"parameters" under "model"
+    instead) and there's no cheap way to detect which one a given install
+    speaks. Unrecognized JSON fields are ignored by both, so sending the
+    union is harmless either way.
     """
     if model_name in _ensured_ollama_models:
         return
 
-    modelfile = f"FROM {config.OLLAMA_VISION_MODEL}\nPARAMETER num_ctx {config.OLLAMA_NUM_CTX}\n"
     payload = json.dumps({
+        "model": model_name,
         "name": model_name,
-        "modelfile": modelfile,
+        "from": config.OLLAMA_VISION_MODEL,
+        "parameters": {"num_ctx": config.OLLAMA_NUM_CTX},
+        "modelfile": f"FROM {config.OLLAMA_VISION_MODEL}\nPARAMETER num_ctx {config.OLLAMA_NUM_CTX}\n",
         "stream": False,
     }).encode("utf-8")
     request = urllib.request.Request(
