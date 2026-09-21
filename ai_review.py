@@ -7,16 +7,29 @@ Automated Review step. Two backends, switched by config.AI_REVIEW_BACKEND:
                 its local HTTP API (config.OLLAMA_BASE_URL, default
                 http://localhost:11434) running a vision model
                 (config.OLLAMA_VISION_MODEL, default "moondream" - pull it
-                first with `ollama pull moondream`). No API key, no per-item
-                cost, no network egress - but moondream is a ~1.8B-parameter
-                model built mainly for image captioning/VQA, not a general
-                instruction-following LLM like Claude, so expect noticeably
+                first with `ollama pull moondream`, or see README.md for why
+                "llava" is the recommended one to actually use). No API key,
+                no per-item cost, no network egress - but these are small
+                models built mainly for image captioning/VQA, not general
+                instruction-following LLMs like Claude, so expect noticeably
                 rougher titles/descriptions, less reliable mismatch-flagging,
                 and (depending on the host machine) latency that's
                 comparable to or worse than the cloud call despite running
                 locally. Queue Review's Edit button exists for exactly this
                 kind of touch-up. Switch AI_REVIEW_BACKEND back to
                 "anthropic" in .env any time local quality isn't good enough.
+
+                NOTE: "moondream" specifically has a known Ollama limitation
+                where its context size can't be changed via any mechanism
+                this module has access to (see _derived_ollama_model_name) -
+                some Ollama versions route it through a runner that ignores
+                num_ctx entirely, both per-request and baked into a derived
+                model, so it stays hard-capped at Ollama's 2048-token
+                default. If reviews keep failing with "exceeds the available
+                context size (2048 tokens)" even after the derived model was
+                created successfully, that's this limitation - switch
+                OLLAMA_VISION_MODEL to "llava" or another model using
+                Ollama's standard runner instead.
 
 Both backends return the same dict shape (see SYSTEM_PROMPT) and this
 module NEVER modifies or regenerates the photos themselves - only text is
