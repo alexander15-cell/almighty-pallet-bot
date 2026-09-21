@@ -210,6 +210,19 @@ per-item cost.
    above (a different port/host, or a different pulled model).
 4. Restart the bot.
 
+On first use, the bot automatically creates a second, small model on top of
+your pulled one - e.g. `moondream-pallet-bot-ctx4096:latest` - via a
+one-line Modelfile (`FROM moondream` + `PARAMETER num_ctx 4096`). This isn't
+something you need to set up yourself: vision models like `moondream` don't
+reliably honor Ollama's per-request context-size override (a known Ollama
+limitation), so the only reliable fix is baking a larger context window
+into the model itself. You'll see this extra model in `ollama list` - it's
+normal, and safe to `ollama rm` (the bot just recreates it on the next
+review). `OLLAMA_NUM_CTX` (default `4096`, see `.env.example`) controls the
+size; raise it if you ever see a "request (N tokens) exceeds the available
+context size" error again, which just means images/prompts have grown past
+the current window.
+
 **Expect a real quality/speed trade-off.** `moondream` is a ~1.8B-parameter
 model built mainly for image captioning, not a general instruction-following
 model like Claude - titles/descriptions will read rougher, mismatch-flagging
