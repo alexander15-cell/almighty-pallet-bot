@@ -32,6 +32,7 @@ the next channel" flow.
 import asyncio
 import base64
 import json
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -168,35 +169,60 @@ async def _review_item_anthropic(photo_paths: list[str], raw_description: str) -
 
 def _call_ollama(prompt: str, images_b64: list[str]) -> str:
     """
-    Blocking HTTP call to Ollama's /api/generate endpoint. Run via
+    Blocking HTTP call to Ollama's /api/chat endpoint. Run via
     asyncio.to_thread by _review_item_ollama so a slow local generation
     doesn't block the bot's event loop (and every other server it's in)
     the way a synchronous call here would. Uses urllib (stdlib) rather than
     adding a new HTTP dependency, since this is one simple local request.
 
+    Uses /api/chat rather than /api/generate: images belong on the
+    individual message ("images": [...] on the user message, raw base64
+    with no "data:image/...;base64," prefix - NOT a top-level request
+    field), and the system prompt is its own {"role": "system", ...}
+    message rather than a generate-only "system" override. This is the
+    more consistently-supported shape for vision requests across Ollama/
+    model versions - a malformed images field (wrong key, wrong level,
+    included as an empty list) is exactly the kind of thing that gets a
+    flat "HTTP Error 400: Bad Request" out of urllib with no detail, hence
+    also reading the response body below instead of just the status code.
+
     format="json" asks Ollama to constrain the output to valid JSON - it
     still isn't a guarantee with a small model like moondream, hence the
     fallback in _review_item_ollama if parsing fails anyway.
     """
+    user_message = {"role": "user", "content": prompt}
+    if images_b64:
+        user_message["images"] = images_b64
+
     payload = json.dumps({
         "model": config.OLLAMA_VISION_MODEL,
-        "system": SYSTEM_PROMPT,
-        "prompt": prompt,
-        "images": images_b64,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            user_message,
+        ],
         "format": "json",
         "stream": False,
     }).encode("utf-8")
     request = urllib.request.Request(
-        f"{config.OLLAMA_BASE_URL.rstrip('/')}/api/generate",
+        f"{config.OLLAMA_BASE_URL.rstrip('/')}/api/chat",
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    # Local vision-model generation can take a while on modest hardware -
-    # generous timeout rather than a fast fail into the fallback path.
-    with urllib.request.urlopen(request, timeout=120) as response:
-        body = json.loads(response.read().decode("utf-8"))
-    return body.get("response", "")
+    try:
+        # Local vision-model generation can take a while on modest hardware -
+        # generous timeout rather than a fast fail into the fallback path.
+        with urllib.request.urlopen(request, timeout=120) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # urllib's default str(e) for an HTTPError is just "HTTP Error 400:
+        # Bad Request" - it drops the response body, which is where Ollama
+        # actually puts the useful part (e.g. {"error": "model 'x' not
+        # found, try pulling it first"}). Read it explicitly so that ends
+        # up in the console log / fallback flag instead of a bare status code.
+        error_body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Ollama returned HTTP {e.code}: {error_body}") from e
+    return body.get("message", {}).get("content", "")
 
 
 async def _review_item_ollama(photo_paths: list[str], raw_description: str) -> dict:
