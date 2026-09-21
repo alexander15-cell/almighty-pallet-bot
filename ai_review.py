@@ -202,6 +202,13 @@ def _call_ollama(prompt: str, images_b64: list[str]) -> str:
         ],
         "format": "json",
         "stream": False,
+        # Ollama's own default context window is 2048 tokens, which
+        # SYSTEM_PROMPT + the submitted note + an encoded image routinely
+        # exceed ("request (N tokens) exceeds the available context size
+        # (2048 tokens)"). config.OLLAMA_NUM_CTX (default 4096) is passed
+        # per-request via the "num_ctx" model option rather than requiring
+        # a custom Modelfile.
+        "options": {"num_ctx": config.OLLAMA_NUM_CTX},
     }).encode("utf-8")
     request = urllib.request.Request(
         f"{config.OLLAMA_BASE_URL.rstrip('/')}/api/chat",

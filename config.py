@@ -27,6 +27,15 @@ AI_REVIEW_BACKEND = os.getenv("AI_REVIEW_BACKEND", "anthropic").strip().lower()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "moondream")
 
+# Context window (in tokens) requested from Ollama via the "num_ctx" model
+# option. Ollama's own default is a modest 2048, which is easy to exceed
+# once SYSTEM_PROMPT, the submitted note, and an encoded image are all in
+# the same request ("request (N tokens) exceeds the available context size
+# (2048 tokens)") - 4096 gives real headroom. Raise it further in .env if
+# larger images or longer prompts start hitting the same error again; a
+# bigger context window uses more of the host machine's RAM/VRAM.
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "4096"))
+
 # Whether the Automated Review (AI) step is active:
 #   - "anthropic" backend: on the moment a real ANTHROPIC_API_KEY is set.
 #   - "ollama" backend: always on - there's no key to check for a local
