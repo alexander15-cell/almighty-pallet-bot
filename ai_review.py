@@ -231,13 +231,20 @@ def _ensure_ollama_ctx_model(model_name: str) -> None:
     )
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
-            response.read()  # drain the body; a 200 here means it's ready to use
+            response_body = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(
             f"Creating Ollama model '{model_name}' (from {config.OLLAMA_VISION_MODEL}, "
             f"num_ctx={config.OLLAMA_NUM_CTX}) returned HTTP {e.code}: {error_body}"
         ) from e
+    # Logged unconditionally (not just on failure) so it's unambiguous from
+    # the console whether model creation actually succeeded - some Ollama
+    # versions/model architectures (moondream has had open reports of this)
+    # accept this request and return 200 without actually honoring the
+    # num_ctx parameter, which otherwise looks identical to "this code never
+    # ran" when only the later /api/chat failure gets logged.
+    print(f"[ai_review] Ollama model '{model_name}' ready: {response_body}")
     _ensured_ollama_models.add(model_name)
 
 
