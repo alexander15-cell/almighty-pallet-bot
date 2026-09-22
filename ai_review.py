@@ -7,11 +7,10 @@ Automated Review step. Two backends, switched by config.AI_REVIEW_BACKEND:
                 its local HTTP API (config.OLLAMA_BASE_URL, default
                 http://localhost:11434) running a vision model
                 (config.OLLAMA_VISION_MODEL, default "moondream" - pull it
-                first with `ollama pull moondream`, or see README.md for why
-                "llava" is the recommended one to actually use). No API key,
-                no per-item cost, no network egress - but these are small
-                models built mainly for image captioning/VQA, not general
-                instruction-following LLMs like Claude, so expect noticeably
+                first with `ollama pull moondream`). No API key, no per-item
+                cost, no network egress - but moondream is a ~1.8B-parameter
+                model built mainly for image captioning/VQA, not a general
+                instruction-following LLM like Claude, so expect noticeably
                 rougher titles/descriptions, less reliable mismatch-flagging,
                 and (depending on the host machine) latency that's
                 comparable to or worse than the cloud call despite running
@@ -19,17 +18,18 @@ Automated Review step. Two backends, switched by config.AI_REVIEW_BACKEND:
                 kind of touch-up. Switch AI_REVIEW_BACKEND back to
                 "anthropic" in .env any time local quality isn't good enough.
 
-                NOTE: "moondream" specifically has a known Ollama limitation
-                where its context size can't be changed via any mechanism
-                this module has access to (see _derived_ollama_model_name) -
-                some Ollama versions route it through a runner that ignores
-                num_ctx entirely, both per-request and baked into a derived
-                model, so it stays hard-capped at Ollama's 2048-token
-                default. If reviews keep failing with "exceeds the available
-                context size (2048 tokens)" even after the derived model was
-                created successfully, that's this limitation - switch
-                OLLAMA_VISION_MODEL to "llava" or another model using
-                Ollama's standard runner instead.
+                Context window: Ollama's own default (2048 tokens) is easy
+                to exceed once the system prompt, note, and an encoded image
+                are all in one request. config.OLLAMA_NUM_CTX (default 4096)
+                is passed as a per-request "options": {"num_ctx": ...} value
+                on the plain configured model - confirmed working directly
+                against Ollama's /api/generate. (An earlier version of this
+                code tried baking num_ctx into a derived model instead; that
+                added complexity, produced mangled model names on repeat
+                runs, and wasn't actually needed - the request-level option
+                works fine.) Raise OLLAMA_NUM_CTX in .env if you still see a
+                "request (N tokens) exceeds the available context size"
+                error, meaning images/prompts have grown past the window.
 
 Both backends return the same dict shape (see SYSTEM_PROMPT) and this
 module NEVER modifies or regenerates the photos themselves - only text is
@@ -180,133 +180,34 @@ async def _review_item_anthropic(photo_paths: list[str], raw_description: str) -
 
 # ------------------------------------------------------------------ ollama --
 
-# Models successfully created (or confirmed to already exist) this process
-# lifetime, so _ensure_ollama_ctx_model only hits Ollama's /api/create once
-# per (base model, num_ctx) pair instead of on every single review.
-_ensured_ollama_models: set[str] = set()
-
-
-def _derived_ollama_model_name() -> str:
+def _call_ollama(prompt: str, images_b64: list[str]) -> str:
     """
-    Ollama's per-request "options": {"num_ctx": ...} override is NOT
-    reliably honored for the older llama.cpp-based multimodal runner used by
-    vision models like moondream/llava (a known Ollama limitation) - the
-    served context stays at Ollama's own 2048-token default regardless of
-    what the request asks for. The only reliable fix is baking num_ctx into
-    the model itself via a Modelfile, so a small derived model gets created
-    on first use (see _ensure_ollama_ctx_model) and used instead of the bare
-    model from config.
-
-    Strips any registry/namespace prefix and :tag from the base model for
-    the derived name (Ollama model names allow only one ":", for the tag) -
-    the Modelfile's own "FROM <full original reference>" line is what
-    actually pins the exact base model/tag, so nothing is lost by keeping
-    the derived name itself simple and always tagged :latest.
-    """
-    base_name = config.OLLAMA_VISION_MODEL.split(":")[0].split("/")[-1]
-    return f"{base_name}-pallet-bot-ctx{config.OLLAMA_NUM_CTX}:latest"
-
-
-def _ensure_ollama_ctx_model(model_name: str) -> None:
-    """
-    Blocking HTTP call to Ollama's /api/create endpoint - run via
-    asyncio.to_thread. Creates `model_name` (from config.OLLAMA_VISION_MODEL,
-    with num_ctx baked in as a model parameter) if it doesn't already exist;
-    Ollama treats re-creating an identical model as a cheap no-op, but
-    _ensured_ollama_models still short-circuits repeat calls within this
-    process.
-
-    Sends both the current ("model"/"from"/"parameters") and legacy
-    ("name"/"modelfile") /api/create field names - Ollama changed this
-    schema at some point (older versions want a Modelfile string under
-    "name"/"modelfile"; newer ones reject that with "neither 'from' or
-    'files' was specified" and want "from"/"parameters" under "model"
-    instead) and there's no cheap way to detect which one a given install
-    speaks. Unrecognized JSON fields are ignored by both, so sending the
-    union is harmless either way.
-    """
-    if model_name in _ensured_ollama_models:
-        return
-
-    payload = json.dumps({
-        "model": model_name,
-        "name": model_name,
-        "from": config.OLLAMA_VISION_MODEL,
-        "parameters": {"num_ctx": config.OLLAMA_NUM_CTX},
-        "modelfile": f"FROM {config.OLLAMA_VISION_MODEL}\nPARAMETER num_ctx {config.OLLAMA_NUM_CTX}\n",
-        "stream": False,
-    }).encode("utf-8")
-    request = urllib.request.Request(
-        f"{config.OLLAMA_BASE_URL.rstrip('/')}/api/create",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            response_body = response.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"Creating Ollama model '{model_name}' (from {config.OLLAMA_VISION_MODEL}, "
-            f"num_ctx={config.OLLAMA_NUM_CTX}) returned HTTP {e.code}: {error_body}"
-        ) from e
-    # Logged unconditionally (not just on failure) so it's unambiguous from
-    # the console whether model creation actually succeeded - some Ollama
-    # versions/model architectures (moondream has had open reports of this)
-    # accept this request and return 200 without actually honoring the
-    # num_ctx parameter, which otherwise looks identical to "this code never
-    # ran" when only the later /api/chat failure gets logged.
-    print(f"[ai_review] Ollama model '{model_name}' ready: {response_body}")
-    _ensured_ollama_models.add(model_name)
-
-
-def _call_ollama(model_name: str, prompt: str, images_b64: list[str]) -> str:
-    """
-    Blocking HTTP call to Ollama's /api/chat endpoint. Run via
+    Blocking HTTP call to Ollama's /api/generate endpoint. Run via
     asyncio.to_thread by _review_item_ollama so a slow local generation
     doesn't block the bot's event loop (and every other server it's in)
     the way a synchronous call here would. Uses urllib (stdlib) rather than
     adding a new HTTP dependency, since this is one simple local request.
 
-    `model_name` is the num_ctx-derived model from _derived_ollama_model_name
-    / _ensure_ollama_ctx_model, not the bare config.OLLAMA_VISION_MODEL - see
-    those for why. The "options": {"num_ctx": ...} override is still sent
-    too (belt and suspenders - harmless, and takes effect for any future
-    non-vision or fixed-runner model where the request-level override IS
-    honored).
-
-    Uses /api/chat rather than /api/generate: images belong on the
-    individual message ("images": [...] on the user message, raw base64
-    with no "data:image/...;base64," prefix - NOT a top-level request
-    field), and the system prompt is its own {"role": "system", ...}
-    message rather than a generate-only "system" override. This is the
-    more consistently-supported shape for vision requests across Ollama/
-    model versions - a malformed images field (wrong key, wrong level,
-    included as an empty list) is exactly the kind of thing that gets a
-    flat "HTTP Error 400: Bad Request" out of urllib with no detail, hence
-    also reading the response body below instead of just the status code.
+    Request shape (model/prompt/images/options.num_ctx) matches a manual
+    curl test against a live Ollama server that confirmed the plain
+    configured model, with num_ctx passed as a per-request option, is
+    enough - no custom/derived model needed.
 
     format="json" asks Ollama to constrain the output to valid JSON - it
     still isn't a guarantee with a small model like moondream, hence the
     fallback in _review_item_ollama if parsing fails anyway.
     """
-    user_message = {"role": "user", "content": prompt}
-    if images_b64:
-        user_message["images"] = images_b64
-
     payload = json.dumps({
-        "model": model_name,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            user_message,
-        ],
+        "model": config.OLLAMA_VISION_MODEL,
+        "system": SYSTEM_PROMPT,
+        "prompt": prompt,
+        "images": images_b64,
         "format": "json",
         "stream": False,
         "options": {"num_ctx": config.OLLAMA_NUM_CTX},
     }).encode("utf-8")
     request = urllib.request.Request(
-        f"{config.OLLAMA_BASE_URL.rstrip('/')}/api/chat",
+        f"{config.OLLAMA_BASE_URL.rstrip('/')}/api/generate",
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -324,7 +225,7 @@ def _call_ollama(model_name: str, prompt: str, images_b64: list[str]) -> str:
         # up in the console log / fallback flag instead of a bare status code.
         error_body = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Ollama returned HTTP {e.code}: {error_body}") from e
-    return body.get("message", {}).get("content", "")
+    return body.get("response", "")
 
 
 async def _review_item_ollama(photo_paths: list[str], raw_description: str) -> dict:
@@ -336,11 +237,9 @@ async def _review_item_ollama(photo_paths: list[str], raw_description: str) -> d
             print(f"[ai_review] failed to read image {path}: {e}")
 
     prompt = f"Submitted note from intake: {raw_description or '(no note provided)'}"
-    model_name = _derived_ollama_model_name()
 
     try:
-        await asyncio.to_thread(_ensure_ollama_ctx_model, model_name)
-        text = await asyncio.to_thread(_call_ollama, model_name, prompt, images_b64)
+        text = await asyncio.to_thread(_call_ollama, prompt, images_b64)
         return json.loads(_strip_json_fences(text))
     except Exception as e:
         print(f"[ai_review] Ollama review failed, returning fallback: {e}")

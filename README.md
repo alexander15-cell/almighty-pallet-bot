@@ -198,49 +198,34 @@ An alternative to the cloud API: Automated Review can run entirely against
 a local [Ollama](https://ollama.com) server instead, with no API key and no
 per-item cost.
 
-1. Install Ollama and pull a vision-capable model. `config.py`'s default is
-   `moondream` (small and fast), but **`llava` is the recommended starting
-   point instead** - see the context-size note below for why:
+1. Install Ollama and pull a vision-capable model (`moondream` is the
+   default - small and fast, good for a first try):
    ```bash
-   ollama pull llava
+   ollama pull moondream
    ```
 2. Make sure `ollama serve` is running (the default install usually starts
    it automatically) - it listens on `http://localhost:11434` by default.
-3. In `.env`, set `AI_REVIEW_BACKEND=ollama` and `OLLAMA_VISION_MODEL=llava`
-   (or whatever you pulled). `OLLAMA_BASE_URL` only needs setting if Ollama
-   isn't on the default local address.
+3. In `.env`, set `AI_REVIEW_BACKEND=ollama`. `OLLAMA_BASE_URL` and
+   `OLLAMA_VISION_MODEL` only need setting if you're not using the defaults
+   above (a different port/host, or a different pulled model).
 4. Restart the bot.
 
-On first use, the bot automatically creates a second, small model on top of
-whichever one you pulled - e.g. `llava-pallet-bot-ctx4096:latest` - via a
-Modelfile that bakes in a larger context window (`PARAMETER num_ctx 4096`,
-or the current `OLLAMA_NUM_CTX`/`.env.example`). This isn't something you
-need to set up yourself. You'll see this extra model in `ollama list` -
-that's normal, and safe to `ollama rm` (the bot just recreates it on the
-next review). Raise `OLLAMA_NUM_CTX` if you ever see a "request (N tokens)
-exceeds the available context size" error, meaning images/prompts have
-grown past the current window.
+Ollama's own default context window (2048 tokens) is easy to exceed once
+the system prompt, note, and an encoded image are all in one request -
+`OLLAMA_NUM_CTX` (default `4096`, see `.env.example`) is passed as a
+per-request option to give real headroom. Raise it if you ever see a
+"request (N tokens) exceeds the available context size" error, meaning
+images/prompts have grown past the current window.
 
-**`moondream` specifically has a known Ollama limitation where its context
-size can't be changed at all** - not via the per-request option, and not
-via the Modelfile `num_ctx` baked in above; some Ollama versions route it
-through a special-cased runner that ignores both, so it stays hard-capped
-at Ollama's 2048-token default no matter what this bot sends. If a review
-fails with an "exceeds the available context size (2048 tokens)" error even
-after the derived model was created successfully (check the console for
-`[ai_review] Ollama model '...' ready: ...`), that's this limitation, not a
-bug in the derived-model mechanism - switch `OLLAMA_VISION_MODEL` to
-`llava` (or another model using Ollama's standard runner) instead.
-
-**Expect a real quality/speed trade-off either way.** These are small
-vision models built mainly for image captioning, not general
-instruction-following models like Claude - titles/descriptions will read
-rougher, mismatch-flagging is less reliable, and depending on your
-hardware, generation may be similar to or slower than the cloud call
-despite running locally. Queue Review's **Edit** button exists for exactly
-this kind of touch-up. If a review ever fails (Ollama not running, model
-not pulled, bad JSON out of the model), it falls back to the raw submitted
-note, same as any other AI hiccup - nothing gets stuck.
+**Expect a real quality/speed trade-off.** `moondream` is a ~1.8B-parameter
+model built mainly for image captioning, not a general instruction-following
+model like Claude - titles/descriptions will read rougher, mismatch-flagging
+is less reliable, and depending on your hardware, generation may be similar
+to or slower than the cloud call despite running locally. Queue Review's
+**Edit** button exists for exactly this kind of touch-up. If a review ever
+fails (Ollama not running, model not pulled, bad JSON out of the model), it
+falls back to the raw submitted note, same as any other AI hiccup - nothing
+gets stuck.
 
 Switch back to the cloud model any time by setting `AI_REVIEW_BACKEND=anthropic`
 (or removing the line - that's the default) and restarting - no code changes
