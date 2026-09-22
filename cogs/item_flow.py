@@ -201,10 +201,17 @@ class EbayCategorySelectView(discord.ui.View):
         self.item_id = item_id
         self.condition_id = condition_id
 
+        def _is_fallback_only(name: str) -> bool:
+            return "(top-level)" in name or "(parent/fallback)" in name
+
         counts = db.get_ebay_category_counts()
         ranked = sorted(
             config.EBAY_CATEGORIES.items(),
-            key=lambda name_and_id: (-counts.get(name_and_id[1], 0), name_and_id[0].lower()),
+            key=lambda name_and_id: (
+                -counts.get(name_and_id[1], 0),
+                _is_fallback_only(name_and_id[0]),
+                name_and_id[0].lower(),
+            ),
         )
         truncated = len(ranked) > self.MAX_OPTIONS
         if truncated:

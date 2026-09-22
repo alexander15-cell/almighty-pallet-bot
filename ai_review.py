@@ -60,9 +60,11 @@ import config
 _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY) if config.ANTHROPIC_API_KEY else None
 
 # {category_list} is filled in at request time (see _build_system_prompt) from
-# the current config.EBAY_CATEGORIES, so the model only ever suggests a
-# category name we actually have an ID for - item_flow.py's category select
-# maps the name it returns back to an ID.
+# config.EBAY_CATEGORIES_FOR_AI_SUGGESTION (EBAY_CATEGORIES minus its
+# top-level/parent "fallback only" entries - those aren't real listable
+# categories and shouldn't be what the model proposes), so the model only
+# ever suggests a category name we actually have an ID for - item_flow.py's
+# category select maps the name it returns back to an ID.
 SYSTEM_PROMPT_TEMPLATE = """You are helping a small resale business turn a quick warehouse note \
 into an accurate, honest resale listing draft. You will be shown one or more photos of a \
 single physical item plus the short note the intake person wrote.
@@ -102,7 +104,9 @@ Respond ONLY with valid JSON, no other text, in this exact shape:
 
 
 def _build_system_prompt() -> str:
-    category_list = "\n".join(f"- {name}" for name in config.EBAY_CATEGORIES) or "(no categories configured)"
+    category_list = "\n".join(
+        f"- {name}" for name in config.EBAY_CATEGORIES_FOR_AI_SUGGESTION
+    ) or "(no categories configured)"
     return SYSTEM_PROMPT_TEMPLATE.format(category_list=category_list)
 
 

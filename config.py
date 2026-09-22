@@ -235,17 +235,63 @@ EBAY_AUCTION_DURATIONS = [
 ]
 
 # ---- eBay category picker ----
-# name -> eBay leaf category ID. Fill this in with your real categories -
-# these two are just placeholders so the select menu has something to show.
-# Shown as a Discord select menu when approving an item in Queue Review,
-# sorted by how often each has actually been picked (see
-# database.get_ebay_category_counts) so your most-used categories stay on
-# top. Discord select menus cap out at 25 options - if this grows past that,
-# say so and we'll add pagination (for now, only the 25 most-used show, with
-# a console warning so it doesn't fail silently).
+# name -> eBay leaf category ID. Shown as a Discord select menu when
+# approving an item in Queue Review, sorted by how often each has actually
+# been picked (see database.get_ebay_category_counts) so your most-used
+# categories stay on top - entries whose name is tagged "(top-level)" or
+# "(parent/fallback)" (not individually listable on eBay - only useful as a
+# last resort or to group the manual dropdown) sort after everything else
+# at equal usage, so they don't crowd out real leaf categories. Discord
+# select menus cap out at 25 options - if this grows past that, only the 25
+# top-ranked show (logged to console) until pagination gets added.
 EBAY_CATEGORIES = {
-    "Example Category A": "11450",
-    "Example Category B": "58058",
+    # --- Lighting / electrical (Home Depot pallet) ---
+    "Ceiling Fans": "176937",
+    "Chandeliers & Ceiling Light Fixtures": "117503",
+    "Recessed Lighting": "117503",
+    "Wall Sconces / Wall Lighting Fixtures": "116880",
+    "Bathroom Vanity Lighting": "116880",
+    "LED Strip / Tape Lights": "116022",
+    "Smart LED Light Strips": "185071",
+    "Smoke & CO Detectors": "41970",
+    "Circuit Breakers & Fuse Boxes": "259485",
+    "Extension Cords": "259493",
+    "Electrical Supplies (general)": "259482",
+    "Lamps, Lighting & Ceiling Fans (parent/fallback)": "20697",
+
+    # --- EV chargers ---
+    "EV Charging Cables & Adapters": "123422",
+    "EV Charging Stations / Service Equipment": "177704",
+    "EV Charging Components": "262101",
+
+    # --- General liquidation categories ---
+    "Hand Tools": "3244",
+    "Small Kitchen Appliances": "20667",
+    "Cell Phone Accessories": "9394",
+
+    # --- Top-level parents (NOT directly listable — use only as
+    #     last-resort fallback / for grouping the manual dropdown) ---
+    "Tools & Home Improvement (top-level)": "631",
+    "Consumer Electronics (top-level)": "293",
+    "Home & Garden (top-level)": "11700",
+    "Toys & Hobbies (top-level)": "220",
+    "Sporting Goods (top-level)": "888",
+    "Clothing, Shoes & Accessories (top-level)": "11450",
+    "Business & Industrial (top-level)": "12576",
+    "Health & Beauty (top-level)": "26395",
+    "Baby (top-level)": "2984",
+    "Video Games & Consoles (top-level)": "1249",
+}
+
+# Subset of EBAY_CATEGORIES actually offered to Automated Review as a
+# suggestion (ai_review.py) - excludes the top-level/parent fallback
+# entries above, since those aren't real listable leaf categories and
+# should never be what the AI proposes as "the" category for an item, only
+# something a human picks manually as a last resort.
+EBAY_CATEGORIES_FOR_AI_SUGGESTION = {
+    name: category_id
+    for name, category_id in EBAY_CATEGORIES.items()
+    if "(top-level)" not in name and "(parent/fallback)" not in name
 }
 
 # ---- eBay CSV batch (Seller Hub bulk upload / File Exchange fallback) ----
