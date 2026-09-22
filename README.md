@@ -42,20 +42,25 @@ Every item's card always shows which pallet it belongs to.
   below.
 - In **Queue Review** (shared), the Queue Review role approves, edits, or
   rejects (sends back to that item's own pallet's Data Entry channel).
-  Approving walks through four steps to capture everything needed to list
+  Approving walks through a few steps to capture everything needed to list
   the item on eBay later: a condition dropdown (`config.EBAY_CONDITIONS` -
   New / New other / New with defects / Used / For parts, with "New other"
-  pre-selected since most liquidation items land there), a category dropdown
-  (`config.EBAY_CATEGORIES`, sorted by how often each has actually been
-  picked, but with Automated Review's suggested category pre-selected
-  instead when it made one), a format dropdown (Fixed Price or Auction -
-  decided per item, not a global switch; Auction adds one more step for the
-  listing duration: 3/5/7/10 days), then a short form for title,
-  price/starting bid (pre-filled with the AI's price suggestion when there
-  is one - always editable), and freeform item specifics
-  (brand/size/color/etc). Only title/category/condition/format/price are
-  required; specifics can be filled in later. Description and photos are
-  reused as-is from Data Entry.
+  sorted to the top since most liquidation items land there), then either a
+  category dropdown (`config.EBAY_CATEGORIES`, sorted by how often each has
+  actually been picked) *or*, when Automated Review suggested a category, an
+  automatic skip straight past that dropdown - the AI's pick is applied and
+  shown as text, with a "Change category" button if you disagree - a format
+  dropdown (Fixed Price or Auction - decided per item, not a global switch;
+  Auction adds one more step for the listing duration: 3/5/7/10 days), then
+  a short form for title, price/starting bid (pre-filled with the AI's price
+  suggestion when there is one - always editable), and freeform item
+  specifics (brand/size/color/etc). Only title/category/condition/format/
+  price are required; specifics can be filled in later. Description and
+  photos are reused as-is from Data Entry. (None of these dropdowns
+  pre-check an option: Discord's mobile client doesn't reliably register a
+  tap on an option that's already marked selected, so the "recommended"
+  option is only ever sorted first or applied automatically - never a
+  checkmark you have to re-tap.)
 - **Awaiting Listing** (shared) is where Listing Management actually lists
   the item, via whichever of three buttons fits:
   - **Add to eBay Batch** - appends the item (using the eBay data captured
@@ -324,10 +329,11 @@ UI after a restart (a Discord client caching quirk, not a bug here).
    liquidation disclaimer appended) and any flags.
 6. **Queue Review** clicks **Edit** or **Reject / Send Back** (returns to
    that pallet's own Data Entry), or **Approve** - which asks for the eBay
-   condition (dropdown, defaults to "New other"), then the eBay category
-   (dropdown, pre-selected to whatever the AI suggested if it made one,
-   otherwise your most-used categories first), then Fixed Price or Auction
-   (Auction adds a duration step: 3/5/7/10 days), then opens a form for eBay
+   condition (dropdown, "New other" sorted to the top), then the eBay
+   category - applied automatically (with a "Change category" button) when
+   the AI suggested one, otherwise a dropdown of your most-used categories -
+   then Fixed Price or Auction (Auction adds a duration step: 3/5/7/10
+   days), then opens a form for eBay
    title, price/starting bid (pre-filled with the AI's price estimate when
    there is one - always double-check it, it's a general-knowledge guess,
    not real market data), and item specifics

@@ -126,23 +126,30 @@ class EbayConditionSelectView(discord.ui.View):
     """
     First step of Approve: a plain button click can't collect a dropdown
     value (Discord modals only support text inputs, not selects), so
-    Approve shows this ephemeral select first. EBAY_DEFAULT_CONDITION_ID
-    comes pre-highlighted since most liquidation items land there, but any
-    other option is still one click away. Picking a condition moves to the
-    category select (step 2).
+    Approve shows this ephemeral select first. Discord's mobile client
+    won't fire the select callback again if you tap an option that's
+    already marked `default` (the tap is silently swallowed - it looks
+    selected, but nothing happens), so nothing here is pre-checked; instead
+    EBAY_DEFAULT_CONDITION_ID is just sorted to the top and labeled, so
+    it's still the fastest tap without being stuck if that's the one you
+    want. Picking a condition moves to the category step (step 2).
     """
 
     def __init__(self, item_id: int):
         super().__init__(timeout=300)
         self.item_id = item_id
+        ordered = sorted(
+            config.EBAY_CONDITIONS,
+            key=lambda pair: pair[0] != config.EBAY_DEFAULT_CONDITION_ID,
+        )
         self.select = discord.ui.Select(
             placeholder="Select this item's eBay condition...",
             options=[
                 discord.SelectOption(
-                    label=label, value=condition_id,
-                    default=(condition_id == config.EBAY_DEFAULT_CONDITION_ID),
+                    label=(label + " (most common)")[:100] if condition_id == config.EBAY_DEFAULT_CONDITION_ID else label,
+                    value=condition_id,
                 )
-                for condition_id, label in config.EBAY_CONDITIONS
+                for condition_id, label in ordered
             ],
         )
         self.select.callback = self._on_select
@@ -150,27 +157,41 @@ class EbayConditionSelectView(discord.ui.View):
 
     async def _on_select(self, interaction: discord.Interaction):
         condition_id = self.select.values[0]
-        await interaction.response.edit_message(
-            content="Now select this item's eBay category...",
-            view=EbayCategorySelectView(self.item_id, condition_id),
-        )
+        item = db.get_item(self.item_id)
+        suggested_name = item.get("ai_suggested_category")
+        suggested_category_id = config.EBAY_CATEGORIES.get(suggested_name)
+        if suggested_category_id:
+            await interaction.response.edit_message(
+                content=(
+                    f"eBay category: **{suggested_name}** (AI suggested). "
+                    "Tap \"Change category\" below to pick a different one, or continue to format."
+                ),
+                view=EbayFormatSelectView(
+                    self.item_id, condition_id, suggested_category_id, show_change_category=True,
+                ),
+            )
+        else:
+            await interaction.response.edit_message(
+                content="Now select this item's eBay category...",
+                view=EbayCategorySelectView(self.item_id, condition_id),
+            )
 
 
 class EbayCategorySelectView(discord.ui.View):
     """
-    Second step of Approve: a category select menu built from
-    config.EBAY_CATEGORIES, sorted by how often each has actually been
-    picked (database.get_ebay_category_counts) - most-used first, unused/new
-    categories alphabetically after. Discord select menus cap out at 25
-    options; if EBAY_CATEGORIES ever grows past that, only the 25 most-used
-    show here (logged to console) until pagination gets added.
+    Category picker: shown as step 2 when Automated Review didn't suggest a
+    usable category, or when the reviewer taps "Change category" after an
+    AI suggestion was auto-applied. Built from config.EBAY_CATEGORIES,
+    sorted by how often each has actually been picked (database.
+    get_ebay_category_counts) - most-used first, unused/new categories
+    alphabetically after. Discord select menus cap out at 25 options; if
+    EBAY_CATEGORIES ever grows past that, only the 25 most-used show here
+    (logged to console) until pagination gets added.
 
-    If Automated Review guessed a category for this item (items.
-    ai_suggested_category - a name, not an ID) and that name is still a
-    real entry in config.EBAY_CATEGORIES, THAT option is pre-selected
-    instead of just whichever sorts first - the reviewer can still pick
-    anything else, this only changes what's highlighted going in. Picking a
-    category moves to the format select (step 3).
+    Nothing here is pre-checked (`default`) - see EbayConditionSelectView's
+    docstring for why that breaks re-tapping the already-highlighted
+    option on Discord's mobile client. Picking a category moves to the
+    format select (step 3).
     """
 
     MAX_OPTIONS = 25
@@ -179,9 +200,6 @@ class EbayCategorySelectView(discord.ui.View):
         super().__init__(timeout=300)
         self.item_id = item_id
         self.condition_id = condition_id
-
-        item = db.get_item(item_id)
-        suggested_category_id = config.EBAY_CATEGORIES.get(item.get("ai_suggested_category"))
 
         counts = db.get_ebay_category_counts()
         ranked = sorted(
@@ -196,18 +214,11 @@ class EbayCategorySelectView(discord.ui.View):
                 f"{self.MAX_OPTIONS} most-used are shown. Needs pagination."
             )
             ranked = ranked[:self.MAX_OPTIONS]
-            if suggested_category_id and suggested_category_id not in dict(ranked).values():
-                # The AI's pick got truncated out - still worth surfacing, so
-                # add it back rather than silently losing the suggestion.
-                ranked.append((item["ai_suggested_category"], suggested_category_id))
 
         self.select = discord.ui.Select(
             placeholder="Select this item's eBay category..." + (" (list truncated)" if truncated else ""),
             options=[
-                discord.SelectOption(
-                    label=name[:100], value=category_id,
-                    default=(category_id == suggested_category_id),
-                )
+                discord.SelectOption(label=name[:100], value=category_id)
                 for name, category_id in ranked
             ],
         )
@@ -225,12 +236,19 @@ class EbayCategorySelectView(discord.ui.View):
 class EbayFormatSelectView(discord.ui.View):
     """
     Third step of Approve: fixed-price vs. auction, decided per item rather
-    than a global switch. Fixed Price goes straight to EbayListingModal;
-    Auction adds one more step (EbayAuctionDurationSelectView) since eBay
-    needs an explicit *Duration for auctions.
+    than a global switch. Nothing is pre-checked (see EbayConditionSelectView's
+    docstring for why) so either option is always one tap away. Fixed Price
+    goes straight to EbayListingModal; Auction adds one more step
+    (EbayAuctionDurationSelectView) since eBay needs an explicit *Duration
+    for auctions.
+
+    When reached right after an AI-suggested category was auto-applied
+    (see EbayConditionSelectView._on_select), show_change_category adds a
+    button that goes back to the manual EbayCategorySelectView in case the
+    reviewer disagrees with the AI's pick.
     """
 
-    def __init__(self, item_id: int, condition_id: str, category_id: str):
+    def __init__(self, item_id: int, condition_id: str, category_id: str, show_change_category: bool = False):
         super().__init__(timeout=300)
         self.item_id = item_id
         self.condition_id = condition_id
@@ -238,12 +256,16 @@ class EbayFormatSelectView(discord.ui.View):
         self.select = discord.ui.Select(
             placeholder="Fixed price or auction?",
             options=[
-                discord.SelectOption(label="Fixed Price", value="FixedPrice", default=True),
+                discord.SelectOption(label="Fixed Price", value="FixedPrice"),
                 discord.SelectOption(label="Auction", value="Auction"),
             ],
         )
         self.select.callback = self._on_select
         self.add_item(self.select)
+        if show_change_category:
+            change_button = discord.ui.Button(label="Change category", style=discord.ButtonStyle.secondary)
+            change_button.callback = self._on_change_category
+            self.add_item(change_button)
 
     async def _on_select(self, interaction: discord.Interaction):
         listing_format = self.select.values[0]
@@ -256,6 +278,12 @@ class EbayFormatSelectView(discord.ui.View):
             await interaction.response.send_modal(
                 EbayListingModal(self.item_id, self.condition_id, self.category_id, "FixedPrice", None)
             )
+
+    async def _on_change_category(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content="Now select this item's eBay category...",
+            view=EbayCategorySelectView(self.item_id, self.condition_id),
+        )
 
 
 class EbayAuctionDurationSelectView(discord.ui.View):
