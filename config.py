@@ -223,6 +223,17 @@ EBAY_CONDITIONS = [
 EBAY_CONDITION_LABELS = dict(EBAY_CONDITIONS)
 EBAY_DEFAULT_CONDITION_ID = "1500"  # "New other (see details)" - most liquidation items land here
 
+# eBay File Exchange's *Duration values for an Auction-format listing (fixed-
+# price listings always use "GTC" - Good 'Til Cancelled - handled separately
+# in ebay_csv.py). Shown as a Discord select menu, only when the reviewer
+# picks "Auction" as the format during Queue Review approval.
+EBAY_AUCTION_DURATIONS = [
+    ("Days_3", "3 days"),
+    ("Days_5", "5 days"),
+    ("Days_7", "7 days"),
+    ("Days_10", "10 days"),
+]
+
 # ---- eBay category picker ----
 # name -> eBay leaf category ID. Fill this in with your real categories -
 # these two are just placeholders so the select menu has something to show.
@@ -243,6 +254,16 @@ EBAY_CATEGORIES = {
 # archives + clears it so the next batch starts clean.
 EBAY_BATCH_CSV_PATH = os.getenv("EBAY_BATCH_CSV_PATH", "data/ebay_batch.csv")
 EBAY_BATCH_ARCHIVE_DIR = os.getenv("EBAY_BATCH_ARCHIVE_DIR", "data/ebay_batch_archive")
+
+# ---- Pirate Ship CSV export (see pirate_ship_csv.py) ----
+# Only for "Other"-platform sales (FB Marketplace, website, etc.) that were
+# sold outside eBay - eBay sales don't need this, since Pirate Ship pulls
+# those directly via its own native eBay integration. Unlike the eBay batch,
+# there's no separate "add to batch" step: /pirate-ship export-batch queries
+# the database directly for sold-but-not-yet-exported "Other" items each
+# time it runs, so nothing needs accumulating on disk between exports - only
+# where the resulting CSV gets archived for a paper trail.
+PIRATE_SHIP_EXPORT_ARCHIVE_DIR = os.getenv("PIRATE_SHIP_EXPORT_ARCHIVE_DIR", "data/pirate_ship_exports")
 
 # ---- Cloudflare R2 image hosting (optional, see r2_storage.py) ----
 # Gives each Data Entry photo a durable public URL for the eBay CSV batch's

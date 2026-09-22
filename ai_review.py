@@ -31,9 +31,9 @@ Automated Review step. Two backends, switched by config.AI_REVIEW_BACKEND:
                 "request (N tokens) exceeds the available context size"
                 error, meaning images/prompts have grown past the window.
 
-Both backends return the same dict shape (see SYSTEM_PROMPT) and this
-module NEVER modifies or regenerates the photos themselves - only text is
-produced.
+Both backends return the same dict shape (see SYSTEM_PROMPT_TEMPLATE) and
+this module NEVER modifies or regenerates the photos themselves - only text
+is produced.
 
 Photos are read from local disk (see item_flow.py, which saves every
 submitted photo under data/photos/<item_id>/ the moment it's received).
@@ -59,7 +59,11 @@ import config
 # config.AI_ENABLED before invoking the AI step at all.
 _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY) if config.ANTHROPIC_API_KEY else None
 
-SYSTEM_PROMPT = """You are helping a small resale business turn a quick warehouse note \
+# {category_list} is filled in at request time (see _build_system_prompt) from
+# the current config.EBAY_CATEGORIES, so the model only ever suggests a
+# category name we actually have an ID for - item_flow.py's category select
+# maps the name it returns back to an ID.
+SYSTEM_PROMPT_TEMPLATE = """You are helping a small resale business turn a quick warehouse note \
 into an accurate, honest resale listing draft. You will be shown one or more photos of a \
 single physical item plus the short note the intake person wrote.
 
@@ -68,20 +72,49 @@ Your job:
 2. Write a concise, honest listing title (under 80 characters).
 3. Write a short listing description (2-4 sentences) based on what is ACTUALLY VISIBLE \
 in the photos plus the submitted note. Do not invent condition details, functionality \
-claims, or included accessories that are not visible or mentioned.
+claims, or included accessories that are not visible or mentioned. End the description with \
+one short sentence (not a wall of legal text) of standard liquidation-sale disclaimer \
+language: the item is sold as-is, may not have been individually tested for full \
+functionality, and the buyer should review the photos carefully since minor cosmetic wear \
+is possible.
 4. Flag any conflict between the submitted note and what the photo shows (e.g. note says \
 "new" but photo shows visible wear; note says "complete" but a component looks missing).
 5. If the item cannot be confidently identified from the photo, say so plainly rather than \
 guessing.
+6. Suggest the single eBay category that best fits this item, from this exact list (respond \
+with the name EXACTLY as written below, or null if none of them fit reasonably well - never \
+invent a category name that isn't in this list):
+{category_list}
+7. Suggest a realistic USD starting price, based on your general knowledge of resale values \
+for this kind of item. This is a rough estimate from general knowledge, NOT real market \
+data - it always needs a human to confirm or adjust it before the item is actually listed.
 
 Respond ONLY with valid JSON, no other text, in this exact shape:
-{
+{{
   "identified_item": "short string",
   "suggested_title": "string",
   "suggested_description": "string",
   "flags": ["list of strings, empty list if nothing to flag"],
-  "confidence": "high" | "medium" | "low"
-}"""
+  "confidence": "high" | "medium" | "low",
+  "suggested_category": "exact category name from the list above, or null",
+  "suggested_price": number or null
+}}"""
+
+
+def _build_system_prompt() -> str:
+    category_list = "\n".join(f"- {name}" for name in config.EBAY_CATEGORIES) or "(no categories configured)"
+    return SYSTEM_PROMPT_TEMPLATE.format(category_list=category_list)
+
+
+# suggested_price (step 7 above) is a guess from the model's general
+# training knowledge of resale values - it has no access to real market
+# data and is never treated as authoritative anywhere downstream (Queue
+# Review's price field just pre-fills with it, always human-editable before
+# Approve). POSSIBLE FUTURE IMPROVEMENT: pull actual eBay "sold" comps via
+# eBay's Browse API (item_summary/search with a sold/completed filter) for
+# a real market-data-backed estimate instead of a general-knowledge guess -
+# not implemented here, since it needs its own eBay API credentials/calls
+# beyond what config.EBAY_ENABLED currently gates.
 
 
 def _fallback(raw_description: str, reason: str) -> dict:
@@ -93,6 +126,8 @@ def _fallback(raw_description: str, reason: str) -> dict:
         "suggested_description": raw_description or "No description provided.",
         "flags": [f"AI review failed ({reason}) - needs manual write-up"],
         "confidence": "low",
+        "suggested_category": None,
+        "suggested_price": None,
     }
 
 
@@ -117,7 +152,7 @@ async def review_item(photo_paths: list[str], raw_description: str) -> dict:
     """
     Reads the submitted photos from local disk, sends them plus the raw note
     to whichever backend config.AI_REVIEW_BACKEND selects, and returns a
-    dict matching the JSON shape in SYSTEM_PROMPT.
+    dict matching the JSON shape in SYSTEM_PROMPT_TEMPLATE.
 
     Should only be called when config.AI_ENABLED is True - the caller
     (item_flow.py) checks this before invoking the AI step at all.
@@ -168,7 +203,7 @@ async def _review_item_anthropic(photo_paths: list[str], raw_description: str) -
         message = _client.messages.create(
             model=config.ANTHROPIC_MODEL,
             max_tokens=1000,
-            system=SYSTEM_PROMPT,
+            system=_build_system_prompt(),
             messages=[{"role": "user", "content": content_blocks}],
         )
         text = "".join(block.text for block in message.content if block.type == "text")
@@ -199,7 +234,7 @@ def _call_ollama(prompt: str, images_b64: list[str]) -> str:
     """
     payload = json.dumps({
         "model": config.OLLAMA_VISION_MODEL,
-        "system": SYSTEM_PROMPT,
+        "system": _build_system_prompt(),
         "prompt": prompt,
         "images": images_b64,
         "format": "json",

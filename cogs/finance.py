@@ -19,6 +19,12 @@ Purchase Management and Finance Management commands.
                               differ from the number of Data Entry
                               submissions (e.g. junk that was never logged).
 /finance clear-count-override - reverts to the automatic, live count.
+/finance set-shipping-info  - Finance Management or Admin. Records a buyer's
+                              recipient name/address for a non-eBay ("Other"
+                              platform) sale, feeding /pirate-ship
+                              export-batch. Deliberately independent of
+                              record-sale too, since the address often isn't
+                              known until after the price is agreed on.
 /finance summary            - posts a fresh (non-pinned) copy of the same
                               numbers shown on the pinned card, for a
                               record in chat or to check a pallet from
@@ -55,6 +61,44 @@ async def _require_any_role(interaction: discord.Interaction, role_names: list[s
 
 def _get_pallet_or_none(interaction: discord.Interaction):
     return db.get_pallet_by_category(interaction.channel.category_id) if interaction.channel.category_id else None
+
+
+class SetShippingInfoModal(discord.ui.Modal, title="Shipping Info"):
+    """
+    Recipient name/address for a non-eBay sale, feeding /pirate-ship
+    export-batch. A modal (not slash command string options) since a real
+    mailing address needs a multi-line field - Discord slash command string
+    options are single-line.
+    """
+
+    def __init__(self, item_number: int, item_id: int):
+        super().__init__()
+        self.item_number = item_number
+        self.item_id = item_id
+        item = db.get_item(item_id)
+        self.recipient_name = discord.ui.TextInput(
+            label="Recipient Name",
+            default=item.get("recipient_name") or "",
+            max_length=100,
+        )
+        self.shipping_address = discord.ui.TextInput(
+            label="Shipping Address (street, city, state, zip)",
+            style=discord.TextStyle.paragraph,
+            default=item.get("shipping_address") or "",
+            max_length=500,
+        )
+        self.add_item(self.recipient_name)
+        self.add_item(self.shipping_address)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        name = self.recipient_name.value.strip()
+        address = self.shipping_address.value.strip()
+        db.set_shipping_info(self.item_id, name, address, actor_id=interaction.user.id)
+        await interaction.response.send_message(
+            f"📦 Shipping info saved for item #{self.item_number}. It'll go out in the next "
+            f"`/pirate-ship export-batch`.",
+            ephemeral=True,
+        )
 
 
 class Finance(commands.Cog):
@@ -118,6 +162,27 @@ class Finance(commands.Cog):
             f"${price:.2f} on {platform.strip()}. Live card updated.",
             ephemeral=True,
         )
+
+    @finance_group.command(
+        name="set-shipping-info",
+        description="Record a buyer's shipping address for a non-eBay sale. Run inside that pallet's category.",
+    )
+    @app_commands.describe(item_number="The item's number shown on its card (e.g. 3)")
+    async def set_shipping_info(self, interaction: discord.Interaction, item_number: int):
+        if not await _require_any_role(interaction, [config.ROLE_FINANCE_MGMT]):
+            return
+        pallet = _get_pallet_or_none(interaction)
+        if not pallet:
+            await interaction.response.send_message(
+                "Run this inside one of the pallet's own channels, not somewhere else.", ephemeral=True
+            )
+            return
+        item = db.get_item_by_pallet_and_number(pallet["id"], item_number)
+        if not item:
+            await interaction.response.send_message(f"No item #{item_number} found in **{pallet['name']}**.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(SetShippingInfoModal(item_number, item["id"]))
 
     @finance_group.command(name="override-count", description="Manually set the pallet's 'items received' count. Run inside that pallet's category.")
     @app_commands.describe(count="The correct number of items received for this pallet")

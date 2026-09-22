@@ -27,35 +27,52 @@ Every item's card always shows which pallet it belongs to.
   The bot logs it, deletes the original message, and sends it into the
   shared Automated Review channel.
 - In **Automated Review** (shared, bot-only), a vision model identifies the
-  item, drafts a title/description, and flags anything inconsistent between
-  the note and the photo - Claude's cloud API by default, or a local Ollama
-  model (see "Running with the Ollama backend" below) if you'd rather avoid
-  per-item API cost. **Photos are never edited or regenerated.** This step
-  is optional - see "Running without AI review" below.
+  item, drafts a title/description (ending with a short standard
+  liquidation-sale disclaimer - sold as-is, not individually tested for
+  full functionality, buyer should review photos for minor cosmetic wear),
+  flags anything inconsistent between the note and the photo, and suggests
+  an eBay category (from `config.EBAY_CATEGORIES`) and a starting price -
+  Claude's cloud API by default, or a local Ollama model (see "Running with
+  the Ollama backend" below) if you'd rather avoid per-item API cost.
+  **The suggested price is a rough guess from general knowledge, not real
+  market data** - it's only ever a pre-fill Queue Review can accept or
+  change, never treated as final (see "Known limitations" below for a
+  possible future improvement here). **Photos are never edited or
+  regenerated.** This step is optional - see "Running without AI review"
+  below.
 - In **Queue Review** (shared), the Queue Review role approves, edits, or
   rejects (sends back to that item's own pallet's Data Entry channel).
-  Approving walks through three steps to capture everything needed to list
+  Approving walks through four steps to capture everything needed to list
   the item on eBay later: a condition dropdown (`config.EBAY_CONDITIONS` -
   New / New other / New with defects / Used / For parts, with "New other"
   pre-selected since most liquidation items land there), a category dropdown
   (`config.EBAY_CATEGORIES`, sorted by how often each has actually been
-  picked so your most-used categories stay on top), then a short form for
-  title, price, and freeform item specifics (brand/size/color/etc). Only
-  title/category/condition/price are required; specifics can be filled in
-  later. Description and photos are reused as-is from Data Entry.
+  picked, but with Automated Review's suggested category pre-selected
+  instead when it made one), a format dropdown (Fixed Price or Auction -
+  decided per item, not a global switch; Auction adds one more step for the
+  listing duration: 3/5/7/10 days), then a short form for title,
+  price/starting bid (pre-filled with the AI's price suggestion when there
+  is one - always editable), and freeform item specifics
+  (brand/size/color/etc). Only title/category/condition/format/price are
+  required; specifics can be filled in later. Description and photos are
+  reused as-is from Data Entry.
 - **Awaiting Listing** (shared) is where Listing Management actually lists
   the item, via whichever of three buttons fits:
   - **Add to eBay Batch** - appends the item (using the eBay data captured
-    above) as a row to a local CSV matching eBay's Seller Hub bulk-upload /
-    File Exchange template, no API call. Moves the item to
-    **#pending-ebay-upload** until an admin runs `/ebay export-batch` to
-    grab the file, upload it in Seller Hub, and (once eBay actually shows it
-    live) `/ebay confirm-listed` to move it into #listed.
+    above, fixed-price or auction) as a row to a local CSV matching eBay's
+    Seller Hub bulk-upload / File Exchange template, no API call. Moves the
+    item to **#pending-ebay-upload** until an admin runs `/ebay export-batch`
+    to grab the file, upload it in Seller Hub, and (once eBay actually
+    shows it live) `/ebay confirm-listed` to move it into #listed.
   - **List on eBay (API)** - the direct eBay API path. Only shows up once
     `EBAY_ENABLED` is true (see "Running without the eBay API" below);
     currently a stub pending eBay developer API approval.
   - **Mark Listed (Other)** - unchanged manual path for FB Marketplace,
-    website, or anywhere else - moves straight to #listed.
+    website, or anywhere else - moves straight to #listed. For these,
+    **Finance Management** can also run `/finance set-shipping-info` once a
+    buyer's address is known, feeding `/pirate-ship export-batch` (see
+    below) - eBay sales never need this, since Pirate Ship pulls those
+    directly via its own native eBay integration.
 - **Listed** (shared) items get a "Mark as Sold" button - a single click,
   no form, no price prompt. Operational speed was the whole point of
   removing price entry from this button.
@@ -75,6 +92,10 @@ and type a number:
   - `/finance record-sale` - records (or corrects) an item's actual sale
     price + platform, whenever the price is actually known. Not tied to the
     Mark as Sold click at all.
+  - `/finance set-shipping-info` - opens a form for a buyer's recipient
+    name/address on a non-eBay sale, feeding `/pirate-ship export-batch`.
+    Decoupled from record-sale too, since the address often isn't known
+    until after the price is agreed on.
   - `/finance override-count` / `/finance clear-count-override` - manually
     corrects the "items received" figure if the real/accounting count needs
     to differ from what's been logged in Data Entry (e.g. junk that was
@@ -299,13 +320,19 @@ UI after a restart (a Discord client caching quirk, not a bug here).
    attach photo(s), type a short note in the same message, send. The card
    automatically updates - "Items Received" ticks up.
 5. Within a few seconds it reappears in the shared `#queue-review`, labeled
-   with its pallet, with an AI-suggested title/description and any flags.
+   with its pallet, with an AI-suggested title/description (with a short
+   liquidation disclaimer appended) and any flags.
 6. **Queue Review** clicks **Edit** or **Reject / Send Back** (returns to
    that pallet's own Data Entry), or **Approve** - which asks for the eBay
    condition (dropdown, defaults to "New other"), then the eBay category
-   (dropdown, your most-used categories first), then opens a form for eBay
-   title, price, and item specifics (title/category/condition/price are
-   required; specifics can be left blank).
+   (dropdown, pre-selected to whatever the AI suggested if it made one,
+   otherwise your most-used categories first), then Fixed Price or Auction
+   (Auction adds a duration step: 3/5/7/10 days), then opens a form for eBay
+   title, price/starting bid (pre-filled with the AI's price estimate when
+   there is one - always double-check it, it's a general-knowledge guess,
+   not real market data), and item specifics
+   (title/category/condition/format/price are required; specifics can be
+   left blank).
 7. Approved items land in the shared `#awaiting-listing`. **Listing
    Management** picks one of three buttons:
    - **Add to eBay Batch** - appends the item to the local eBay CSV batch, no
@@ -324,10 +351,16 @@ UI after a restart (a Discord client caching quirk, not a bug here).
 10. **Finance Management** runs `/finance record-sale` (in that pallet's
     category, any time - immediately or days later) to log the actual price.
     The pinned card updates: revenue, profit/loss, and cost-recovery bar.
+    For a non-eBay sale, once the buyer's address is known, also run
+    `/finance set-shipping-info` - that feeds `/pirate-ship export-batch`
+    later. eBay sales don't need this at all.
 11. Once shipped, click **Mark as Shipped** in `#sold`.
 12. If anything sits in `#listed` for 10+ days, `#10-day-alerts` pings,
     naming the pallet.
-13. Anytime, check the pinned message at the top of a pallet's
+13. Anytime, a Pallet Admin runs `/pirate-ship export-batch` to grab a
+    shipping CSV for whatever non-eBay sales are waiting, for Pirate Ship's
+    batch order import.
+14. Anytime, check the pinned message at the top of a pallet's
     `#pallet-discussion` for full current status, or run `/finance summary`
     for a fresh non-pinned copy.
 
@@ -362,6 +395,16 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   still waiting) actually went live on eBay after a CSV batch upload, moving
   it from `#pending-ebay-upload` to `#listed`. There's no live API to detect
   this automatically, so it's a manual confirmation after checking Seller Hub.
+- `/pirate-ship export-batch` - exports every sold item on a non-eBay
+  platform ("Other"/FB Marketplace/website, recorded via `/finance
+  record-sale`) that hasn't been exported yet, as a CSV for Pirate Ship's
+  batch/spreadsheet order import, then marks them exported so a re-run
+  doesn't duplicate them. Recipient name/address come from `/finance
+  set-shipping-info`; items missing that get flagged in the response but
+  are still included. Weight/package dimensions aren't tracked in this bot,
+  so those columns are left blank to fill in before creating labels. eBay
+  sales are never included - Pirate Ship pulls those directly via its own
+  native eBay integration.
 
 ---
 
@@ -378,10 +421,13 @@ Tables:
 - **channel_map** - per-pallet channel IDs (discussion, data-entry only)
 - **shared_channels** - the one-row-per-stage mapping for the shared
   pipeline channels, set once by `/setup-shared-channels`
-- **items** - one row per physical item: status, AI-generated text, sale
-  price/platform, local + R2 public photo URLs, and every relevant timestamp
+- **items** - one row per physical item: status, AI-generated text (including
+  its suggested eBay category name and rough price estimate), sale
+  price/platform, non-eBay shipping recipient/address, local + R2 public
+  photo URLs, and every relevant timestamp
 - **ebay_listing_data** - one row per item, captured during Queue Review
-  approval: eBay title, category ID, condition, price, and item specifics
+  approval: eBay title, category ID, condition, format (fixed price or
+  auction) + duration, price (or auction starting bid), and item specifics
   (stored as JSON, since which attributes apply varies by category)
 - **ebay_category_usage** - one row per eBay category ID ever picked, with a
   running count - lets the category select menu sort `config.EBAY_CATEGORIES`
@@ -391,13 +437,17 @@ Tables:
 
 The eBay CSV batch itself is **not** in the database - it's a plain CSV file
 at `data/ebay_batch.csv` (see `ebay_csv.py`), archived to
-`data/ebay_batch_archive/` on each `/ebay export-batch`.
+`data/ebay_batch_archive/` on each `/ebay export-batch`. Pirate Ship exports
+work similarly but with nothing accumulating between runs - each
+`/pirate-ship export-batch` queries the database directly and writes
+straight to `data/pirate_ship_exports/` (see `pirate_ship_csv.py`).
 
 ### Backing this up
 Since this is the only copy of your item/financial history, set up a
-periodic backup of the `data/` folder (database, all saved item photos, and
-the eBay batch CSV + its archive) - a daily `cron` job copying it elsewhere,
-or syncing to cloud storage, is enough at this scale.
+periodic backup of the `data/` folder (database, all saved item photos, the
+eBay batch CSV + its archive, and the Pirate Ship export archive) - a daily
+`cron` job copying it elsewhere, or syncing to cloud storage, is enough at
+this scale.
 
 ---
 
@@ -430,3 +480,15 @@ or syncing to cloud storage, is enough at this scale.
 - **`/ebay confirm-listed` is a manual step.** There's no live eBay API to
   automatically detect that an uploaded CSV batch was actually processed, so
   someone has to check Seller Hub and confirm it by hand.
+- **Automated Review's suggested price is a general-knowledge guess, not
+  real market data.** The model has no access to actual eBay sold listings
+  for the item - it's only ever a Queue Review pre-fill, always editable,
+  never authoritative. **Possible future improvement:** pull real "sold"
+  comps via eBay's Browse API for a market-data-backed estimate instead
+  (not implemented - would need its own eBay API credentials/calls beyond
+  what `config.EBAY_ENABLED` currently gates).
+- **The Pirate Ship CSV doesn't track package weight/dimensions** - nothing
+  in this bot captures those, so those columns are always blank; fill them
+  in before creating shipping labels. Recipient name/address also aren't
+  validated - `/finance set-shipping-info` stores whatever's typed in as
+  freeform text, split into address lines best-effort for the CSV.

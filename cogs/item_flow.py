@@ -163,8 +163,14 @@ class EbayCategorySelectView(discord.ui.View):
     picked (database.get_ebay_category_counts) - most-used first, unused/new
     categories alphabetically after. Discord select menus cap out at 25
     options; if EBAY_CATEGORIES ever grows past that, only the 25 most-used
-    show here (logged to console) until pagination gets added. Picking a
-    category opens EbayListingModal for the remaining fields.
+    show here (logged to console) until pagination gets added.
+
+    If Automated Review guessed a category for this item (items.
+    ai_suggested_category - a name, not an ID) and that name is still a
+    real entry in config.EBAY_CATEGORIES, THAT option is pre-selected
+    instead of just whichever sorts first - the reviewer can still pick
+    anything else, this only changes what's highlighted going in. Picking a
+    category moves to the format select (step 3).
     """
 
     MAX_OPTIONS = 25
@@ -173,6 +179,9 @@ class EbayCategorySelectView(discord.ui.View):
         super().__init__(timeout=300)
         self.item_id = item_id
         self.condition_id = condition_id
+
+        item = db.get_item(item_id)
+        suggested_category_id = config.EBAY_CATEGORIES.get(item.get("ai_suggested_category"))
 
         counts = db.get_ebay_category_counts()
         ranked = sorted(
@@ -187,11 +196,18 @@ class EbayCategorySelectView(discord.ui.View):
                 f"{self.MAX_OPTIONS} most-used are shown. Needs pagination."
             )
             ranked = ranked[:self.MAX_OPTIONS]
+            if suggested_category_id and suggested_category_id not in dict(ranked).values():
+                # The AI's pick got truncated out - still worth surfacing, so
+                # add it back rather than silently losing the suggestion.
+                ranked.append((item["ai_suggested_category"], suggested_category_id))
 
         self.select = discord.ui.Select(
             placeholder="Select this item's eBay category..." + (" (list truncated)" if truncated else ""),
             options=[
-                discord.SelectOption(label=name[:100], value=category_id)
+                discord.SelectOption(
+                    label=name[:100], value=category_id,
+                    default=(category_id == suggested_category_id),
+                )
                 for name, category_id in ranked
             ],
         )
@@ -200,25 +216,97 @@ class EbayCategorySelectView(discord.ui.View):
 
     async def _on_select(self, interaction: discord.Interaction):
         category_id = self.select.values[0]
+        await interaction.response.edit_message(
+            content="Fixed price or auction?",
+            view=EbayFormatSelectView(self.item_id, self.condition_id, category_id),
+        )
+
+
+class EbayFormatSelectView(discord.ui.View):
+    """
+    Third step of Approve: fixed-price vs. auction, decided per item rather
+    than a global switch. Fixed Price goes straight to EbayListingModal;
+    Auction adds one more step (EbayAuctionDurationSelectView) since eBay
+    needs an explicit *Duration for auctions.
+    """
+
+    def __init__(self, item_id: int, condition_id: str, category_id: str):
+        super().__init__(timeout=300)
+        self.item_id = item_id
+        self.condition_id = condition_id
+        self.category_id = category_id
+        self.select = discord.ui.Select(
+            placeholder="Fixed price or auction?",
+            options=[
+                discord.SelectOption(label="Fixed Price", value="FixedPrice", default=True),
+                discord.SelectOption(label="Auction", value="Auction"),
+            ],
+        )
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        listing_format = self.select.values[0]
+        if listing_format == "Auction":
+            await interaction.response.edit_message(
+                content="Select this auction's duration...",
+                view=EbayAuctionDurationSelectView(self.item_id, self.condition_id, self.category_id),
+            )
+        else:
+            await interaction.response.send_modal(
+                EbayListingModal(self.item_id, self.condition_id, self.category_id, "FixedPrice", None)
+            )
+
+
+class EbayAuctionDurationSelectView(discord.ui.View):
+    """Only reached when Auction was picked in EbayFormatSelectView - eBay's
+    *Duration values for auctions (config.EBAY_AUCTION_DURATIONS)."""
+
+    def __init__(self, item_id: int, condition_id: str, category_id: str):
+        super().__init__(timeout=300)
+        self.item_id = item_id
+        self.condition_id = condition_id
+        self.category_id = category_id
+        self.select = discord.ui.Select(
+            placeholder="Select auction duration...",
+            options=[
+                discord.SelectOption(label=label, value=duration)
+                for duration, label in config.EBAY_AUCTION_DURATIONS
+            ],
+        )
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        duration = self.select.values[0]
         await interaction.response.send_modal(
-            EbayListingModal(self.item_id, self.condition_id, category_id)
+            EbayListingModal(self.item_id, self.condition_id, self.category_id, "Auction", duration)
         )
 
 
 class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
     """
-    Third step of Approve. Title/price are required (condition and category
-    were already picked in steps 1-2, and are required too since they're
-    selects, not optional text fields); item specifics are freeform
+    Final step of Approve. Title/price are required (condition/category/
+    format were already picked in steps 1-3, and are required too since
+    they're selects, not optional text fields); item specifics are freeform
     "Key: Value" lines, one per attribute, and can be left blank. Description
     and photos are reused as-is from Data Entry - not re-entered here.
+
+    If there's no existing eBay listing data yet, the price field pre-fills
+    from items.ai_suggested_price (Automated Review's rough estimate from
+    general knowledge, NOT real market data) - always editable, never
+    treated as final. See ai_review.py for a note on a possible future
+    improvement (real eBay "sold" comps via the Browse API).
     """
 
-    def __init__(self, item_id: int, condition_id: str, category_id: str):
+    def __init__(self, item_id: int, condition_id: str, category_id: str,
+                 listing_format: str, auction_duration: str):
         super().__init__()
         self.item_id = item_id
         self.condition_id = condition_id
         self.category_id = category_id
+        self.listing_format = listing_format
+        self.auction_duration = auction_duration
         item = db.get_item(item_id)
         existing = db.get_ebay_listing_data(item_id)
 
@@ -226,14 +314,25 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
         if existing and existing.get("item_specifics"):
             specifics_default = "\n".join(f"{k}: {v}" for k, v in existing["item_specifics"].items())
 
+        if existing:
+            price_default = f"{existing['price']:.2f}"
+        elif item.get("ai_suggested_price") is not None:
+            price_default = f"{item['ai_suggested_price']:.2f}"
+        else:
+            price_default = ""
+
+        price_label = "Starting Bid (USD)" if listing_format == "Auction" else "Price (USD)"
+        if not existing and item.get("ai_suggested_price") is not None:
+            price_label += " - AI est., confirm"
+
         self.ebay_title = discord.ui.TextInput(
             label="eBay Title (max 80 chars)",
             default=(existing["ebay_title"] if existing else (item.get("ai_title") or "")[:80]),
             max_length=80,
         )
         self.price = discord.ui.TextInput(
-            label="Price (USD)",
-            default=(f"{existing['price']:.2f}" if existing else ""),
+            label=price_label[:45],  # Discord TextInput label cap
+            default=price_default,
             max_length=12,
         )
         self.item_specifics = discord.ui.TextInput(
@@ -282,6 +381,7 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
         cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
         await cog.finalize_ebay_approval(
             interaction, self.item_id, self.condition_id, self.category_id, title, price, specifics,
+            self.listing_format, self.auction_duration,
         )
 
 
@@ -557,11 +657,19 @@ class ItemFlow(commands.Cog):
 
         result = await ai_review.review_item(photo_paths, item["raw_description"])
 
+        suggested_price = result.get("suggested_price")
+        try:
+            suggested_price = float(suggested_price) if suggested_price is not None else None
+        except (TypeError, ValueError):
+            suggested_price = None  # model returned something non-numeric - just skip the pre-fill
+
         db.save_ai_review(
             item_id,
             title=result.get("suggested_title", ""),
             description=result.get("suggested_description", ""),
             flags=", ".join(result.get("flags", [])) if result.get("flags") else "",
+            suggested_category=result.get("suggested_category") or None,
+            suggested_price=suggested_price,
         )
 
         try:
@@ -595,16 +703,17 @@ class ItemFlow(commands.Cog):
             )
             return
         await interaction.response.send_message(
-            "Select this item's eBay condition to continue approving - you'll enter "
-            "title/category/price/specifics next.",
+            "Select this item's eBay condition to continue approving - you'll pick a "
+            "category and format (fixed price/auction), then enter title/price/specifics next.",
             view=EbayConditionSelectView(item_id),
             ephemeral=True,
         )
 
     async def finalize_ebay_approval(self, interaction: discord.Interaction, item_id: int, condition_id: str,
-                                      category_id: str, title: str, price: float, specifics: dict):
-        """Step 3 of Approve, called from EbayListingModal.on_submit: saves the
-        eBay data and actually moves the item to Awaiting Listing."""
+                                      category_id: str, title: str, price: float, specifics: dict,
+                                      listing_format: str = "FixedPrice", auction_duration: str = None):
+        """Final step of Approve, called from EbayListingModal.on_submit: saves
+        the eBay data and actually moves the item to Awaiting Listing."""
         item = db.get_item(item_id)
         if item["status"] != db.STATUS_QUEUE_REVIEW:
             await interaction.response.send_message(
@@ -615,7 +724,8 @@ class ItemFlow(commands.Cog):
 
         db.save_ebay_listing_data(
             item_id, ebay_title=title, category_id=category_id, condition_id=condition_id,
-            price=price, item_specifics=specifics, actor_id=interaction.user.id,
+            price=price, item_specifics=specifics, listing_format=listing_format,
+            auction_duration=auction_duration, actor_id=interaction.user.id,
         )
         db.record_ebay_category_use(category_id)
 
@@ -637,9 +747,15 @@ class ItemFlow(commands.Cog):
                 pass
 
         condition_label = config.EBAY_CONDITION_LABELS.get(condition_id, condition_id)
+        format_note = (
+            f"Auction, {dict(config.EBAY_AUCTION_DURATIONS).get(auction_duration, auction_duration)}, "
+            f"starting bid ${price:.2f}"
+            if listing_format == "Auction" else
+            f"Fixed Price, ${price:.2f}"
+        )
         await interaction.response.send_message(
-            f"Approved. eBay listing data saved (condition: **{condition_label}**, "
-            f"${price:.2f}). Moved to <#{channel.id}> for listing.",
+            f"Approved. eBay listing data saved (condition: **{condition_label}**, {format_note}). "
+            f"Moved to <#{channel.id}> for listing.",
             ephemeral=True,
         )
         await finance_utils.refresh_finance_message(self.bot, pallet_id)

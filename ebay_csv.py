@@ -3,12 +3,16 @@ CSV fallback for getting items onto eBay without a live API integration -
 this is what "Add to eBay Batch" (cogs/item_flow.py's AwaitingListingView)
 writes to, and what /ebay export-batch (cogs/ebay.py) hands over.
 
-Columns follow eBay's classic File Exchange "Add" template for a single
-fixed-price listing (Action/CustomLabel/Category/Title/ConditionID/.../
-Quantity), with item specifics appended as dynamic "C:<Name>" columns -
-eBay's own File Exchange convention for per-listing item specifics, since
-which attributes apply (brand, size, color, ...) varies by category and
-can't be fixed columns.
+Columns follow eBay's classic File Exchange "Add" template
+(Action/CustomLabel/Category/Title/ConditionID/.../Quantity), for either a
+fixed-price listing (*Format=FixedPrice, *Duration=GTC) or an auction
+(*Format=Auction, *Duration=Days_3/5/7/10) - decided per item during Queue
+Review approval, see EbayFormatSelectView in item_flow.py. *StartPrice is
+reused for both, holding either the fixed price or the auction starting
+bid. Item specifics are appended as dynamic "C:<Name>" columns - eBay's own
+File Exchange convention for per-listing item specifics, since which
+attributes apply (brand, size, color, ...) varies by category and can't be
+fixed columns.
 
 PicURL uses the item's first Cloudflare R2 public photo URL (see
 r2_storage.py, config.R2_ENABLED) if one was uploaded at Data Entry time.
@@ -89,6 +93,13 @@ def append_item_to_batch(item: dict, listing: dict) -> None:
     public_urls = json.loads(item.get("photo_public_urls") or "[]")
     pic_url = next((u for u in public_urls if u), "")
 
+    # Auction listings need an explicit *Duration (Days_3/5/7/10); fixed-price
+    # ones always use "GTC" (Good 'Til Cancelled). *StartPrice is reused for
+    # both - the fixed price, or the auction starting bid - matching eBay's
+    # own File Exchange convention.
+    listing_format = listing.get("listing_format") or "FixedPrice"
+    duration = listing["auction_duration"] if listing_format == "Auction" else "GTC"
+
     custom_label = _custom_label(item)
     row = {field: "" for field in fieldnames}
     row.update({
@@ -99,8 +110,8 @@ def append_item_to_batch(item: dict, listing: dict) -> None:
         "*ConditionID": listing["condition_id"],
         "PicURL": pic_url,
         "*Description": item.get("ai_description") or item.get("raw_description") or "",
-        "*Format": "FixedPrice",
-        "*Duration": "GTC",
+        "*Format": listing_format,
+        "*Duration": duration,
         "*StartPrice": f"{listing['price']:.2f}",
         "*Quantity": "1",
     })

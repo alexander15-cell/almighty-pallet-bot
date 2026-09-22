@@ -81,6 +81,13 @@ def _migrate_add_columns(conn):
         "ALTER TABLE items ADD COLUMN sale_price REAL",
         "ALTER TABLE items ADD COLUMN sale_platform TEXT",
         "ALTER TABLE items ADD COLUMN photo_public_urls TEXT",
+        "ALTER TABLE items ADD COLUMN ai_suggested_category TEXT",
+        "ALTER TABLE items ADD COLUMN ai_suggested_price REAL",
+        "ALTER TABLE items ADD COLUMN recipient_name TEXT",
+        "ALTER TABLE items ADD COLUMN shipping_address TEXT",
+        "ALTER TABLE items ADD COLUMN pirate_ship_exported INTEGER DEFAULT 0",
+        "ALTER TABLE ebay_listing_data ADD COLUMN listing_format TEXT NOT NULL DEFAULT 'FixedPrice'",
+        "ALTER TABLE ebay_listing_data ADD COLUMN auction_duration TEXT",
     ]
     for stmt in migrations:
         try:
@@ -137,12 +144,17 @@ def init_db():
                 ai_title            TEXT,
                 ai_description      TEXT,
                 ai_flags            TEXT,
+                ai_suggested_category TEXT,          -- eBay category NAME (from config.EBAY_CATEGORIES) Automated Review guessed, pre-selects the Queue Review dropdown
+                ai_suggested_price  REAL,             -- rough AI price guess (general knowledge, not real market data) - pre-fills the Queue Review price field, always human-editable
                 submitted_by        INTEGER,
                 current_message_id  INTEGER,            -- message representing item in its CURRENT channel
                 listed_at           TEXT,
                 sold_at             TEXT,
                 sale_price          REAL,
                 sale_platform       TEXT,
+                recipient_name      TEXT,               -- non-eBay ("Other" platform) sales only - for the Pirate Ship CSV export
+                shipping_address    TEXT,               -- non-eBay ("Other" platform) sales only - for the Pirate Ship CSV export
+                pirate_ship_exported INTEGER DEFAULT 0,  -- set once this item's shipping info has gone out in a /pirate-ship export-batch, so it isn't exported twice
                 shipped_at          TEXT,
                 stale_alert_sent    INTEGER DEFAULT 0,
                 created_at          TEXT NOT NULL,
@@ -170,7 +182,9 @@ def init_db():
                 ebay_title      TEXT NOT NULL,
                 category_id     TEXT NOT NULL,
                 condition_id    TEXT NOT NULL,
-                price           REAL NOT NULL,
+                price           REAL NOT NULL,        -- fixed price, or auction starting bid when listing_format = 'Auction'
+                listing_format  TEXT NOT NULL DEFAULT 'FixedPrice',  -- 'FixedPrice' or 'Auction'
+                auction_duration TEXT,                -- eBay *Duration value (e.g. 'Days_7') - only set when listing_format = 'Auction'
                 item_specifics  TEXT,
                 set_by          INTEGER,
                 created_at      TEXT NOT NULL,
@@ -446,29 +460,38 @@ def get_items_by_status_for_pallet(pallet_id: int, status: str):
 # ------------------------------------------------------- eBay listing data --
 
 def save_ebay_listing_data(item_id: int, ebay_title: str, category_id: str, condition_id: str,
-                            price: float, item_specifics: dict, actor_id: int = None):
+                            price: float, item_specifics: dict, listing_format: str = "FixedPrice",
+                            auction_duration: str = None, actor_id: int = None):
     """
     Upserts the eBay fields captured for this item during Queue Review
     approval. Keyed one-to-one on item_id, so re-approving (or editing later)
     just overwrites the previous values rather than accumulating rows.
+
+    listing_format is "FixedPrice" or "Auction" (see EbayFormatSelectView in
+    item_flow.py); `price` holds either the fixed price or the auction
+    starting bid depending on which, matching how eBay's own *StartPrice
+    field is reused for both. auction_duration (an eBay *Duration value like
+    "Days_7") is only meaningful when listing_format is "Auction".
     """
     with get_conn() as conn:
         now = _now()
         conn.execute(
             """INSERT INTO ebay_listing_data
-                   (item_id, ebay_title, category_id, condition_id, price, item_specifics,
-                    set_by, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   (item_id, ebay_title, category_id, condition_id, price, listing_format,
+                    auction_duration, item_specifics, set_by, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(item_id) DO UPDATE SET
                    ebay_title = excluded.ebay_title,
                    category_id = excluded.category_id,
                    condition_id = excluded.condition_id,
                    price = excluded.price,
+                   listing_format = excluded.listing_format,
+                   auction_duration = excluded.auction_duration,
                    item_specifics = excluded.item_specifics,
                    set_by = excluded.set_by,
                    updated_at = excluded.updated_at""",
-            (item_id, ebay_title, category_id, condition_id, price, json.dumps(item_specifics),
-             actor_id, now, now),
+            (item_id, ebay_title, category_id, condition_id, price, listing_format, auction_duration,
+             json.dumps(item_specifics), actor_id, now, now),
         )
 
 
@@ -624,16 +647,76 @@ def record_item_sale(item_id: int, price: float, platform: str, actor_id: int):
         )
 
 
+def set_shipping_info(item_id: int, recipient_name: str, shipping_address: str, actor_id: int = None):
+    """
+    Used by /finance set-shipping-info for non-eBay ("Other" platform) sales
+    - decoupled from record_item_sale the same way price-recording is
+    decoupled from the operational Mark as Sold click, since a buyer's
+    address often isn't known until after the sale price is agreed on.
+    Feeds /pirate-ship export-batch (see pirate_ship_csv.py); eBay sales
+    never need this, since Pirate Ship pulls those directly via its own
+    native eBay integration.
+    """
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE items SET recipient_name = ?, shipping_address = ?, updated_at = ? WHERE id = ?",
+            (recipient_name, shipping_address, _now(), item_id),
+        )
+        conn.execute(
+            "INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp) "
+            "VALUES (?, NULL, (SELECT status FROM items WHERE id = ?), ?, ?, ?)",
+            (item_id, item_id, actor_id, f"Shipping info recorded for {recipient_name}", _now()),
+        )
+
+
+def get_unexported_other_platform_sales():
+    """
+    Items sold (status = sold, not yet shipped) on any platform other than
+    eBay, that haven't gone out in a /pirate-ship export-batch yet - what
+    that command exports. eBay sales are excluded regardless of export
+    status, since Pirate Ship pulls those directly via its own native eBay
+    integration and never needs this CSV.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT * FROM items
+               WHERE status = ? AND pirate_ship_exported = 0
+               AND sale_platform IS NOT NULL AND LOWER(sale_platform) != 'ebay'
+               ORDER BY pallet_id, item_number""",
+            (STATUS_SOLD,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_pirate_ship_exported(item_ids: list):
+    with get_conn() as conn:
+        conn.executemany(
+            "UPDATE items SET pirate_ship_exported = 1 WHERE id = ?",
+            [(item_id,) for item_id in item_ids],
+        )
+
+
 def set_finance_message(pallet_id: int, message_id: int):
     with get_conn() as conn:
         conn.execute("UPDATE pallets SET finance_message_id = ? WHERE id = ?", (message_id, pallet_id))
 
 
-def save_ai_review(item_id: int, title: str, description: str, flags: str):
+def save_ai_review(item_id: int, title: str, description: str, flags: str,
+                    suggested_category: str = None, suggested_price: float = None):
+    """
+    suggested_category/suggested_price are Automated Review's own guesses
+    (see ai_review.SYSTEM_PROMPT) - suggested_category is an eBay category
+    NAME from config.EBAY_CATEGORIES (not an ID; item_flow.py's category
+    select maps it to an ID at Queue Review time), and suggested_price is a
+    rough estimate from the model's general knowledge, not real market data.
+    Both are just pre-fills for Queue Review's approval flow - never
+    authoritative, always human-editable/overridable before Approve.
+    """
     with get_conn() as conn:
         conn.execute(
-            "UPDATE items SET ai_title = ?, ai_description = ?, ai_flags = ?, updated_at = ? WHERE id = ?",
-            (title, description, flags, _now(), item_id),
+            """UPDATE items SET ai_title = ?, ai_description = ?, ai_flags = ?,
+               ai_suggested_category = ?, ai_suggested_price = ?, updated_at = ? WHERE id = ?""",
+            (title, description, flags, suggested_category, suggested_price, _now(), item_id),
         )
 
 
