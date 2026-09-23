@@ -502,6 +502,30 @@ move its contents into your real `data/` directory, then restart the bot.
 
 ---
 
+## Running the tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/
+```
+
+An early, incremental suite (not exhaustive) covering: core `database.py`
+behavior (pallets/items, financials including refunds/expenses/reversals,
+structured shipping addresses, buyer-data retention, the eBay batch
+lifecycle), `ai_review.py`'s fallback shape and timeout path, `ebay_csv.py`/
+`pirate_ship_csv.py`'s row-building (including the legacy-address fallback
+and buyer-data redaction), `ebay_results.py`'s flexible results-CSV
+parsing, `runtime_settings.py`'s role-ID bindings, and a regression guard
+that fails if a `discord.ui.SelectOption` in `cogs/item_flow.py` is ever
+marked `default=True` again - that reintroduces a real bug where Discord's
+mobile client won't register a tap on an already-checked option. Every
+test uses a throwaway temp database/file
+paths (see `tests/conftest.py`) - running the suite never touches your
+real `.env`, database, or local files. `.github/workflows/tests.yml` runs
+this on every push.
+
+---
+
 ## 5. Database and future migration
 
 All state lives in a single SQLite file at `data/pallet_tracker.db` (see

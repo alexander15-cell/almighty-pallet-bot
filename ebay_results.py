@@ -71,9 +71,19 @@ def parse_results(csv_bytes: bytes) -> dict:
 
         if item_id_value and not looks_like_failure:
             succeeded.append({"custom_label": label, "ebay_item_id": item_id_value})
+        elif looks_like_failure and status_value:
+            # An explicit error/failure message is the most useful reason
+            # to show, whether or not a listing ID also happened to be
+            # present.
+            failed.append({"custom_label": label, "reason": status_value})
+        elif not item_id_value:
+            # No listing ID and no explicit failure text (e.g. a stray
+            # "OK" in the status column that doesn't actually mean this
+            # row succeeded) - the missing ID is the decisive, honest
+            # reason, not whatever unrelated text happened to be there.
+            failed.append({"custom_label": label, "reason": "no listing ID returned"})
         else:
-            reason = status_value or ("no listing ID returned" if not item_id_value else "unrecognized result")
-            failed.append({"custom_label": label, "reason": reason})
+            failed.append({"custom_label": label, "reason": status_value or "unrecognized result"})
 
     return {
         "succeeded": succeeded,
