@@ -3,18 +3,33 @@ Admin commands for the eBay CSV batch fallback (see ebay_csv.py) - the path
 used while there's no live eBay API integration:
 
 /ebay export-batch  - hands the accumulated CSV to whoever manages eBay as a
-                       Discord attachment, then archives + clears it so the
-                       next "Add to eBay Batch" click starts fresh.
-/ebay confirm-listed - once that CSV has actually been uploaded and
-                       processed by eBay, moves the item(s) that were in it
-                       from pending_ebay_upload to Listed. There's no live
-                       API to detect this automatically, so an admin confirms
-                       it by hand after checking Seller Hub.
+                       Discord attachment, archives + clears it so the next
+                       "Add to eBay Batch" click starts fresh, and records a
+                       durable, numbered ebay_batches snapshot of exactly
+                       which items went out in it (see database.
+                       create_ebay_batch) - items.ebay_batch_id points back
+                       to it.
+/ebay batches        - lists recent batches with how many items in each are
+                       still waiting on a result.
+/ebay batch          - shows one batch's still-pending items.
+/ebay import-results - reconciles a batch against a results CSV downloaded
+                       from Seller Hub (see ebay_results.py): rows it can
+                       confidently match as succeeded move that item to
+                       Listed and record the real eBay item ID; anything
+                       else (no listing ID, an explicit error, an
+                       unrecognized SKU) is reported back unresolved rather
+                       than guessed at.
+/ebay confirm-listed - the fully-manual fallback: once a CSV has actually
+                       been uploaded and processed by eBay, moves the
+                       item(s) that were in it from pending_ebay_upload to
+                       Listed by hand, for anyone who'd rather just check
+                       Seller Hub directly than download/upload a results
+                       CSV.
 
-Both require the Pallet Admin role, same as admin_tools.py. The actual
-message/status moving for confirm-listed is delegated to the ItemFlow cog
-(via get_cog, same cross-cog pattern QueueReviewView/AwaitingListingView use)
-so that logic stays in one place alongside the rest of the pipeline.
+All of these require the Pallet Admin role, same as admin_tools.py. The
+actual message/status moving is delegated to the ItemFlow cog (via
+get_cog, same cross-cog pattern QueueReviewView/AwaitingListingView use) so
+that logic stays in one place alongside the rest of the pipeline.
 """
 import discord
 from discord import app_commands
@@ -23,11 +38,13 @@ from discord.ext import commands
 import config
 import database as db
 import ebay_csv
+import ebay_results
 import finance_utils
+import runtime_settings
 
 
 def _is_pallet_admin(interaction: discord.Interaction) -> bool:
-    admin_role = discord.utils.get(interaction.guild.roles, name=config.ROLE_ADMIN)
+    admin_role = runtime_settings.resolve_role(interaction.guild, config.ROLE_ADMIN)
     return bool(admin_role and admin_role in interaction.user.roles)
 
 
@@ -51,10 +68,15 @@ class Ebay(commands.Cog):
         if not await _require_admin(interaction):
             return
 
+        pending_items = db.get_unbatched_pending_items()
         path = ebay_csv.export_and_archive()
         if path is None:
             await interaction.response.send_message("The eBay batch is empty - nothing to export.", ephemeral=True)
             return
+
+        batch_id = db.create_ebay_batch(
+            csv_filename=path.name, exported_by=interaction.user.id, item_ids=[i["id"] for i in pending_items],
+        )
 
         pending_channel_id = db.get_shared_channel_id("pending-ebay-upload")
         pending_channel_mention = f"<#{pending_channel_id}>" if pending_channel_id else "#pending-ebay-upload"
@@ -65,13 +87,118 @@ class Ebay(commands.Cog):
             "or fill PicURL in yourself before uploading."
         )
         await interaction.response.send_message(
-            "📄 eBay batch CSV attached. Upload it in Seller Hub's bulk upload / File Exchange "
-            f"tool - {pic_url_note} The batch has been cleared - the "
-            "next **Add to eBay Batch** click starts a new one. Once eBay actually shows these "
-            f"listings live, run `/ebay confirm-listed` to move them out of {pending_channel_mention}.",
+            f"📄 eBay batch **#{batch_id}** CSV attached ({len(pending_items)} item(s)). Upload it in Seller "
+            f"Hub's bulk upload / File Exchange tool - {pic_url_note} The live batch has been cleared - the "
+            "next **Add to eBay Batch** click starts a new one. Once eBay processes it, either run "
+            f"`/ebay import-results batch_id:{batch_id}` with the results CSV Seller Hub gives you, or "
+            f"`/ebay confirm-listed` by hand after checking Seller Hub, to move these out of {pending_channel_mention}.",
             file=discord.File(path, filename=path.name),
             ephemeral=True,
         )
+
+    @ebay_group.command(name="batches", description="List recent eBay CSV batches and how many items in each are still pending.")
+    async def batches(self, interaction: discord.Interaction):
+        if not await _require_admin(interaction):
+            return
+
+        batches = db.list_ebay_batches()
+        if not batches:
+            await interaction.response.send_message("No eBay batches have been exported yet.", ephemeral=True)
+            return
+
+        lines = []
+        for b in batches:
+            still_pending = len(db.get_ebay_batch_items(b["id"]))
+            lines.append(f"**#{b['id']}** - `{b['csv_filename']}` - {still_pending}/{b['item_count']} still pending")
+        embed = discord.Embed(title="eBay Batches", description="\n".join(lines), color=discord.Color.blurple())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @ebay_group.command(name="batch", description="Show one eBay batch's still-pending items.")
+    @app_commands.describe(batch_id="The batch number shown by /ebay batches or /ebay export-batch")
+    async def batch(self, interaction: discord.Interaction, batch_id: int):
+        if not await _require_admin(interaction):
+            return
+
+        b = db.get_ebay_batch(batch_id)
+        if not b:
+            await interaction.response.send_message(f"No batch #{batch_id} found.", ephemeral=True)
+            return
+
+        pending_items = db.get_ebay_batch_items(batch_id)
+        if not pending_items:
+            await interaction.response.send_message(
+                f"Batch #{batch_id} (`{b['csv_filename']}`, {b['item_count']} item(s)) - none still pending, "
+                "everything from it has already been confirmed or moved on.",
+                ephemeral=True,
+            )
+            return
+
+        lines = [f"#{item['item_number']} (pallet {item['pallet_id']})" for item in pending_items[:25]]
+        await interaction.response.send_message(
+            f"Batch #{batch_id} (`{b['csv_filename']}`) - {len(pending_items)}/{b['item_count']} still pending: "
+            + ", ".join(lines),
+            ephemeral=True,
+        )
+
+    @ebay_group.command(name="import-results", description="Reconcile a batch against a results CSV downloaded from Seller Hub.")
+    @app_commands.describe(
+        batch_id="The batch number shown by /ebay batches or /ebay export-batch",
+        results_csv="The results/report CSV Seller Hub gives you after processing the upload",
+    )
+    async def import_results(self, interaction: discord.Interaction, batch_id: int, results_csv: discord.Attachment):
+        if not await _require_admin(interaction):
+            return
+
+        b = db.get_ebay_batch(batch_id)
+        if not b:
+            await interaction.response.send_message(f"No batch #{batch_id} found.", ephemeral=True)
+            return
+
+        pending_items = db.get_ebay_batch_items(batch_id)
+        if not pending_items:
+            await interaction.response.send_message(f"Batch #{batch_id} has no items still pending a result.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        csv_bytes = await results_csv.read()
+        parsed = ebay_results.parse_results(csv_bytes)
+
+        by_label = {ebay_csv.custom_label(item): item for item in pending_items}
+        cog = self.bot.get_cog("ItemFlow")
+
+        confirmed, confirmed_pallet_ids, unmatched_success, unmatched_failed = [], set(), [], []
+        for row in parsed["succeeded"]:
+            item = by_label.get(row["custom_label"])
+            if not item:
+                unmatched_success.append(row["custom_label"])
+                continue
+            if await cog.confirm_ebay_pending_item(item, actor_id=interaction.user.id, ebay_item_id=row["ebay_item_id"]):
+                confirmed.append(f"#{item['item_number']} (pallet {item['pallet_id']})")
+                confirmed_pallet_ids.add(item["pallet_id"])
+
+        for row in parsed["failed"]:
+            if row["custom_label"] not in by_label:
+                unmatched_failed.append(row["custom_label"])
+
+        for pallet_id in confirmed_pallet_ids:
+            await finance_utils.refresh_finance_message(self.bot, pallet_id)
+
+        lines = [f"✅ Confirmed {len(confirmed)} item(s) live: {', '.join(confirmed) or 'none'}."]
+        if parsed["failed"]:
+            failed_labels = ", ".join(r["custom_label"] for r in parsed["failed"][:10])
+            lines.append(f"❌ {len(parsed['failed'])} row(s) reported failed/no listing ID: {failed_labels}")
+        if unmatched_success or unmatched_failed:
+            lines.append(
+                f"⚠️ {len(unmatched_success) + len(unmatched_failed)} row(s) had a SKU not found in this "
+                f"batch's still-pending items - check they belong to batch #{batch_id} and weren't already resolved."
+            )
+        if parsed["unparsed_rows"]:
+            lines.append(f"⚠️ {parsed['unparsed_rows']} row(s) had no readable SKU column and were skipped.")
+        still_pending_after = len(db.get_ebay_batch_items(batch_id))
+        if still_pending_after:
+            lines.append(f"{still_pending_after} item(s) in this batch are still unresolved - use `/ebay batch batch_id:{batch_id}` to see them.")
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     @ebay_group.command(
         name="confirm-listed",

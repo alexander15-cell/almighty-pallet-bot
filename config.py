@@ -10,7 +10,12 @@ load_dotenv()
 # ---- Secrets (set these in a .env file, never hardcode them) ----
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")  # optional - only used by the "anthropic" backend below
-GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))  # your server's ID
+# Every int()/float() env var below uses `os.getenv("X") or "default"`, not
+# os.getenv("X", "default") - the two-arg form only falls back when the key
+# is entirely ABSENT from .env, not when it's present but left blank (e.g.
+# "DISCORD_GUILD_ID=" from a freshly-copied .env.example), which crashed
+# the bot at startup with a ValueError instead of using the default.
+GUILD_ID = int(os.getenv("DISCORD_GUILD_ID") or "0")  # your server's ID
 
 # ---- Automated Review (AI) backend ----
 # "anthropic" (default) - Claude's cloud vision API, requires ANTHROPIC_API_KEY.
@@ -35,7 +40,15 @@ OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "moondream")
 # real headroom. Raise it further in .env if larger images or longer
 # prompts start hitting the same error again; a bigger context window uses
 # more of the host machine's RAM/VRAM.
-OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "4096"))
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX") or "4096")
+
+# How long to wait for either AI backend before giving up and falling back
+# to the raw submitted note (see ai_review.review_item) - without this, a
+# hung network call or an overloaded local Ollama server could block that
+# item's review indefinitely. 90s comfortably covers normal cloud latency
+# and most local generations; raise it if OLLAMA_NUM_CTX/slower hardware
+# means legitimate reviews are getting cut off.
+AI_TIMEOUT_SECONDS = float(os.getenv("AI_TIMEOUT_SECONDS") or "90")
 
 # Whether the Automated Review (AI) step is active:
 #   - "anthropic" backend: on the moment a real ANTHROPIC_API_KEY is set.
@@ -184,6 +197,36 @@ STALE_CHECK_INTERVAL_HOURS = 12  # how often the background job checks for stale
 
 # ---- Database ----
 DATABASE_PATH = os.getenv("DATABASE_PATH", "data/pallet_tracker.db")
+
+# ---- Local backups (see backup.py) ----
+# Verified zip snapshots of the database + photos + CSV batch archives.
+# Created automatically every BACKUP_INTERVAL_HOURS while the bot is
+# running (cogs/admin_tools.py) and on demand via /admin backup-now or
+# `python backup.py create`. BACKUP_KEEP_COUNT/BACKUP_MAX_AGE_DAYS bound
+# how many pile up in BACKUP_DIR - whichever limit is hit first prunes the
+# oldest. Backups contain real business/customer data - don't upload them
+# anywhere public.
+BACKUP_DIR = os.getenv("BACKUP_DIR", "backups")
+BACKUP_INTERVAL_HOURS = int(os.getenv("BACKUP_INTERVAL_HOURS") or "24")
+BACKUP_KEEP_COUNT = int(os.getenv("BACKUP_KEEP_COUNT") or "14")
+BACKUP_MAX_AGE_DAYS = int(os.getenv("BACKUP_MAX_AGE_DAYS") or "14")
+
+# ---- Local photo storage (see workflow photo handling in item_flow.py) ----
+PHOTO_DIR = os.getenv("PHOTO_DIR", "data/photos")
+
+# ---- Single-instance lock (see instance_lock.py) ----
+INSTANCE_LOCK_PATH = os.getenv("INSTANCE_LOCK_PATH", "data/.bot.lock")
+
+# ---- Non-secret runtime settings editable from Discord (see runtime_settings.py) ----
+SETTINGS_PATH = os.getenv("SETTINGS_PATH", "data/settings.json")
+
+# ---- Buyer data retention (see /pirate-ship purge-buyer-data) ----
+# How many days after an item ships before its buyer's name/address is
+# eligible for removal. Only recipient_name/shipping_address/structured
+# address fields are cleared - inventory identity, sale price, and audit
+# actors are never touched. Purging is always an explicit admin action
+# (preview by default, confirm:True to actually run it), never automatic.
+BUYER_DATA_RETENTION_DAYS = int(os.getenv("BUYER_DATA_RETENTION_DAYS") or "90")
 
 # ---- AI review model (only used by the "anthropic" backend) ----
 ANTHROPIC_MODEL = "claude-sonnet-5"

@@ -97,10 +97,20 @@ and type a number:
   - `/finance record-sale` - records (or corrects) an item's actual sale
     price + platform, whenever the price is actually known. Not tied to the
     Mark as Sold click at all.
-  - `/finance set-shipping-info` - opens a form for a buyer's recipient
-    name/address on a non-eBay sale, feeding `/pirate-ship export-batch`.
-    Decoupled from record-sale too, since the address often isn't known
-    until after the price is agreed on.
+  - `/finance refund` - logs a refund against an item's sale. Doesn't touch
+    the original sale price (that sale still happened) - refunds net out
+    separately against revenue everywhere it's shown.
+  - `/finance expense` - logs a cost against a pallet (packaging, listing
+    fees, etc.), optionally tied to one item.
+  - `/finance reverse-sale` - undoes an item's recorded sale (duplicate
+    entry, a sale that fell through) - clears its sale price but keeps a
+    record of what was reversed and why.
+  - `/finance history` - lists a pallet's recent refunds/expenses/reversals.
+  - `/finance set-shipping-info` - opens a two-step form for a buyer's
+    recipient name and structured address (address lines, city, state,
+    postal code, country) on a non-eBay sale, feeding `/pirate-ship
+    export-batch`. Decoupled from record-sale too, since the address often
+    isn't known until after the price is agreed on.
   - `/finance override-count` / `/finance clear-count-override` - manually
     corrects the "items received" figure if the real/accounting count needs
     to differ from what's been logged in Data Entry (e.g. junk that was
@@ -184,6 +194,18 @@ backend" below.)
 
 ## 2. Running the bot
 
+The easiest way: run `start_bot.bat` (Windows - double-click it, or make a
+Desktop shortcut to it) or `./start_bot.sh` (Linux/macOS). Either one
+creates the virtual environment and installs/updates dependencies
+automatically, creates `.env` from `.env.example` and tells you to fill it
+in if it's missing, checks `DISCORD_BOT_TOKEN` is actually set before
+trying to start, and keeps the window open with the real error (instead of
+flashing shut) if the bot exits - offering to restart it right there. Run
+it again any time you want to start the bot, including after pulling
+updates.
+
+To do the same thing by hand instead:
+
 ```bash
 cd pallet-bot
 python -m venv venv
@@ -196,6 +218,12 @@ cp .env.example .env
 
 python bot.py
 ```
+
+The bot refuses to start a second instance against the same data directory
+(a lock file under `data/`, released automatically even if the process
+crashes) - if `python bot.py` exits immediately saying another process
+already holds the lock, an existing instance is still running against this
+same `data/` directory somewhere.
 
 Once it's running and logged in, run these slash commands **once, in this
 order**:
@@ -394,13 +422,28 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   The shared pipeline channels themselves are NOT deleted, since they're
   reusable infrastructure - only their message history is cleared.
 - `/ebay export-batch` - downloads the accumulated eBay CSV batch as a
-  Discord attachment, then archives and clears it so the next **Add to eBay
-  Batch** click starts a fresh file.
+  Discord attachment, archives and clears it so the next **Add to eBay
+  Batch** click starts a fresh file, and records a durable, numbered batch
+  snapshot (`/ebay batches`/`/ebay batch`) of exactly which items went out
+  in it.
+- `/ebay import-results <batch_id> <results_csv>` - reconciles a batch
+  against the results/report CSV Seller Hub gives you after processing an
+  upload. Column names in eBay's results CSVs vary, so this matches them
+  loosely (a SKU-like column, a listing-ID-like column, an optional status/
+  error column) rather than expecting one fixed layout. Rows it can
+  confidently match as succeeded move that item to Listed and record the
+  real eBay item ID; anything else (no listing ID, an explicit error, an
+  unrecognized SKU) is reported back unresolved instead of guessed at - the
+  response lists exactly what wasn't resolved.
+- `/ebay batches` - lists recent batches with how many items in each are
+  still waiting on a result. `/ebay batch <batch_id>` shows one batch's
+  still-pending items.
 - `/ebay confirm-listed [item_number]` - run inside a pallet's category.
-  Confirms that item (or, with no `item_number`, every item in that pallet
-  still waiting) actually went live on eBay after a CSV batch upload, moving
-  it from `#pending-ebay-upload` to `#listed`. There's no live API to detect
-  this automatically, so it's a manual confirmation after checking Seller Hub.
+  The fully-manual fallback to `/ebay import-results`: confirms that item
+  (or, with no `item_number`, every item in that pallet still waiting)
+  actually went live on eBay, moving it from `#pending-ebay-upload` to
+  `#listed`, for anyone who'd rather just check Seller Hub directly than
+  download/upload a results CSV.
 - `/pirate-ship export-batch` - exports every sold item on a non-eBay
   platform ("Other"/FB Marketplace/website, recorded via `/finance
   record-sale`) that hasn't been exported yet, as a CSV for Pirate Ship's
@@ -411,6 +454,87 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   so those columns are left blank to fill in before creating labels. eBay
   sales are never included - Pirate Ship pulls those directly via its own
   native eBay integration.
+- `/backup-now` - creates and verifies a local backup immediately (see
+  "Backups" below); `/backups` lists recent ones with size and age.
+- `/bind-role <role_name> <role>` / `/unbind-role <role_name>` /
+  `/role-bindings` - optional role-ID bindings (see "Role bindings" below),
+  editable live from Discord, no restart needed.
+- `/pirate-ship purge-buyer-data [days] [confirm]` - previews (default) or,
+  with `confirm:True`, clears recipient name/address from shipped items
+  past `BUYER_DATA_RETENTION_DAYS` (default 90) days, and redacts matching
+  rows in already-exported Pirate Ship CSV archives. Inventory identity,
+  sale price, and audit history are never touched - only buyer contact
+  info. CSVs/Discord attachments downloaded before a purge still have the
+  old data; that needs separate manual cleanup.
+
+## Role bindings
+
+By default every permission check matches a role by **name** (e.g. a role
+literally called "Pallet Admin") - simple, no setup needed, but it breaks
+if that role ever gets renamed in Discord. `/bind-role <role_name> <role>`
+binds one of this bot's six roles (Data Entry, Queue Review, Listing
+Management, Purchase Management, Finance Management, Pallet Admin) to a
+specific Discord role's ID instead, so a rename no longer matters. This is
+entirely optional, takes effect immediately (no restart), and is stored in
+`SETTINGS_PATH` (default `data/settings.json`) - `/unbind-role` reverts to
+matching by name, and `/role-bindings` shows the current state. If a bound
+role is later deleted, checks for it automatically fall back to matching
+by name again rather than breaking outright.
+
+## Backups
+
+A verified zip snapshot (database, photos, eBay/Pirate Ship CSV archives)
+is created automatically every `BACKUP_INTERVAL_HOURS` (default 24) while
+the bot is running, and saved under `BACKUP_DIR` (default `backups/`).
+`BACKUP_KEEP_COUNT`/`BACKUP_MAX_AGE_DAYS` (defaults: 14 snapshots / 14
+days) bound how many pile up - whichever limit is hit first prunes the
+oldest. The database is captured with SQLite's own backup API, not a plain
+file copy, so a backup taken mid-write is still a consistent, valid
+snapshot. Every backup's manifest is hash-checked right after it's
+created, and again before any restore - a backup that fails that check is
+never restored from, and a newly-created one that fails it is discarded
+immediately rather than left on disk looking valid.
+
+Backups contain real business/customer data - don't upload them anywhere
+public. Restoring one is deliberately **not** a Discord command (it's the
+one operation here that can put stale data back in place of current data)
+- run it from the command line with the bot stopped:
+
+```
+python backup.py verify path/to/backup.zip
+python backup.py restore path/to/backup.zip --destination path/to/new-data
+```
+
+Restore only ever writes into a new, empty directory - it refuses to touch
+one that already has files in it, so a bad restore can't overwrite a
+working installation. The restored directory has the same layout as
+`data/` (`pallet_tracker.db`, `photos/`, `ebay_batch_archive/`,
+`pirate_ship_exports/`); point `DATABASE_PATH`/`PHOTO_DIR`/etc at it, or
+move its contents into your real `data/` directory, then restart the bot.
+
+---
+
+## Running the tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/
+```
+
+An early, incremental suite (not exhaustive) covering: core `database.py`
+behavior (pallets/items, financials including refunds/expenses/reversals,
+structured shipping addresses, buyer-data retention, the eBay batch
+lifecycle), `ai_review.py`'s fallback shape and timeout path, `ebay_csv.py`/
+`pirate_ship_csv.py`'s row-building (including the legacy-address fallback
+and buyer-data redaction), `ebay_results.py`'s flexible results-CSV
+parsing, `runtime_settings.py`'s role-ID bindings, and a regression guard
+that fails if a `discord.ui.SelectOption` in `cogs/item_flow.py` is ever
+marked `default=True` again - that reintroduces a real bug where Discord's
+mobile client won't register a tap on an already-checked option. Every
+test uses a throwaway temp database/file
+paths (see `tests/conftest.py`) - running the suite never touches your
+real `.env`, database, or local files. `.github/workflows/tests.yml` runs
+this on every push.
 
 ---
 
@@ -495,6 +619,10 @@ this scale.
   what `config.EBAY_ENABLED` currently gates).
 - **The Pirate Ship CSV doesn't track package weight/dimensions** - nothing
   in this bot captures those, so those columns are always blank; fill them
-  in before creating shipping labels. Recipient name/address also aren't
-  validated - `/finance set-shipping-info` stores whatever's typed in as
-  freeform text, split into address lines best-effort for the CSV.
+  in before creating shipping labels. `/finance set-shipping-info` captures
+  a structured address (address lines, city, state, postal code, country)
+  as of the fields themselves, but none of it is validated against a real
+  address database - a typo'd city or zip saves exactly as typed. Items
+  shipped before this structured form existed only have the old freeform
+  address blob, which is still split into address lines best-effort for
+  the CSV (city/state/zip are left blank for those older rows).

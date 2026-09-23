@@ -55,12 +55,13 @@ BASE_FIELDS = [
 ]
 
 
-def _custom_label(item: dict) -> str:
+def custom_label(item: dict) -> str:
     """
-    A stable, human-traceable SKU for this item - also used as the key for
-    "is this item already a row in the current batch" so re-adding an item
-    (e.g. after Queue Review data was corrected) replaces its row instead of
-    duplicating it.
+    A stable, human-traceable SKU for this item - used as the key for
+    "is this item already a row in the current batch" (so re-adding an item,
+    e.g. after Queue Review data was corrected, replaces its row instead of
+    duplicating it), and by cogs/ebay.py's import-results reconciliation to
+    match a results CSV's "Custom Label (SKU)" column back to an item.
     """
     return f"pallet-{item['pallet_id']}-item-{item['item_number']}"
 
@@ -100,11 +101,11 @@ def append_item_to_batch(item: dict, listing: dict) -> None:
     listing_format = listing.get("listing_format") or "FixedPrice"
     duration = listing["auction_duration"] if listing_format == "Auction" else "GTC"
 
-    custom_label = _custom_label(item)
+    label = custom_label(item)
     row = {field: "" for field in fieldnames}
     row.update({
         "Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)": "Add",
-        "CustomLabel": custom_label,
+        "CustomLabel": label,
         "*Category": listing["category_id"],
         "*Title": listing["ebay_title"],
         "*ConditionID": listing["condition_id"],
@@ -118,7 +119,7 @@ def append_item_to_batch(item: dict, listing: dict) -> None:
     for key, value in specifics.items():
         row[f"C:{key}"] = value
 
-    rows = [r for r in rows if r.get("CustomLabel") != custom_label]
+    rows = [r for r in rows if r.get("CustomLabel") != label]
     rows.append(row)
 
     BATCH_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)

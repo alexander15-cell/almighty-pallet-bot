@@ -13,13 +13,16 @@ it's run, for every STATUS_SOLD item with a non-eBay sale_platform that
 hasn't been exported yet (see database.get_unexported_other_platform_sales),
 so nothing needs accumulating on disk between exports.
 
-Recipient name/address are freeform text captured via /finance
-set-shipping-info - decoupled from the sale-price recording the same way
-Mark as Sold is decoupled from price recording, since a buyer's address
-often isn't known until after the price is agreed on. Weight/dimensions
-aren't tracked anywhere in this bot yet, so those columns are left blank
-for whoever processes the batch to fill in by hand before uploading -
-same "leave it blank, fill in by hand" precedent as ebay_csv.py's PicURL.
+Recipient/address are captured as structured fields (address_line1/city/
+state/postal_code/country) via /finance set-shipping-info - decoupled from
+the sale-price recording the same way Mark as Sold is decoupled from price
+recording, since a buyer's address often isn't known until after the price
+is agreed on. Items shipped before the structured form existed only have
+the old freeform shipping_address blob; _legacy_split_address() best-effort
+splits that for those rows only. Weight/dimensions aren't tracked anywhere
+in this bot yet, so those columns are left blank for whoever processes the
+batch to fill in by hand before uploading - same "leave it blank, fill in
+by hand" precedent as ebay_csv.py's PicURL.
 """
 import csv
 from datetime import datetime, timezone
@@ -52,20 +55,26 @@ FIELDS = [
 ]
 
 
-def _split_address(shipping_address: str) -> dict:
+def _legacy_split_address(shipping_address: str) -> dict:
     """
-    shipping_address is captured as one freeform multi-line block (see
-    /finance set-shipping-info) - not broken into structured street/city/
-    state/zip fields, since this bot doesn't validate addresses. Splits it
-    on newlines into Address Line 1/2 best-effort; whoever processes the
-    batch should double-check City/State/Zip/Country before uploading,
-    since those are left blank here rather than guessed at from free text.
+    Fallback for rows shipped before structured address fields existed -
+    shipping_address there is one freeform multi-line block with no
+    city/state/zip/country captured at all. Splits it on newlines into
+    Address Line 1/2 best-effort; whoever processes the batch should fill
+    in City/State/Zip/Country by hand for these older rows.
     """
     lines = [line.strip() for line in (shipping_address or "").splitlines() if line.strip()]
     return {
         "Address Line 1": lines[0] if lines else "",
         "Address Line 2": " / ".join(lines[1:]) if len(lines) > 1 else "",
     }
+
+
+def order_number(item: dict) -> str:
+    """The stable per-item key used as this CSV's Order Number column -
+    factored out so redact_archived_buyer_data() can match rows against it
+    without duplicating the format string."""
+    return f"pallet-{item['pallet_id']}-item-{item['item_number']}"
 
 
 def build_export_rows(items: list) -> list:
@@ -75,15 +84,67 @@ def build_export_rows(items: list) -> list:
     for item in items:
         row = {field: "" for field in FIELDS}
         row.update({
-            "Order Number": f"pallet-{item['pallet_id']}-item-{item['item_number']}",
+            "Order Number": order_number(item),
             "Recipient Name": item.get("recipient_name") or "",
-            "Country": "US",
             "Item Description": item.get("ai_title") or item.get("ai_description") or item.get("raw_description") or "",
             "Value (USD)": f"{item['sale_price']:.2f}" if item.get("sale_price") is not None else "",
         })
-        row.update(_split_address(item.get("shipping_address")))
+        if item.get("address_line1"):
+            row.update({
+                "Address Line 1": item.get("address_line1") or "",
+                "Address Line 2": item.get("address_line2") or "",
+                "City": item.get("city") or "",
+                "State": item.get("state") or "",
+                "Zip": item.get("postal_code") or "",
+                "Country": item.get("country") or "US",
+            })
+        else:
+            row["Country"] = "US"
+            row.update(_legacy_split_address(item.get("shipping_address")))
         rows.append(row)
     return rows
+
+
+BUYER_FIELDS_TO_REDACT = ("Recipient Name", "Address Line 1", "Address Line 2", "City", "State", "Zip", "Country")
+
+
+def redact_archived_buyer_data(order_numbers) -> int:
+    """
+    Blanks the buyer-identifying columns (everything except Order Number,
+    Item Description, Value, and the weight/dimension columns nothing here
+    ever fills in) for any row in any already-exported CSV under
+    ARCHIVE_DIR whose Order Number matches one of `order_numbers` (see
+    order_number() above). Used by /pirate-ship purge-buyer-data so a
+    retention purge also reaches CSVs that were already downloaded, not
+    just the live database rows. Returns how many rows were redacted; files
+    with no matching rows are left untouched.
+    """
+    order_numbers = set(order_numbers)
+    if not order_numbers or not ARCHIVE_DIR.exists():
+        return 0
+
+    redacted_count = 0
+    for csv_path in ARCHIVE_DIR.glob("*.csv"):
+        with csv_path.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames
+            rows = list(reader)
+        if not fieldnames:
+            continue
+        changed = False
+        for row in rows:
+            if row.get("Order Number") in order_numbers:
+                for field in BUYER_FIELDS_TO_REDACT:
+                    if row.get(field):
+                        row[field] = ""
+                changed = True
+                redacted_count += 1
+        if changed:
+            with csv_path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+    return redacted_count
 
 
 def export_pending(items: list) -> Path:

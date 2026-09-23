@@ -1,24 +1,51 @@
 """
 Admin-only management commands: deleting a single item, archiving a finished
 pallet (removes its Discord channels but keeps all data), listing pallets,
-and a full database wipe.
+a full database wipe, and local backups (see backup.py).
 
 Every command here requires the "Pallet Admin" role. /db-wipe additionally
 requires the caller to hold real Discord Administrator permission on the
 server, as a second, harder-to-grant safety layer on top of the bot's own
 role system, since wiping the database is irreversible.
+
+/backup-now and /backups only ever create or list backups - restoring one
+is deliberately CLI-only (`python backup.py restore ...`, run with the bot
+stopped), not a Discord command, since it's the one operation here that can
+put stale data back in place of current data.
+
+/bind-role, /unbind-role, /role-bindings - optional role-ID bindings (see
+runtime_settings.py). Every permission check normally matches a role by
+NAME (e.g. "Pallet Admin"), which breaks if that role gets renamed in
+Discord; binding it to its actual role ID here makes that check survive a
+rename. Purely optional and editable at runtime - an unbound role just
+keeps matching by name like today.
 """
+import asyncio
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
+import backup
 import config
 import database as db
 import finance_utils
+import runtime_settings
+
+log = logging.getLogger(__name__)
+
+_BINDABLE_ROLES = [
+    config.ROLE_DATA_ENTRY, config.ROLE_QUEUE_REVIEW, config.ROLE_LISTING_MGMT,
+    config.ROLE_PURCHASE_MGMT, config.ROLE_FINANCE_MGMT, config.ROLE_ADMIN,
+]
+_ROLE_NAME_CHOICES = [app_commands.Choice(name=name, value=name) for name in _BINDABLE_ROLES]
 
 
 def _is_pallet_admin(interaction: discord.Interaction) -> bool:
-    admin_role = discord.utils.get(interaction.guild.roles, name=config.ROLE_ADMIN)
+    admin_role = runtime_settings.resolve_role(interaction.guild, config.ROLE_ADMIN)
     return bool(admin_role and admin_role in interaction.user.roles)
 
 
@@ -127,9 +154,29 @@ class ConfirmWipeModal(discord.ui.Modal, title="⚠️ Confirm Full Database Wip
 class AdminTools(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.backup_loop.start()
+
+    def cog_unload(self):
+        self.backup_loop.cancel()
 
     item_group = app_commands.Group(name="item", description="Admin item management")
     pallet_group = app_commands.Group(name="pallet", description="Admin pallet management")
+
+    @tasks.loop(hours=config.BACKUP_INTERVAL_HOURS)
+    async def backup_loop(self):
+        """Scheduled local backup (see backup.py) - runs every
+        BACKUP_INTERVAL_HOURS while the bot is online. A failure here is
+        logged, not raised, so one bad backup attempt doesn't crash the
+        whole bot or stop future scheduled attempts."""
+        try:
+            path = await asyncio.to_thread(backup.create_backup)
+            log.info(f"Scheduled backup created: {path}")
+        except Exception:
+            log.exception("Scheduled backup failed")
+
+    @backup_loop.before_loop
+    async def _before_backup_loop(self):
+        await self.bot.wait_until_ready()
 
     @item_group.command(name="delete", description="Delete a single item by its number. Run inside that pallet's category.")
     @app_commands.describe(item_number="The item's number shown on its card (e.g. 3)")
@@ -290,6 +337,88 @@ class AdminTools(commands.Cog):
             )
         else:
             raise error
+
+    @app_commands.command(name="backup-now", description="Create a verified local backup of the database, photos, and CSV archives right now.")
+    async def backup_now(self, interaction: discord.Interaction):
+        if not await _require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            path = await asyncio.to_thread(backup.create_backup)
+        except Exception as e:
+            log.exception("Manual backup failed")
+            await interaction.followup.send(f"Backup failed: {e}", ephemeral=True)
+            return
+        await interaction.followup.send(f"✅ Backup created and verified: `{path.name}`", ephemeral=True)
+
+    @app_commands.command(name="backups", description="List recent local backups.")
+    async def backups(self, interaction: discord.Interaction):
+        if not await _require_admin(interaction):
+            return
+        backup_dir = Path(config.BACKUP_DIR)
+        files = sorted(backup_dir.glob("backup_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True) if backup_dir.exists() else []
+        if not files:
+            await interaction.response.send_message(
+                "No local backups yet - one is created automatically every "
+                f"{config.BACKUP_INTERVAL_HOURS}h, or run `/admin backup-now`.",
+                ephemeral=True,
+            )
+            return
+        lines = []
+        for path in files[:15]:
+            size_mb = path.stat().st_size / (1024 * 1024)
+            age = datetime.now(timezone.utc) - datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            lines.append(f"`{path.name}` - {size_mb:.1f} MB - {age.days}d {age.seconds // 3600}h ago")
+        embed = discord.Embed(
+            title="Local Backups",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text=f"Showing {min(len(files), 15)} of {len(files)}. Kept up to {config.BACKUP_KEEP_COUNT} snapshots / {config.BACKUP_MAX_AGE_DAYS} days.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="bind-role", description="Bind one of this bot's roles to a specific Discord role, so a future rename doesn't break it.")
+    @app_commands.describe(role_name="Which of this bot's roles to bind", role="The actual Discord role to bind it to")
+    @app_commands.choices(role_name=_ROLE_NAME_CHOICES)
+    async def bind_role(self, interaction: discord.Interaction, role_name: app_commands.Choice[str], role: discord.Role):
+        if not await _require_admin(interaction):
+            return
+        runtime_settings.set_role_id(role_name.value, role.id)
+        await interaction.response.send_message(
+            f"🔗 Bound **{role_name.value}** to {role.mention} (id `{role.id}`). Renaming that role in Discord "
+            f"won't break this bot's permission checks anymore. Use `/admin unbind-role` to revert to "
+            f"matching by name.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="unbind-role", description="Remove a role-ID binding, reverting to matching that role by name.")
+    @app_commands.describe(role_name="Which of this bot's roles to unbind")
+    @app_commands.choices(role_name=_ROLE_NAME_CHOICES)
+    async def unbind_role(self, interaction: discord.Interaction, role_name: app_commands.Choice[str]):
+        if not await _require_admin(interaction):
+            return
+        runtime_settings.clear_role_id(role_name.value)
+        await interaction.response.send_message(
+            f"Unbound **{role_name.value}** - it'll match by name (a role literally called "
+            f"\"{role_name.value}\") again.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="role-bindings", description="List which of this bot's roles are bound to a specific Discord role ID.")
+    async def role_bindings(self, interaction: discord.Interaction):
+        if not await _require_admin(interaction):
+            return
+        bindings = runtime_settings.get_bindings()
+        lines = []
+        for role_name in _BINDABLE_ROLES:
+            role_id = bindings.get(role_name)
+            if role_id:
+                role = interaction.guild.get_role(role_id)
+                status = role.mention if role else f"id `{role_id}` (role no longer exists - falling back to name match)"
+                lines.append(f"**{role_name}** → {status}")
+            else:
+                lines.append(f"**{role_name}** → matching by name (not bound)")
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

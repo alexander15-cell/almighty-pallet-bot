@@ -12,6 +12,7 @@ from discord.ext import commands
 
 import config
 import database as db
+import instance_lock
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("pallet_bot")
@@ -52,6 +53,11 @@ async def on_ready():
 
 
 async def main():
+    try:
+        instance_lock.acquire(config.INSTANCE_LOCK_PATH)
+    except instance_lock.AlreadyRunningError as e:
+        raise SystemExit(str(e))
+
     if not config.DISCORD_BOT_TOKEN:
         raise SystemExit("DISCORD_BOT_TOKEN is not set. Check your .env file.")
     if not config.AI_ENABLED:
@@ -77,11 +83,14 @@ async def main():
     db.init_db()
     log.info(f"Database ready at {config.DATABASE_PATH}")
 
-    async with bot:
-        for cog in COGS:
-            await bot.load_extension(cog)
-            log.info(f"Loaded {cog}")
-        await bot.start(config.DISCORD_BOT_TOKEN)
+    try:
+        async with bot:
+            for cog in COGS:
+                await bot.load_extension(cog)
+                log.info(f"Loaded {cog}")
+            await bot.start(config.DISCORD_BOT_TOKEN)
+    finally:
+        instance_lock.release()
 
 
 if __name__ == "__main__":

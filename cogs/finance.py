@@ -25,6 +25,21 @@ Purchase Management and Finance Management commands.
                               export-batch. Deliberately independent of
                               record-sale too, since the address often isn't
                               known until after the price is agreed on.
+/finance refund            - Finance Management or Admin. Logs a refund
+                              against an item's sale. Doesn't touch the
+                              original sale_price (that sale still
+                              happened) - refunds net out separately
+                              against revenue everywhere they're shown.
+/finance expense           - Finance Management or Admin. Logs a cost
+                              against a pallet (packaging, listing fees,
+                              etc.), optionally tied to one item.
+/finance reverse-sale       - Finance Management or Admin. Undoes an item's
+                              recorded sale (e.g. a duplicate entry, a sale
+                              that fell through) - clears sale_price back
+                              to empty but keeps a record of what was
+                              reversed and why.
+/finance history            - Lists a pallet's recent refunds/expenses/
+                              reversals.
 /finance summary            - posts a fresh (non-pinned) copy of the same
                               numbers shown on the pinned card, for a
                               record in chat or to check a pallet from
@@ -40,10 +55,11 @@ from discord.ext import commands
 import config
 import database as db
 import finance_utils
+import runtime_settings
 
 
 def _has_role(interaction: discord.Interaction, role_name: str) -> bool:
-    role = discord.utils.get(interaction.guild.roles, name=role_name)
+    role = runtime_settings.resolve_role(interaction.guild, role_name)
     return bool(role and role in interaction.user.roles)
 
 
@@ -63,12 +79,15 @@ def _get_pallet_or_none(interaction: discord.Interaction):
     return db.get_pallet_by_category(interaction.channel.category_id) if interaction.channel.category_id else None
 
 
-class SetShippingInfoModal(discord.ui.Modal, title="Shipping Info"):
+class ShippingAddressModal(discord.ui.Modal, title="Shipping Address (1/2)"):
     """
-    Recipient name/address for a non-eBay sale, feeding /pirate-ship
-    export-batch. A modal (not slash command string options) since a real
-    mailing address needs a multi-line field - Discord slash command string
-    options are single-line.
+    First of two modals capturing a structured (not freeform) address for a
+    non-eBay sale, feeding /pirate-ship export-batch - split in two because
+    Discord modals cap out at 5 text inputs, and a real address needs 7
+    distinct fields (recipient, 2 address lines, city, state, postal code,
+    country). Submitting shows a button that opens ShippingPostalModal for
+    the rest, the same "chain through an intermediate interaction" pattern
+    item_flow.py uses for its own multi-step forms.
     """
 
     def __init__(self, item_number: int, item_id: int):
@@ -77,25 +96,87 @@ class SetShippingInfoModal(discord.ui.Modal, title="Shipping Info"):
         self.item_id = item_id
         item = db.get_item(item_id)
         self.recipient_name = discord.ui.TextInput(
-            label="Recipient Name",
-            default=item.get("recipient_name") or "",
-            max_length=100,
+            label="Recipient Name", default=item.get("recipient_name") or "", max_length=100,
         )
-        self.shipping_address = discord.ui.TextInput(
-            label="Shipping Address (street, city, state, zip)",
-            style=discord.TextStyle.paragraph,
-            default=item.get("shipping_address") or "",
-            max_length=500,
+        self.address_line1 = discord.ui.TextInput(
+            label="Address Line 1", default=item.get("address_line1") or "", max_length=200,
         )
-        self.add_item(self.recipient_name)
-        self.add_item(self.shipping_address)
+        self.address_line2 = discord.ui.TextInput(
+            label="Address Line 2 (apt/suite, optional)", required=False,
+            default=item.get("address_line2") or "", max_length=200,
+        )
+        self.city = discord.ui.TextInput(
+            label="City", default=item.get("city") or "", max_length=100,
+        )
+        self.state = discord.ui.TextInput(
+            label="State / Region", default=item.get("state") or "", max_length=100,
+        )
+        for field in (self.recipient_name, self.address_line1, self.address_line2, self.city, self.state):
+            self.add_item(field)
 
     async def on_submit(self, interaction: discord.Interaction):
-        name = self.recipient_name.value.strip()
-        address = self.shipping_address.value.strip()
-        db.set_shipping_info(self.item_id, name, address, actor_id=interaction.user.id)
+        view = discord.ui.View(timeout=300)
+        continue_button = discord.ui.Button(label="Continue: postal code & country", style=discord.ButtonStyle.primary)
+
+        async def _continue(inner_interaction: discord.Interaction):
+            await inner_interaction.response.send_modal(
+                ShippingPostalModal(
+                    self.item_number, self.item_id,
+                    recipient_name=self.recipient_name.value.strip(),
+                    address_line1=self.address_line1.value.strip(),
+                    address_line2=self.address_line2.value.strip(),
+                    city=self.city.value.strip(),
+                    state=self.state.value.strip(),
+                )
+            )
+
+        continue_button.callback = _continue
+        view.add_item(continue_button)
         await interaction.response.send_message(
-            f"📦 Shipping info saved for item #{self.item_number}. It'll go out in the next "
+            "Recipient, address, and city/state saved for this step - tap below to add the "
+            "postal code and country and finish.",
+            view=view, ephemeral=True,
+        )
+
+
+class ShippingPostalModal(discord.ui.Modal, title="Shipping Address (2/2)"):
+    """Second step - see ShippingAddressModal. Only reachable via its
+    "Continue" button, which carries the first modal's values forward."""
+
+    def __init__(self, item_number: int, item_id: int, recipient_name: str, address_line1: str,
+                 address_line2: str, city: str, state: str):
+        super().__init__()
+        self.item_number = item_number
+        self.item_id = item_id
+        self.recipient_name = recipient_name
+        self.address_line1 = address_line1
+        self.address_line2 = address_line2
+        self.city = city
+        self.state = state
+        item = db.get_item(item_id)
+        self.postal_code = discord.ui.TextInput(
+            label="Postal / ZIP Code", default=item.get("postal_code") or "", max_length=20,
+        )
+        self.country = discord.ui.TextInput(
+            label="Country", default=item.get("country") or "US", max_length=60,
+        )
+        self.add_item(self.postal_code)
+        self.add_item(self.country)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        db.set_shipping_info(
+            self.item_id,
+            recipient_name=self.recipient_name,
+            address_line1=self.address_line1,
+            address_line2=self.address_line2,
+            city=self.city,
+            state=self.state,
+            postal_code=self.postal_code.value.strip(),
+            country=self.country.value.strip() or "US",
+            actor_id=interaction.user.id,
+        )
+        await interaction.response.send_message(
+            f"📦 Shipping address saved for item #{self.item_number}. It'll go out in the next "
             f"`/pirate-ship export-batch`.",
             ephemeral=True,
         )
@@ -163,6 +244,132 @@ class Finance(commands.Cog):
             ephemeral=True,
         )
 
+    @finance_group.command(name="refund", description="Log a refund against an item's sale. Run inside that pallet's category.")
+    @app_commands.describe(
+        item_number="The item's number shown on its card (e.g. 3)",
+        amount="Amount refunded",
+        reason="Why - shown in /finance history",
+    )
+    async def refund(self, interaction: discord.Interaction, item_number: int, amount: float, reason: str):
+        if not await _require_any_role(interaction, [config.ROLE_FINANCE_MGMT]):
+            return
+        pallet = _get_pallet_or_none(interaction)
+        if not pallet:
+            await interaction.response.send_message(
+                "Run this inside one of the pallet's own channels, not somewhere else.", ephemeral=True
+            )
+            return
+        item = db.get_item_by_pallet_and_number(pallet["id"], item_number)
+        if not item:
+            await interaction.response.send_message(f"No item #{item_number} found in **{pallet['name']}**.", ephemeral=True)
+            return
+        if amount <= 0:
+            await interaction.response.send_message("Refund amount must be positive.", ephemeral=True)
+            return
+
+        db.record_refund(item["id"], amount, reason.strip(), actor_id=interaction.user.id)
+        await finance_utils.refresh_finance_message(self.bot, pallet["id"])
+        await interaction.response.send_message(
+            f"↩️ Logged a ${amount:.2f} refund for **{pallet['name']}** item #{item_number} ({reason.strip()}). "
+            f"Live card updated.",
+            ephemeral=True,
+        )
+
+    @finance_group.command(name="expense", description="Log a cost against this pallet (packaging, fees, etc). Run inside that pallet's category.")
+    @app_commands.describe(
+        amount="Amount spent",
+        reason="What it was for - shown in /finance history",
+        item_number="Optional - tie this expense to a specific item's number",
+    )
+    async def expense(self, interaction: discord.Interaction, amount: float, reason: str, item_number: int = None):
+        if not await _require_any_role(interaction, [config.ROLE_FINANCE_MGMT]):
+            return
+        pallet = _get_pallet_or_none(interaction)
+        if not pallet:
+            await interaction.response.send_message(
+                "Run this inside one of the pallet's own channels, not somewhere else.", ephemeral=True
+            )
+            return
+        if amount <= 0:
+            await interaction.response.send_message("Expense amount must be positive.", ephemeral=True)
+            return
+
+        item_id = None
+        if item_number is not None:
+            item = db.get_item_by_pallet_and_number(pallet["id"], item_number)
+            if not item:
+                await interaction.response.send_message(f"No item #{item_number} found in **{pallet['name']}**.", ephemeral=True)
+                return
+            item_id = item["id"]
+
+        db.record_expense(pallet["id"], amount, reason.strip(), actor_id=interaction.user.id, item_id=item_id)
+        await finance_utils.refresh_finance_message(self.bot, pallet["id"])
+        item_note = f" (item #{item_number})" if item_number is not None else ""
+        await interaction.response.send_message(
+            f"🧾 Logged a ${amount:.2f} expense for **{pallet['name']}**{item_note}: {reason.strip()}. Live card updated.",
+            ephemeral=True,
+        )
+
+    @finance_group.command(name="reverse-sale", description="Undo an item's recorded sale (duplicate entry, fell through, etc). Run inside that pallet's category.")
+    @app_commands.describe(
+        item_number="The item's number shown on its card (e.g. 3)",
+        reason="Why - shown in /finance history",
+    )
+    async def reverse_sale(self, interaction: discord.Interaction, item_number: int, reason: str):
+        if not await _require_any_role(interaction, [config.ROLE_FINANCE_MGMT]):
+            return
+        pallet = _get_pallet_or_none(interaction)
+        if not pallet:
+            await interaction.response.send_message(
+                "Run this inside one of the pallet's own channels, not somewhere else.", ephemeral=True
+            )
+            return
+        item = db.get_item_by_pallet_and_number(pallet["id"], item_number)
+        if not item:
+            await interaction.response.send_message(f"No item #{item_number} found in **{pallet['name']}**.", ephemeral=True)
+            return
+
+        old_price = db.reverse_sale(item["id"], reason.strip(), actor_id=interaction.user.id)
+        if old_price is None:
+            await interaction.response.send_message(
+                f"Item #{item_number} doesn't have a sale price recorded - nothing to reverse.", ephemeral=True
+            )
+            return
+        await finance_utils.refresh_finance_message(self.bot, pallet["id"])
+        await interaction.response.send_message(
+            f"⏪ Reversed **{pallet['name']}** item #{item_number}'s sale (was ${old_price:.2f}, {reason.strip()}). "
+            f"Live card updated.",
+            ephemeral=True,
+        )
+
+    @finance_group.command(name="history", description="List this pallet's recent refunds/expenses/reversals. Run inside that pallet's category.")
+    async def history(self, interaction: discord.Interaction):
+        pallet = _get_pallet_or_none(interaction)
+        if not pallet:
+            await interaction.response.send_message(
+                "Run this inside one of the pallet's own channels, not somewhere else.", ephemeral=True
+            )
+            return
+
+        transactions = db.get_finance_transactions(pallet["id"])
+        if not transactions:
+            await interaction.response.send_message(
+                f"No refunds, expenses, or reversals recorded for **{pallet['name']}** yet.", ephemeral=True
+            )
+            return
+
+        type_labels = {"refund": "↩️ Refund", "expense": "🧾 Expense", "reversal": "⏪ Reversal"}
+        lines = []
+        for tx in transactions:
+            item_note = f" (item #{tx['item_number']})" if tx.get("item_number") else ""
+            lines.append(f"{type_labels.get(tx['type'], tx['type'])} ${tx['amount']:.2f}{item_note} - {tx['note'] or 'no reason given'}")
+        embed = discord.Embed(
+            title=f"Finance History - {pallet['name']}",
+            description="\n".join(lines),
+            color=discord.Color.orange(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @finance_group.command(
         name="set-shipping-info",
         description="Record a buyer's shipping address for a non-eBay sale. Run inside that pallet's category.",
@@ -182,7 +389,7 @@ class Finance(commands.Cog):
             await interaction.response.send_message(f"No item #{item_number} found in **{pallet['name']}**.", ephemeral=True)
             return
 
-        await interaction.response.send_modal(SetShippingInfoModal(item_number, item["id"]))
+        await interaction.response.send_modal(ShippingAddressModal(item_number, item["id"]))
 
     @finance_group.command(name="override-count", description="Manually set the pallet's 'items received' count. Run inside that pallet's category.")
     @app_commands.describe(count="The correct number of items received for this pallet")
