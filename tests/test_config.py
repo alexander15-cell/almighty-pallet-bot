@@ -41,3 +41,12 @@ def test_blank_numeric_env_vars_fall_back_to_defaults(monkeypatch):
         ):
             monkeypatch.delenv(key, raising=False)
         importlib.reload(config)
+
+
+def test_channel_info_text_fits_discords_channel_topic_limit():
+    # pallet_setup.py sets each of these as BOTH a channel's topic (Discord's
+    # own hard cap: 1024 chars) and a pinned "ℹ️ ..." message - a future edit
+    # that grows one past that would silently fail the channel creation/topic
+    # set, not just look a little long.
+    for stage, text in config.CHANNEL_INFO.items():
+        assert len(text) <= 1024, f"CHANNEL_INFO[{stage!r}] is {len(text)} chars (Discord topic cap is 1024)"

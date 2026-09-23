@@ -62,8 +62,11 @@ def _pipeline_embed() -> discord.Embed:
         name="1️⃣ #data-entry (per pallet)",
         value=(
             "Data Entry posts a photo + short note, one message per item. The bot logs it, "
-            "removes the message, and sends it into Automated Review. Replying to a "
-            "rejected item's card (not posting a new message) resubmits the same item."
+            "removes the message, and sends it into Automated Review. Got several of the exact "
+            "same thing? Start the note with \"3x \" (or say \"3 of the same\"/\"3 of these\" "
+            "anywhere in it) and the bot logs 3 separate items, each independently tracked from "
+            "there. Replying to a rejected item's card (not posting a new message) resubmits the "
+            "same item."
         ),
         inline=False,
     )
@@ -172,6 +175,11 @@ def _pallet_item_commands_embed() -> discord.Embed:
     embed.add_field(name="/pallet list [include_archived]", value="List all pallets with item counts and status.", inline=False)
     embed.add_field(name="/pallet archive", value="Close out a finished pallet: deletes its Discord channels, keeps all data.", inline=False)
     embed.add_field(name="/item delete <item_number>", value="Delete a single item by its number (admin only).", inline=False)
+    embed.add_field(
+        name="/item duplicate <item_number> <count>",
+        value="Split an item still in Queue Review into N identical, independently-tracked items - for when Data Entry's \"3x ...\" shorthand wasn't used, or the count changes later.",
+        inline=False,
+    )
     return embed
 
 

@@ -34,6 +34,7 @@ import config
 import database as db
 import finance_utils
 import runtime_settings
+from cogs import item_flow
 
 log = logging.getLogger(__name__)
 
@@ -231,6 +232,65 @@ class AdminTools(commands.Cog):
             ephemeral=True,
         )
         await finance_utils.refresh_finance_message(self.bot, pallet["id"])
+
+    @item_group.command(
+        name="duplicate",
+        description="Split an item in Queue Review into N identical, independently-tracked items.",
+    )
+    @app_commands.describe(
+        item_number="The item's number shown on its card (e.g. 3)",
+        count="Total identical items including this one (e.g. 3 creates 2 new copies)",
+    )
+    async def item_duplicate(self, interaction: discord.Interaction, item_number: int, count: int):
+        if not await _require_admin(interaction):
+            return
+
+        pallet = db.get_pallet_by_category(interaction.channel.category_id)
+        if not pallet:
+            await interaction.response.send_message(
+                "Run this inside one of the pallet's own channels, not somewhere else.",
+                ephemeral=True,
+            )
+            return
+
+        item = db.get_item_by_pallet_and_number(pallet["id"], item_number)
+        if not item:
+            await interaction.response.send_message(
+                f"No item #{item_number} found in **{pallet['name']}**.", ephemeral=True
+            )
+            return
+        if item["status"] != db.STATUS_QUEUE_REVIEW:
+            await interaction.response.send_message(
+                f"Item #{item_number} isn't sitting in Queue Review (current status: {item['status']}) - "
+                f"only items still there can be split this way. If more of these were just found after this "
+                f"one was already approved/listed/sold, submit them as a fresh Data Entry entry instead.",
+                ephemeral=True,
+            )
+            return
+        if count < 2:
+            await interaction.response.send_message(
+                "`count` must be at least 2 (the original item plus at least one copy).", ephemeral=True
+            )
+            return
+        extra = count - 1
+        if extra > item_flow.MAX_DATA_ENTRY_QUANTITY:
+            await interaction.response.send_message(
+                f"That would create {extra} new item(s) at once - capped at "
+                f"{item_flow.MAX_DATA_ENTRY_QUANTITY} per run as a sanity check against a typo. "
+                f"Run it again for more.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        cog = self.bot.get_cog("ItemFlow")
+        new_numbers = await cog.duplicate_item(item, extra, actor_id=interaction.user.id)
+        numbers_text = ", ".join(f"#{n}" for n in new_numbers)
+        await interaction.followup.send(
+            f"✅ Created {extra} more identical item(s) from #{item_number}: {numbers_text} - each now "
+            f"tracked independently in Queue Review (its own price, sale, and shipping going forward).",
+            ephemeral=True,
+        )
 
     @pallet_group.command(name="archive", description="Close out a finished pallet: deletes its Discord channels, keeps all data.")
     async def pallet_archive(self, interaction: discord.Interaction):

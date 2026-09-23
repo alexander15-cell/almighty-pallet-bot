@@ -25,7 +25,14 @@ Every item's card always shows which pallet it belongs to.
   **#pallet-discussion** (pinned live finance card) and **#data-entry**.
 - In **Data Entry**, the Data Entry role posts a photo + short note per item.
   The bot logs it, deletes the original message, and sends it into the
-  shared Automated Review channel.
+  shared Automated Review channel. Got several of the exact same physical
+  item? Start the note with `3x ` (e.g. `3x cordless drill, new in box`) -
+  or just say `3 of the same`/`3 of these` anywhere in it - and one
+  submission logs 3 separate items instead of one, each independently
+  tracked (its own price, sale, and shipping) from that point on. A single
+  AI review call covers all of them (they're identical by definition), not
+  one per item. `/item duplicate` (see "Admin commands" below) does the
+  same split manually, for an item already sitting in Queue Review.
 - In **Automated Review** (shared, bot-only), a vision model identifies the
   item, drafts a title/description (ending with a short standard
   liquidation-sale disclaimer - sold as-is, not individually tested for
@@ -491,6 +498,14 @@ UI after a restart (a Discord client caching quirk, not a bug here).
 - `/item delete <item_number>` - run inside a pallet's category. Soft-deletes
   the item (best-effort deletes its current card from whichever channel it's
   in) but keeps the full row and event history in the database for audit.
+- `/item duplicate <item_number> <count>` - run inside a pallet's category,
+  for an item still sitting in Queue Review. Clones it into `count - 1` new,
+  independently-tracked item cards (same note, AI title/description/
+  category/price/weight/dimensions, and photos - reusing the same R2 URLs
+  rather than re-uploading identical content), each posted fresh to Queue
+  Review. The manual counterpart to Data Entry's `3x ...` shorthand above,
+  for when that wasn't used or the count changes later. Capped at 25 new
+  items per run as a sanity check against a typo.
 - `/pallet archive` - run inside a pallet's category. Asks for confirmation,
   then deletes that pallet's own channels (`#pallet-discussion`,
   `#data-entry`). All item data stays in the database permanently - this

@@ -48,6 +48,55 @@ import runtime_settings
 
 PHOTO_DIR = Path(config.PHOTO_DIR)
 
+# How many identical physical items one Data Entry submission can spawn at
+# once - a sanity cap against an obvious typo (e.g. "300x") flooding the
+# pipeline, not a real expected upper bound for a liquidation lot.
+MAX_DATA_ENTRY_QUANTITY = 25
+
+# Tried in order; first match wins. The (?!\d) after "x" in the first
+# pattern specifically avoids misreading a dimension like "3 x 5 tarp" as
+# "quantity 3, item: 5 tarp" - a quantity prefix is never immediately
+# followed by another number.
+_QUANTITY_PATTERNS = (
+    re.compile(r"^\s*(\d{1,3})\s*x\s+(?!\d)", re.IGNORECASE),
+    re.compile(r"^\s*qty\.?\s*:?\s*(\d{1,3})\s*:?\s*", re.IGNORECASE),
+    re.compile(r"^\s*quantity\.?\s*:?\s*(\d{1,3})\s*:?\s*", re.IGNORECASE),
+)
+# Not anchored to the start, and deliberately not stripped from the note
+# (unlike the prefixes above) - "we have 3 of the same thing, cordless
+# drill" reads fine left as-is, and reliably trimming a mid-sentence phrase
+# without mangling the rest of the description isn't worth the risk.
+_QUANTITY_SAME_PATTERN = re.compile(r"\b(\d{1,3})\s+of\s+(?:the\s+same|these)\b", re.IGNORECASE)
+
+
+def parse_quantity(raw_text: str) -> tuple:
+    """
+    Looks for a quantity indicator in a Data Entry note - the common
+    warehouse shorthand for "we have N of the same thing" - so one
+    submission creates N independently-tracked item cards instead of one.
+    Supports a leading "3x ...", "3 x ...", "qty 3: ...", "quantity 3: ..."
+    (stripped from the returned text, since that's just a counting prefix,
+    not part of the item description), or "...3 of the same/these..."
+    anywhere in the note (left in place). No match, or a quantity of 1,
+    returns (1, raw_text) unchanged. Returns (quantity, remaining_text,
+    was_clamped) - was_clamped is True if the requested quantity exceeded
+    MAX_DATA_ENTRY_QUANTITY and was capped down to it.
+    """
+    for pattern in _QUANTITY_PATTERNS:
+        match = pattern.match(raw_text)
+        if match:
+            requested = int(match.group(1))
+            quantity = max(1, min(requested, MAX_DATA_ENTRY_QUANTITY))
+            return quantity, raw_text[match.end():].strip(), requested > MAX_DATA_ENTRY_QUANTITY
+
+    match = _QUANTITY_SAME_PATTERN.search(raw_text)
+    if match:
+        requested = int(match.group(1))
+        quantity = max(1, min(requested, MAX_DATA_ENTRY_QUANTITY))
+        return quantity, raw_text, requested > MAX_DATA_ENTRY_QUANTITY
+
+    return 1, raw_text, False
+
 
 def photo_dir_for(item_id: int) -> Path:
     d = PHOTO_DIR / str(item_id)
@@ -784,31 +833,47 @@ class ItemFlow(commands.Cog):
                 resubmit_item = candidate
                 old_card_channel = message.channel  # rejected cards always land back in data-entry
 
+        quantity_clamped = False
         if resubmit_item:
-            item_id = resubmit_item["id"]
+            # A rejected item's redo is always a correction of that ONE
+            # existing item, never split - quantity parsing doesn't apply.
+            item_ids = [resubmit_item["id"]]
+            note_text = message.content or ""
             # Clear out the old photo files before saving new ones, so a
             # resubmission doesn't end up with a mix of old and new images.
-            folder = photo_dir_for(item_id)
-            for old_file in folder.glob("*"):
+            for old_file in photo_dir_for(item_ids[0]).glob("*"):
                 old_file.unlink(missing_ok=True)
         else:
-            item_id = db.create_item(
-                pallet_id=pallet_id,
-                raw_description=message.content or "",
-                photo_urls=[],
-                submitted_by=message.author.id,
-            )
-            folder = photo_dir_for(item_id)
+            quantity, note_text, quantity_clamped = parse_quantity(message.content or "")
+            item_ids = [
+                db.create_item(
+                    pallet_id=pallet_id, raw_description=note_text, photo_urls=[],
+                    submitted_by=message.author.id,
+                )
+                for _ in range(quantity)
+            ]
 
-        saved_paths = []
-        for i, attachment in enumerate(message.attachments):
+        # Each attachment is only downloaded from Discord once, then written
+        # into every item's own photo folder - identical items still get
+        # fully independent files (and independent R2 uploads below), so
+        # deleting/editing one later can never affect another.
+        attachments_data = []
+        for attachment in message.attachments:
             ext = Path(attachment.filename).suffix or ".jpg"
-            dest = folder / f"photo_{i}{ext}"
-            await attachment.save(dest)
-            saved_paths.append(str(dest))
+            attachments_data.append((ext, await attachment.read()))
+
+        saved_paths_by_item = {}
+        for item_id in item_ids:
+            folder = photo_dir_for(item_id)
+            saved_paths = []
+            for i, (ext, data) in enumerate(attachments_data):
+                dest = folder / f"photo_{i}{ext}"
+                dest.write_bytes(data)
+                saved_paths.append(str(dest))
+            saved_paths_by_item[item_id] = saved_paths
 
         if resubmit_item:
-            db.resubmit_item(item_id, message.content or "", saved_paths, submitted_by=message.author.id)
+            db.resubmit_item(item_ids[0], note_text, saved_paths_by_item[item_ids[0]], submitted_by=message.author.id)
             # Delete the old rejected card - it's been superseded by this
             # resubmission, so leaving it around would just be a duplicate.
             try:
@@ -818,7 +883,8 @@ class ItemFlow(commands.Cog):
                 pass
         else:
             with db.get_conn() as conn:
-                conn.execute("UPDATE items SET photo_urls = ? WHERE id = ?", (json.dumps(saved_paths), item_id))
+                for item_id, saved_paths in saved_paths_by_item.items():
+                    conn.execute("UPDATE items SET photo_urls = ? WHERE id = ?", (json.dumps(saved_paths), item_id))
 
         # Local copy above is what Discord item cards render from (send_item_card
         # reads local files). This adds a second, durable copy in R2 so anything
@@ -830,23 +896,24 @@ class ItemFlow(commands.Cog):
         # blocking the bot's event loop (and every other server it's in) for
         # however long the network call takes.
         if config.R2_ENABLED:
-            public_urls = []
-            for local_path in saved_paths:
-                object_key = f"items/{item_id}/{Path(local_path).name}"
-                try:
-                    url = await asyncio.to_thread(r2_storage.upload_photo, local_path, object_key)
-                    public_urls.append(url)
-                except Exception as e:
-                    print(f"[item_flow] R2 upload failed for item {item_id} ({local_path}): {e}")
-                    public_urls.append(None)
-            db.update_photo_public_urls(item_id, public_urls)
+            for item_id, saved_paths in saved_paths_by_item.items():
+                public_urls = []
+                for local_path in saved_paths:
+                    object_key = f"items/{item_id}/{Path(local_path).name}"
+                    try:
+                        url = await asyncio.to_thread(r2_storage.upload_photo, local_path, object_key)
+                        public_urls.append(url)
+                    except Exception as e:
+                        print(f"[item_flow] R2 upload failed for item {item_id} ({local_path}): {e}")
+                        public_urls.append(None)
+                db.update_photo_public_urls(item_id, public_urls)
 
         try:
             await message.delete()
         except discord.HTTPException:
             pass
 
-        # Either a new item was received, or a rejected one just got fixed -
+        # Either new item(s) were received, or a rejected one just got fixed -
         # either way the pallet's stage counts changed, so refresh its card.
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
 
@@ -862,21 +929,29 @@ class ItemFlow(commands.Cog):
             return
 
         pallet = db.get_pallet(pallet_id)
-        item_num = db.get_item(item_id)["item_number"]
+        item_numbers = [db.get_item(i)["item_number"] for i in item_ids]
+        numbers_text = ", ".join(f"#{n}" for n in item_numbers)
         resubmit_note = " (resubmitted)" if resubmit_item else ""
+        quantity_note = f" ({len(item_ids)} identical items)" if len(item_ids) > 1 else ""
+        clamp_note = (
+            f" ⚠️ Requested quantity was capped at {MAX_DATA_ENTRY_QUANTITY} - "
+            f"submit the rest separately if you actually have more."
+            if quantity_clamped else ""
+        )
 
         if not config.AI_ENABLED:
             await automated_review_channel.send(
-                f"⏭️ AI review not configured - **{pallet['name']}** item #{item_num}{resubmit_note} "
-                f"passed through to Queue Review as-is."
+                f"⏭️ AI review not configured - **{pallet['name']}** item(s) {numbers_text}{resubmit_note} "
+                f"passed through to Queue Review as-is.{clamp_note}"
             )
-            await self.send_to_queue_review(item_id)
+            for item_id in item_ids:
+                await self.send_to_queue_review(item_id)
             return
 
         placeholder = await automated_review_channel.send(
-            f"🔄 Reviewing **{pallet['name']}** item #{item_num}{resubmit_note}..."
+            f"🔄 Reviewing **{pallet['name']}** item(s) {numbers_text}{resubmit_note}{quantity_note}...{clamp_note}"
         )
-        await self.run_ai_review(item_id, placeholder)
+        await self.run_ai_review(item_ids, placeholder)
 
     async def send_to_queue_review(self, item_id: int):
         """Moves an item into Queue Review without an AI pass - used both when
@@ -891,11 +966,79 @@ class ItemFlow(commands.Cog):
         db.update_status(item_id, db.STATUS_QUEUE_REVIEW, new_message_id=msg.id)
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
 
-    async def run_ai_review(self, item_id: int, placeholder_message: discord.Message):
-        item = db.get_item(item_id)
-        photo_paths = json.loads(item["photo_urls"])
+    async def duplicate_item(self, item: dict, extra_count: int, actor_id: int) -> list:
+        """
+        Called by /item duplicate (admin_tools.py) for an item already
+        sitting in Queue Review, when it turns out to actually be N
+        identical items rather than one (the manual counterpart to
+        parse_quantity's automatic "3x ..." detection at Data Entry time,
+        for whenever that wasn't used or the count changes later).
 
-        result = await ai_review.review_item(photo_paths, item["raw_description"])
+        Clones `item` into `extra_count` new, independently-tracked item
+        rows: same raw note, AI title/description/flags/suggested category/
+        price/weight/dimensions, and same photos (reusing the same R2
+        public URLs rather than re-uploading identical content, since the
+        files are byte-for-byte the same). Each duplicate gets its own card
+        posted to Queue Review and its own status/sale/shipping history
+        from here on - selling one, or setting a different price on
+        Approve, never affects the others. Returns the new items' numbers.
+        """
+        source_photo_paths = json.loads(item["photo_urls"] or "[]")
+        source_photos = [(Path(p).suffix or ".jpg", Path(p).read_bytes()) for p in source_photo_paths if Path(p).exists()]
+        source_public_urls = json.loads(item["photo_public_urls"]) if item.get("photo_public_urls") else []
+
+        queue_channel = self.bot.get_channel(db.resolve_channel_id(item["pallet_id"], "queue-review"))
+
+        new_numbers = []
+        for _ in range(extra_count):
+            new_item_id = db.create_item(
+                pallet_id=item["pallet_id"], raw_description=item["raw_description"] or "",
+                photo_urls=[], submitted_by=actor_id,
+            )
+            folder = photo_dir_for(new_item_id)
+            new_paths = []
+            for i, (ext, data) in enumerate(source_photos):
+                dest = folder / f"photo_{i}{ext}"
+                dest.write_bytes(data)
+                new_paths.append(str(dest))
+            with db.get_conn() as conn:
+                conn.execute(
+                    "UPDATE items SET photo_urls = ?, photo_public_urls = ? WHERE id = ?",
+                    (json.dumps(new_paths), json.dumps(source_public_urls) if source_public_urls else None, new_item_id),
+                )
+            db.save_ai_review(
+                new_item_id, title=item.get("ai_title") or "", description=item.get("ai_description") or "",
+                flags=item.get("ai_flags") or "", suggested_category=item.get("ai_suggested_category"),
+                suggested_price=item.get("ai_suggested_price"), suggested_weight_lb=item.get("ai_suggested_weight_lb"),
+                suggested_length_in=item.get("ai_suggested_length_in"), suggested_width_in=item.get("ai_suggested_width_in"),
+                suggested_height_in=item.get("ai_suggested_height_in"),
+            )
+            db.update_status(
+                new_item_id, db.STATUS_QUEUE_REVIEW, actor_id=actor_id,
+                note=f"Duplicated from item #{item['item_number']}",
+            )
+            new_item = db.get_item(new_item_id)
+            if queue_channel:
+                msg = await send_item_card(queue_channel, new_item, view=QueueReviewView(new_item_id))
+                db.update_status(new_item_id, db.STATUS_QUEUE_REVIEW, new_message_id=msg.id)
+            new_numbers.append(new_item["item_number"])
+
+        await finance_utils.refresh_finance_message(self.bot, item["pallet_id"])
+        return new_numbers
+
+    async def run_ai_review(self, item_ids: list, placeholder_message: discord.Message):
+        """
+        Runs Automated Review for one or more items. When item_ids has more
+        than one entry (a Data Entry submission of N identical items - see
+        parse_quantity), the AI is only called ONCE, against the first
+        item's photos/note, and the same result is saved to every item -
+        they're identical by definition, so review N-1 more times would
+        just burn extra API cost/time for the exact same answer.
+        """
+        first_item = db.get_item(item_ids[0])
+        photo_paths = json.loads(first_item["photo_urls"])
+
+        result = await ai_review.review_item(photo_paths, first_item["raw_description"])
 
         def _safe_float(value):
             try:
@@ -903,18 +1046,19 @@ class ItemFlow(commands.Cog):
             except (TypeError, ValueError):
                 return None  # model returned something non-numeric - just skip the pre-fill
 
-        db.save_ai_review(
-            item_id,
-            title=result.get("suggested_title", ""),
-            description=result.get("suggested_description", ""),
-            flags=", ".join(result.get("flags", [])) if result.get("flags") else "",
-            suggested_category=result.get("suggested_category") or None,
-            suggested_price=_safe_float(result.get("suggested_price")),
-            suggested_weight_lb=_safe_float(result.get("estimated_weight_lb")),
-            suggested_length_in=_safe_float(result.get("estimated_length_in")),
-            suggested_width_in=_safe_float(result.get("estimated_width_in")),
-            suggested_height_in=_safe_float(result.get("estimated_height_in")),
-        )
+        for item_id in item_ids:
+            db.save_ai_review(
+                item_id,
+                title=result.get("suggested_title", ""),
+                description=result.get("suggested_description", ""),
+                flags=", ".join(result.get("flags", [])) if result.get("flags") else "",
+                suggested_category=result.get("suggested_category") or None,
+                suggested_price=_safe_float(result.get("suggested_price")),
+                suggested_weight_lb=_safe_float(result.get("estimated_weight_lb")),
+                suggested_length_in=_safe_float(result.get("estimated_length_in")),
+                suggested_width_in=_safe_float(result.get("estimated_width_in")),
+                suggested_height_in=_safe_float(result.get("estimated_height_in")),
+            )
 
         try:
             await placeholder_message.delete()
@@ -922,15 +1066,16 @@ class ItemFlow(commands.Cog):
             pass
 
         confidence = result.get("confidence", "unknown")
-        db.update_status(item_id, db.STATUS_QUEUE_REVIEW, note="AI review complete")
-        item = db.get_item(item_id)
-        pallet_id = item["pallet_id"]
+        pallet_id = first_item["pallet_id"]
         queue_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "queue-review"))
-        view = QueueReviewView(item_id)
-        msg = await send_item_card(
-            queue_channel, item, view=view, extra_text=f"AI confidence: {confidence}"
-        )
-        db.update_status(item_id, db.STATUS_QUEUE_REVIEW, new_message_id=msg.id)
+        for item_id in item_ids:
+            db.update_status(item_id, db.STATUS_QUEUE_REVIEW, note="AI review complete")
+            item = db.get_item(item_id)
+            view = QueueReviewView(item_id)
+            msg = await send_item_card(
+                queue_channel, item, view=view, extra_text=f"AI confidence: {confidence}"
+            )
+            db.update_status(item_id, db.STATUS_QUEUE_REVIEW, new_message_id=msg.id)
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
 
     # ------------------------------------------------------------ movement --
