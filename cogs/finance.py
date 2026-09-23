@@ -55,10 +55,11 @@ from discord.ext import commands
 import config
 import database as db
 import finance_utils
+import runtime_settings
 
 
 def _has_role(interaction: discord.Interaction, role_name: str) -> bool:
-    role = discord.utils.get(interaction.guild.roles, name=role_name)
+    role = runtime_settings.resolve_role(interaction.guild, role_name)
     return bool(role and role in interaction.user.roles)
 
 

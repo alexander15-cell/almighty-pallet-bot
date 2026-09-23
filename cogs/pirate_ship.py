@@ -27,10 +27,11 @@ from discord.ext import commands
 import config
 import database as db
 import pirate_ship_csv
+import runtime_settings
 
 
 def _is_pallet_admin(interaction: discord.Interaction) -> bool:
-    admin_role = discord.utils.get(interaction.guild.roles, name=config.ROLE_ADMIN)
+    admin_role = runtime_settings.resolve_role(interaction.guild, config.ROLE_ADMIN)
     return bool(admin_role and admin_role in interaction.user.roles)
 
 

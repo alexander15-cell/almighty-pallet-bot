@@ -42,6 +42,7 @@ import ebay_api
 import ebay_csv
 import finance_utils
 import r2_storage
+import runtime_settings
 
 PHOTO_DIR = Path(config.PHOTO_DIR)
 
@@ -1000,8 +1001,8 @@ class ItemFlow(commands.Cog):
         await finance_utils.refresh_finance_message(self.bot, item["pallet_id"])
 
     async def _require_role(self, interaction: discord.Interaction, role_name: str) -> bool:
-        admin_role = discord.utils.get(interaction.guild.roles, name=config.ROLE_ADMIN)
-        target_role = discord.utils.get(interaction.guild.roles, name=role_name)
+        admin_role = runtime_settings.resolve_role(interaction.guild, config.ROLE_ADMIN)
+        target_role = runtime_settings.resolve_role(interaction.guild, role_name)
         member_roles = interaction.user.roles
         if (target_role and target_role in member_roles) or (admin_role and admin_role in member_roles):
             return True

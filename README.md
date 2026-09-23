@@ -444,6 +444,9 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   native eBay integration.
 - `/backup-now` - creates and verifies a local backup immediately (see
   "Backups" below); `/backups` lists recent ones with size and age.
+- `/bind-role <role_name> <role>` / `/unbind-role <role_name>` /
+  `/role-bindings` - optional role-ID bindings (see "Role bindings" below),
+  editable live from Discord, no restart needed.
 - `/pirate-ship purge-buyer-data [days] [confirm]` - previews (default) or,
   with `confirm:True`, clears recipient name/address from shipped items
   past `BUYER_DATA_RETENTION_DAYS` (default 90) days, and redacts matching
@@ -451,6 +454,20 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   sale price, and audit history are never touched - only buyer contact
   info. CSVs/Discord attachments downloaded before a purge still have the
   old data; that needs separate manual cleanup.
+
+## Role bindings
+
+By default every permission check matches a role by **name** (e.g. a role
+literally called "Pallet Admin") - simple, no setup needed, but it breaks
+if that role ever gets renamed in Discord. `/bind-role <role_name> <role>`
+binds one of this bot's six roles (Data Entry, Queue Review, Listing
+Management, Purchase Management, Finance Management, Pallet Admin) to a
+specific Discord role's ID instead, so a rename no longer matters. This is
+entirely optional, takes effect immediately (no restart), and is stored in
+`SETTINGS_PATH` (default `data/settings.json`) - `/unbind-role` reverts to
+matching by name, and `/role-bindings` shows the current state. If a bound
+role is later deleted, checks for it automatically fall back to matching
+by name again rather than breaking outright.
 
 ## Backups
 

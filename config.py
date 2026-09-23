@@ -212,6 +212,9 @@ PHOTO_DIR = os.getenv("PHOTO_DIR", "data/photos")
 # ---- Single-instance lock (see instance_lock.py) ----
 INSTANCE_LOCK_PATH = os.getenv("INSTANCE_LOCK_PATH", "data/.bot.lock")
 
+# ---- Non-secret runtime settings editable from Discord (see runtime_settings.py) ----
+SETTINGS_PATH = os.getenv("SETTINGS_PATH", "data/settings.json")
+
 # ---- Buyer data retention (see /pirate-ship purge-buyer-data) ----
 # How many days after an item ships before its buyer's name/address is
 # eligible for removal. Only recipient_name/shipping_address/structured
