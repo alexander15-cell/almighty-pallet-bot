@@ -38,15 +38,15 @@ def test_parse_specifics_rejects_blank_input():
 def test_missing_export_requirements_lists_everything_unset(monkeypatch):
     monkeypatch.setattr(config, "EBAY_ITEM_LOCATION", "")
     monkeypatch.setattr(config, "EBAY_SHIPPING_SERVICE", "")
-    monkeypatch.setattr(config, "EBAY_SHIPPING_COST", "")
+    monkeypatch.setattr(config, "EBAY_SHIPPING_PACKAGE_TYPE", "")
 
     missing_names = {name for name, _why in _missing_export_requirements()}
-    assert missing_names == {"EBAY_ITEM_LOCATION", "EBAY_SHIPPING_SERVICE", "EBAY_SHIPPING_COST"}
+    assert missing_names == {"EBAY_ITEM_LOCATION", "EBAY_SHIPPING_SERVICE", "EBAY_SHIPPING_PACKAGE_TYPE"}
 
 
 def test_missing_export_requirements_empty_once_all_set(monkeypatch):
     monkeypatch.setattr(config, "EBAY_ITEM_LOCATION", "Columbus, OH")
     monkeypatch.setattr(config, "EBAY_SHIPPING_SERVICE", "USPSPriority")
-    monkeypatch.setattr(config, "EBAY_SHIPPING_COST", "8.00")
+    monkeypatch.setattr(config, "EBAY_SHIPPING_PACKAGE_TYPE", "PackageThickEnvelope")
 
     assert _missing_export_requirements() == []

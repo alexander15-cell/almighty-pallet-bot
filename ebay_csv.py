@@ -27,13 +27,17 @@ without it ("No <Item.Location> exists"), so cogs/ebay.py's export-batch
 command refuses to export at all until this is configured, rather than
 producing a batch that's guaranteed to fail on every row.
 
-ShippingType/ShippingService-1:Option/ShippingService-1:Cost
-(config.EBAY_SHIPPING_TYPE/EBAY_SHIPPING_SERVICE/EBAY_SHIPPING_COST) are
-the same story - eBay rejects every row without at least one shipping
-service too ("Please add at least one valid shipping service option").
-This bot doesn't track per-item weight/dimensions, so it's one flat
-service/cost applied to every item in a batch until per-item shipping
-gets built - a blunt instrument, but better than every row failing.
+Shipping uses eBay's Calculated (weight-based) type, not one flat cost for
+every item: ShippingType=Calculated, ShippingService-1:Option names which
+carrier service to calculate with (config.EBAY_SHIPPING_SERVICE - still a
+real eBay service code, still your responsibility to verify, same as
+before), ShippingPackage names the package type
+(config.EBAY_SHIPPING_PACKAGE_TYPE), and WeightMajor/WeightMinor/
+PackageLength/PackageWidth/PackageDepth come from the item's own
+weight/dimensions (ebay_listing_data.weight_lb/length_in/width_in/
+height_in - required fields on EbayListingModal, see item_flow.py) so
+eBay computes an accurate per-item shipping charge instead of over- or
+under-charging buyers with one guessed flat rate.
 
 This lives outside any single cog, same as finance_utils.py, because both
 item_flow.py (writes rows) and ebay.py (exports/archives the file) need the
@@ -69,8 +73,31 @@ BASE_FIELDS = [
     "*Location",
     "ShippingType",
     "ShippingService-1:Option",
-    "ShippingService-1:Cost",
+    "ShippingPackage",
+    "WeightMajor",
+    "WeightMinor",
+    "PackageLength",
+    "PackageWidth",
+    "PackageDepth",
 ]
+
+
+def _split_weight_lb(weight_lb) -> tuple:
+    """
+    eBay's classic template wants whole pounds and remaining ounces as
+    separate columns (WeightMajor/WeightMinor), not one decimal-pounds
+    value. Returns ("", "") if weight_lb is None (an item that hasn't had
+    its weight captured yet - a pre-this-feature item, or one still
+    needing a /ebay retry-item correction) rather than guessing.
+    """
+    if weight_lb is None:
+        return "", ""
+    major = int(weight_lb)
+    minor = round((weight_lb - major) * 16)
+    if minor == 16:  # rounding 0.999... lb up to the next whole pound
+        major += 1
+        minor = 0
+    return str(major), str(minor)
 
 
 def custom_label(item: dict) -> str:
@@ -128,6 +155,8 @@ def append_item_to_batch(item: dict, listing: dict) -> None:
     listing_format = listing.get("listing_format") or "FixedPrice"
     duration = listing["auction_duration"] if listing_format == "Auction" else "GTC"
 
+    weight_major, weight_minor = _split_weight_lb(listing.get("weight_lb"))
+
     label = custom_label(item)
     row = {field: "" for field in fieldnames}
     row.update({
@@ -145,7 +174,12 @@ def append_item_to_batch(item: dict, listing: dict) -> None:
         "*Location": config.EBAY_ITEM_LOCATION,
         "ShippingType": config.EBAY_SHIPPING_TYPE,
         "ShippingService-1:Option": config.EBAY_SHIPPING_SERVICE,
-        "ShippingService-1:Cost": config.EBAY_SHIPPING_COST,
+        "ShippingPackage": config.EBAY_SHIPPING_PACKAGE_TYPE,
+        "WeightMajor": weight_major,
+        "WeightMinor": weight_minor,
+        "PackageLength": f"{listing['length_in']:g}" if listing.get("length_in") is not None else "",
+        "PackageWidth": f"{listing['width_in']:g}" if listing.get("width_in") is not None else "",
+        "PackageDepth": f"{listing['height_in']:g}" if listing.get("height_in") is not None else "",
     })
     for key, value in specifics.items():
         row[f"C:{key}"] = value

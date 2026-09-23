@@ -50,6 +50,37 @@ def test_legacy_freeform_address_falls_back_to_split():
     assert row["City"] == ""  # never guessed at for legacy rows
 
 
+def test_weight_and_dimensions_populated_from_resolved_columns():
+    # database.get_unexported_other_platform_sales() resolves each item's
+    # best-available weight/dims (ebay_listing_data if it went through Queue
+    # Review, else the AI's automated-review estimate) into these
+    # pirate_ship_* columns - this is what should end up in the export.
+    item = _fake_item(pirate_ship_weight_lb=2.5, pirate_ship_length_in=12,
+                       pirate_ship_width_in=8, pirate_ship_height_in=4)
+    row = pirate_ship_csv.build_export_rows([item])[0]
+    assert row["Weight (lb)"] == "2"
+    assert row["Weight (oz)"] == "8"
+    assert row["Length (in)"] == "12"
+    assert row["Width (in)"] == "8"
+    assert row["Height (in)"] == "4"
+
+
+def test_weight_and_dimensions_left_blank_when_never_captured():
+    item = _fake_item()  # no pirate_ship_weight_lb/etc keys at all
+    row = pirate_ship_csv.build_export_rows([item])[0]
+    assert row["Weight (lb)"] == ""
+    assert row["Weight (oz)"] == ""
+    assert row["Length (in)"] == ""
+    assert row["Width (in)"] == ""
+    assert row["Height (in)"] == ""
+
+
+def test_split_weight_lb():
+    assert pirate_ship_csv._split_weight_lb(None) == ("", "")
+    assert pirate_ship_csv._split_weight_lb(2.5) == ("2", "8")
+    assert pirate_ship_csv._split_weight_lb(2.999) == ("3", "0")
+
+
 def test_redact_archived_buyer_data_only_touches_matching_rows(tmp_path, monkeypatch):
     monkeypatch.setattr(pirate_ship_csv, "ARCHIVE_DIR", tmp_path)
     item_a = _fake_item(pallet_id=1, item_number=1, address_line1="1 A St", city="Aville")

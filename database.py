@@ -97,6 +97,14 @@ def _migrate_add_columns(conn):
         "ALTER TABLE ebay_listing_data ADD COLUMN ebay_item_id TEXT",
         "ALTER TABLE items ADD COLUMN ebay_batch_id INTEGER",
         "ALTER TABLE ebay_category_usage ADD COLUMN confirmed_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE items ADD COLUMN ai_suggested_weight_lb REAL",
+        "ALTER TABLE items ADD COLUMN ai_suggested_length_in REAL",
+        "ALTER TABLE items ADD COLUMN ai_suggested_width_in REAL",
+        "ALTER TABLE items ADD COLUMN ai_suggested_height_in REAL",
+        "ALTER TABLE ebay_listing_data ADD COLUMN weight_lb REAL",
+        "ALTER TABLE ebay_listing_data ADD COLUMN length_in REAL",
+        "ALTER TABLE ebay_listing_data ADD COLUMN width_in REAL",
+        "ALTER TABLE ebay_listing_data ADD COLUMN height_in REAL",
     ]
     for stmt in migrations:
         try:
@@ -155,6 +163,10 @@ def init_db():
                 ai_flags            TEXT,
                 ai_suggested_category TEXT,          -- eBay category NAME (from config.EBAY_CATEGORIES) Automated Review guessed, pre-selects the Queue Review dropdown
                 ai_suggested_price  REAL,             -- rough AI price guess (general knowledge, not real market data) - pre-fills the Queue Review price field, always human-editable
+                ai_suggested_weight_lb  REAL,         -- rough AI shipping-weight guess (visual estimate, not a real measurement) - pre-fills the Queue Review weight field
+                ai_suggested_length_in  REAL,         -- rough AI packaged-dimension guesses (visual estimate) - pre-fill the Queue Review dimensions field
+                ai_suggested_width_in   REAL,
+                ai_suggested_height_in  REAL,
                 submitted_by        INTEGER,
                 current_message_id  INTEGER,            -- message representing item in its CURRENT channel
                 listed_at           TEXT,
@@ -203,6 +215,10 @@ def init_db():
                 auction_duration TEXT,                -- eBay *Duration value (e.g. 'Days_7') - only set when listing_format = 'Auction'
                 item_specifics  TEXT,
                 ebay_item_id    TEXT,                 -- the real eBay listing ID, set once /ebay import-results (or confirm-listed) confirms this item went live
+                weight_lb       REAL,                 -- shipping weight, feeds eBay's Calculated shipping AND the Pirate Ship CSV export (every approved item gets this captured here regardless of eventual sale platform)
+                length_in       REAL,                 -- packaged dimensions, same dual purpose as weight_lb
+                width_in        REAL,
+                height_in       REAL,
                 set_by          INTEGER,
                 created_at      TEXT NOT NULL,
                 updated_at      TEXT NOT NULL
@@ -516,7 +532,9 @@ def get_items_by_status_for_pallet(pallet_id: int, status: str):
 
 def save_ebay_listing_data(item_id: int, ebay_title: str, category_id: str, condition_id: str,
                             price: float, item_specifics: dict, listing_format: str = "FixedPrice",
-                            auction_duration: str = None, actor_id: int = None):
+                            auction_duration: str = None, weight_lb: float = None,
+                            length_in: float = None, width_in: float = None, height_in: float = None,
+                            actor_id: int = None):
     """
     Upserts the eBay fields captured for this item during Queue Review
     approval. Keyed one-to-one on item_id, so re-approving (or editing later)
@@ -527,14 +545,24 @@ def save_ebay_listing_data(item_id: int, ebay_title: str, category_id: str, cond
     starting bid depending on which, matching how eBay's own *StartPrice
     field is reused for both. auction_duration (an eBay *Duration value like
     "Days_7") is only meaningful when listing_format is "Auction".
+
+    weight_lb/length_in/width_in/height_in are required for every item
+    going forward (EbayListingModal makes them mandatory fields) - they
+    feed eBay's Calculated shipping AND the Pirate Ship CSV export, since
+    every approved item gets this captured here regardless of which
+    platform it eventually sells on. Still nullable in the schema so
+    already-approved items from before this existed don't break; those get
+    caught and reported at export time instead (see ebay.py's
+    _missing_export_requirements-style per-item check).
     """
     with get_conn() as conn:
         now = _now()
         conn.execute(
             """INSERT INTO ebay_listing_data
                    (item_id, ebay_title, category_id, condition_id, price, listing_format,
-                    auction_duration, item_specifics, set_by, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    auction_duration, item_specifics, weight_lb, length_in, width_in, height_in,
+                    set_by, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(item_id) DO UPDATE SET
                    ebay_title = excluded.ebay_title,
                    category_id = excluded.category_id,
@@ -543,10 +571,14 @@ def save_ebay_listing_data(item_id: int, ebay_title: str, category_id: str, cond
                    listing_format = excluded.listing_format,
                    auction_duration = excluded.auction_duration,
                    item_specifics = excluded.item_specifics,
+                   weight_lb = excluded.weight_lb,
+                   length_in = excluded.length_in,
+                   width_in = excluded.width_in,
+                   height_in = excluded.height_in,
                    set_by = excluded.set_by,
                    updated_at = excluded.updated_at""",
             (item_id, ebay_title, category_id, condition_id, price, listing_format, auction_duration,
-             json.dumps(item_specifics), actor_id, now, now),
+             json.dumps(item_specifics), weight_lb, length_in, width_in, height_in, actor_id, now, now),
         )
 
 
@@ -951,13 +983,27 @@ def get_unexported_other_platform_sales():
     that command exports. eBay sales are excluded regardless of export
     status, since Pirate Ship pulls those directly via its own native eBay
     integration and never needs this CSV.
+
+    Each row also carries resolved pirate_ship_weight_lb/length_in/width_in/
+    height_in columns for pirate_ship_csv.py to fill in the export's
+    Weight/Length/Width/Height columns: ebay_listing_data's weight/dims (set
+    on Queue Review approval, human-confirmed - see EbayListingModal in
+    item_flow.py) take priority when present, since most other-platform
+    sales never went through that flow and only have the AI's automated-
+    review estimate (items.ai_suggested_*) to fall back on.
     """
     with get_conn() as conn:
         rows = conn.execute(
-            """SELECT * FROM items
-               WHERE status = ? AND pirate_ship_exported = 0
-               AND sale_platform IS NOT NULL AND LOWER(sale_platform) != 'ebay'
-               ORDER BY pallet_id, item_number""",
+            """SELECT items.*,
+                      COALESCE(eld.weight_lb, items.ai_suggested_weight_lb) AS pirate_ship_weight_lb,
+                      COALESCE(eld.length_in, items.ai_suggested_length_in) AS pirate_ship_length_in,
+                      COALESCE(eld.width_in, items.ai_suggested_width_in) AS pirate_ship_width_in,
+                      COALESCE(eld.height_in, items.ai_suggested_height_in) AS pirate_ship_height_in
+               FROM items
+               LEFT JOIN ebay_listing_data eld ON eld.item_id = items.id
+               WHERE items.status = ? AND items.pirate_ship_exported = 0
+               AND items.sale_platform IS NOT NULL AND LOWER(items.sale_platform) != 'ebay'
+               ORDER BY items.pallet_id, items.item_number""",
             (STATUS_SOLD,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -1021,21 +1067,28 @@ def set_finance_message(pallet_id: int, message_id: int):
 
 
 def save_ai_review(item_id: int, title: str, description: str, flags: str,
-                    suggested_category: str = None, suggested_price: float = None):
+                    suggested_category: str = None, suggested_price: float = None,
+                    suggested_weight_lb: float = None, suggested_length_in: float = None,
+                    suggested_width_in: float = None, suggested_height_in: float = None):
     """
-    suggested_category/suggested_price are Automated Review's own guesses
-    (see ai_review.SYSTEM_PROMPT) - suggested_category is an eBay category
-    NAME from config.EBAY_CATEGORIES (not an ID; item_flow.py's category
-    select maps it to an ID at Queue Review time), and suggested_price is a
-    rough estimate from the model's general knowledge, not real market data.
-    Both are just pre-fills for Queue Review's approval flow - never
-    authoritative, always human-editable/overridable before Approve.
+    suggested_category/suggested_price/suggested_weight_lb/suggested_*_in
+    are Automated Review's own guesses (see ai_review.SYSTEM_PROMPT) -
+    suggested_category is an eBay category NAME from config.EBAY_CATEGORIES
+    (not an ID; item_flow.py's category select maps it to an ID at Queue
+    Review time), suggested_price is a rough estimate from the model's
+    general knowledge, not real market data, and the weight/dimensions are
+    a rough visual estimate, not an actual measurement. All of these are
+    just pre-fills for Queue Review's approval flow - never authoritative,
+    always human-editable/overridable before Approve.
     """
     with get_conn() as conn:
         conn.execute(
             """UPDATE items SET ai_title = ?, ai_description = ?, ai_flags = ?,
-               ai_suggested_category = ?, ai_suggested_price = ?, updated_at = ? WHERE id = ?""",
-            (title, description, flags, suggested_category, suggested_price, _now(), item_id),
+               ai_suggested_category = ?, ai_suggested_price = ?, ai_suggested_weight_lb = ?,
+               ai_suggested_length_in = ?, ai_suggested_width_in = ?, ai_suggested_height_in = ?,
+               updated_at = ? WHERE id = ?""",
+            (title, description, flags, suggested_category, suggested_price, suggested_weight_lb,
+             suggested_length_in, suggested_width_in, suggested_height_in, _now(), item_id),
         )
 
 

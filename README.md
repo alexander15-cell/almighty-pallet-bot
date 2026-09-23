@@ -31,15 +31,15 @@ Every item's card always shows which pallet it belongs to.
   liquidation-sale disclaimer - sold as-is, not individually tested for
   full functionality, buyer should review photos for minor cosmetic wear),
   flags anything inconsistent between the note and the photo, and suggests
-  an eBay category (from `config.EBAY_CATEGORIES`) and a starting price -
+  an eBay category (from `config.EBAY_CATEGORIES`), a starting price, and a
+  rough shipping weight/dimensions (from a visual estimate off the photo) -
   Claude's cloud API by default, or a local Ollama model (see "Running with
   the Ollama backend" below) if you'd rather avoid per-item API cost.
-  **The suggested price is a rough guess from general knowledge, not real
-  market data** - it's only ever a pre-fill Queue Review can accept or
-  change, never treated as final (see "Known limitations" below for a
-  possible future improvement here). **Photos are never edited or
-  regenerated.** This step is optional - see "Running without AI review"
-  below.
+  **The suggested price and weight/dimensions are rough guesses, not real
+  market data or actual measurements** - they're only ever pre-fills Queue
+  Review can accept or change, never treated as final (see "Known
+  limitations" below). **Photos are never edited or regenerated.** This
+  step is optional - see "Running without AI review" below.
 - In **Queue Review** (shared), the Queue Review role approves, edits, or
   rejects (sends back to that item's own pallet's Data Entry channel).
   Approving walks through a few steps to capture everything needed to list
@@ -52,12 +52,15 @@ Every item's card always shows which pallet it belongs to.
   shown as text, with a "Change category" button if you disagree - a format
   dropdown (Fixed Price or Auction - decided per item, not a global switch;
   Auction adds one more step for the listing duration: 3/5/7/10 days), then
-  a short form for title, price/starting bid (pre-filled with the AI's price
-  suggestion when there is one - always editable), and freeform item
-  specifics (brand/size/color/etc). Only title/category/condition/format/
-  price are required; specifics can be filled in later. Description and
-  photos are reused as-is from Data Entry. (None of these dropdowns
-  pre-check an option: Discord's mobile client doesn't reliably register a
+  a short form for title, price/starting bid, shipping weight (lb) and
+  packaged dimensions (L x W x H, in inches) - all pre-filled with the AI's
+  suggestions when there are any, always editable - and freeform item
+  specifics (brand/size/color/etc). Title/category/condition/format/price/
+  weight/dimensions are all required (weight/dimensions drive eBay's
+  Calculated shipping and get reused for the Pirate Ship export too, so
+  there's no safe default to skip them); specifics can be filled in later.
+  Description and photos are reused as-is from Data Entry. (None of these
+  dropdowns pre-check an option: Discord's mobile client doesn't reliably register a
   tap on an option that's already marked selected, so the "recommended"
   option is only ever sorted first or applied automatically - never a
   checkmark you have to re-tap.)
@@ -295,18 +298,29 @@ four values are set, restart the bot and the API button reappears - though
 `ebay_api.py` itself still needs a real integration written before it does
 anything.
 
-**`EBAY_ITEM_LOCATION`, `EBAY_SHIPPING_SERVICE`, and `EBAY_SHIPPING_COST`
+**`EBAY_ITEM_LOCATION`, `EBAY_SHIPPING_SERVICE`, and `EBAY_SHIPPING_PACKAGE_TYPE`
 are required regardless of the above** - eBay rejects every row in a bulk
 upload without a location (`No <Item.Location> exists`) and a shipping
 service (`Please add at least one valid shipping service option`); the bot
 refuses to export a batch at all until all three are set in `.env`, rather
 than handing you a CSV guaranteed to fail on every row. `EBAY_ITEM_LOCATION`
 is your ship-from city/state (e.g. `Columbus, OH`) or ZIP; `EBAY_SHIPPING_SERVICE`
-is a real eBay shipping service code (e.g. `USPSPriority`) - verify it via
-eBay's own listing flow rather than trusting an example blindly, same as
-category IDs. This applies one flat shipping rate/service to every item in
-a batch, since this bot doesn't track per-item weight/dimensions for
-calculated shipping.
+is a real eBay shipping service code (e.g. `USPSPriority`) and
+`EBAY_SHIPPING_PACKAGE_TYPE` is a real eBay package type code (e.g.
+`PackageThickEnvelope`) - verify both via eBay's own listing flow rather
+than trusting an example blindly, same as category IDs.
+
+Shipping uses eBay's **Calculated** type, not one flat rate for every item:
+each item's own weight and packaged dimensions - required fields on the
+eBay listing form at Queue Review approval (Automated Review's AI pre-fills
+a rough visual estimate from the photo, always human-confirmed before
+Approve) - drive the actual per-listing shipping charge, so a small light
+item and a big heavy one aren't priced the same. Already-approved items
+missing this (from before the fields existed) block `/ebay export-batch`
+until corrected via `/ebay retry-item weight_lb:... dimensions:...`. This
+same weight/dimension data also fills in the Pirate Ship export's Weight/
+Length/Width/Height columns (see below), regardless of which platform the
+item ends up selling on.
 
 ### Running without R2
 
@@ -439,21 +453,27 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   Batch** click starts a fresh file, and records a durable, numbered batch
   snapshot (`/ebay batches`/`/ebay batch`) of exactly which items went out
   in it. Refuses to export at all if `EBAY_ITEM_LOCATION`,
-  `EBAY_SHIPPING_SERVICE`, or `EBAY_SHIPPING_COST` isn't set (see
-  "Installation" - eBay rejects every row without them).
-- `/ebay retry-item <item_number> [category_id] [condition_id] [specifics]`
-  - run inside a pallet's category. For an item whose batch upload
-  actually failed (check the results CSV or Seller Hub) - re-queues it
-  into the current live CSV so the next `/ebay export-batch` picks it up
-  again, with any config fixes since its last attempt (e.g.
+  `EBAY_SHIPPING_SERVICE`, or `EBAY_SHIPPING_PACKAGE_TYPE` isn't set (see
+  "Installation" - eBay rejects every row without them), or if any pending
+  item is missing its weight/dimensions (items approved before those became
+  required fields) - use `/ebay retry-item` to fill them in.
+- `/ebay retry-item <item_number> [category_id] [condition_id] [specifics]
+  [weight_lb] [dimensions]` - run inside a pallet's category. For an item
+  whose batch upload actually failed (check the results CSV or Seller Hub)
+  - re-queues it into the current live CSV so the next `/ebay export-batch`
+  picks it up again, with any config fixes since its last attempt (e.g.
   `EBAY_ITEM_LOCATION`) applied fresh. Pass `category_id` to correct the
   category (eBay error 87, "not a leaf category"), `condition_id` to
   correct the condition (eBay: "condition id is invalid for the selected
-  category" - not every condition is valid in every category), and/or
-  `specifics` as `Key=Value, Key2=Value2` to add/fix required item
-  specifics (eBay: "The item specific X is missing") - merged into
-  whatever specifics are already saved, not a full replacement. Skipping
-  a needed correction just resubmits the same bad data and fails
+  category" - not every condition is valid in every category), `specifics`
+  as `Key=Value, Key2=Value2` to add/fix required item specifics (eBay:
+  "The item specific X is missing") - merged into whatever specifics are
+  already saved, not a full replacement - and/or `weight_lb` and
+  `dimensions` (as `"12 x 8 x 4"`, in inches) to correct or fill in
+  shipping weight/dimensions, needed for eBay's Calculated shipping.
+  Correcting any one of these always preserves whatever weight/dimensions
+  were already saved, even if this particular retry doesn't touch them.
+  Skipping a needed correction just resubmits the same bad data and fails
   identically.
 - `/ebay import-results <batch_id> <results_csv>` - reconciles a batch
   against the results/report CSV Seller Hub gives you after processing an
@@ -479,10 +499,12 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   batch/spreadsheet order import, then marks them exported so a re-run
   doesn't duplicate them. Recipient name/address come from `/finance
   set-shipping-info`; items missing that get flagged in the response but
-  are still included. Weight/package dimensions aren't tracked in this bot,
-  so those columns are left blank to fill in before creating labels. eBay
-  sales are never included - Pirate Ship pulls those directly via its own
-  native eBay integration.
+  are still included. Weight/package dimensions reuse the same data eBay's
+  Calculated shipping uses (see above) - the human-confirmed value from
+  Queue Review approval when the item went through that flow, else
+  Automated Review's AI estimate; still left blank for items that predate
+  both. eBay sales are never included - Pirate Ship pulls those directly
+  via its own native eBay integration.
 - `/backup-now` - creates and verifies a local backup immediately (see
   "Backups" below); `/backups` lists recent ones with size and age.
 - `/bind-role <role_name> <role>` / `/unbind-role <role_name>` /
@@ -665,12 +687,21 @@ this scale.
   comps via eBay's Browse API for a market-data-backed estimate instead
   (not implemented - would need its own eBay API credentials/calls beyond
   what `config.EBAY_ENABLED` currently gates).
-- **The Pirate Ship CSV doesn't track package weight/dimensions** - nothing
-  in this bot captures those, so those columns are always blank; fill them
-  in before creating shipping labels. `/finance set-shipping-info` captures
-  a structured address (address lines, city, state, postal code, country)
-  as of the fields themselves, but none of it is validated against a real
-  address database - a typo'd city or zip saves exactly as typed. Items
-  shipped before this structured form existed only have the old freeform
-  address blob, which is still split into address lines best-effort for
+- **Automated Review's estimated weight/dimensions is a rough visual guess,
+  not an actual measurement.** The model only ever sees the item's photo -
+  it's a starting point pre-filled on the eBay listing form at Queue Review
+  approval, always human-confirmed or corrected before Approve, never
+  treated as authoritative. Unlike the price guess above, a wrong value here
+  has a real dollar cost: it directly drives eBay's Calculated shipping
+  charge and gets reused for the Pirate Ship export too. Items approved
+  before weight/dimensions became required fields have neither a human-
+  confirmed nor an AI-estimated value - `/ebay export-batch` blocks on
+  these until corrected via `/ebay retry-item weight_lb:... dimensions:...`,
+  and they show up with blank weight/dims in a Pirate Ship export until then.
+- `/finance set-shipping-info` captures a structured address (address lines,
+  city, state, postal code, country) as of the fields themselves, but none
+  of it is validated against a real address database - a typo'd city or zip
+  saves exactly as typed. Items shipped before this structured form existed
+  only have the old freeform address blob, which is still split into
+  address lines best-effort for
   the CSV (city/state/zip are left blank for those older rows).

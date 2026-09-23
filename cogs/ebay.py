@@ -31,6 +31,8 @@ actual message/status moving is delegated to the ItemFlow cog (via
 get_cog, same cross-cog pattern QueueReviewView/AwaitingListingView use) so
 that logic stays in one place alongside the rest of the pipeline.
 """
+import re
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -82,6 +84,26 @@ def _parse_specifics(text: str) -> dict:
     return result
 
 
+def _parse_dimensions(text: str) -> tuple:
+    """
+    Parses "L x W x H" (as typed into /ebay retry-item's dimensions option)
+    into three positive inch values, or raises ValueError with the exact
+    message to show. Same "L x W x H" format/separator as EbayListingModal
+    (item_flow.py's Queue Review approval step) so a reviewer only ever has
+    to remember one format.
+    """
+    parts = [p.strip() for p in re.split(r"[xX×]", text) if p.strip()]
+    if len(parts) != 3:
+        raise ValueError("must be three numbers separated by 'x', e.g. `12 x 8 x 4`")
+    try:
+        length_in, width_in, height_in = (float(p) for p in parts)
+    except ValueError:
+        raise ValueError("must all be numbers, e.g. `12 x 8 x 4`")
+    if any(d <= 0 for d in (length_in, width_in, height_in)):
+        raise ValueError("must all be numbers greater than 0, e.g. `12 x 8 x 4`")
+    return length_in, width_in, height_in
+
+
 def _missing_export_requirements() -> list:
     """
     Settings eBay's bulk upload requires on every single row, with no safe
@@ -95,8 +117,8 @@ def _missing_export_requirements() -> list:
         missing.append(("EBAY_ITEM_LOCATION", "your ship-from city/state or ZIP, e.g. `Columbus, OH`"))
     if not config.EBAY_SHIPPING_SERVICE:
         missing.append(("EBAY_SHIPPING_SERVICE", "an eBay shipping service code, e.g. `USPSPriority`"))
-    if not config.EBAY_SHIPPING_COST:
-        missing.append(("EBAY_SHIPPING_COST", "a flat shipping cost, e.g. `8.00`"))
+    if not config.EBAY_SHIPPING_PACKAGE_TYPE:
+        missing.append(("EBAY_SHIPPING_PACKAGE_TYPE", "an eBay shipping package code, e.g. `PackageThickEnvelope`"))
     return missing
 
 
@@ -122,6 +144,28 @@ class Ebay(commands.Cog):
             return
 
         pending_items = db.get_unbatched_pending_items()
+
+        # Weight/dimensions are required fields on EbayListingModal going
+        # forward, but items approved before that change exist have
+        # ebay_listing_data.weight_lb = NULL - catch those here rather than
+        # exporting a CSV where those specific rows are guaranteed to fail
+        # Calculated shipping.
+        missing_weight = []
+        for item in pending_items:
+            listing = db.get_ebay_listing_data(item["id"])
+            if not listing or listing.get("weight_lb") is None:
+                missing_weight.append(item["item_number"])
+        if missing_weight:
+            numbers = ", ".join(f"#{n}" for n in missing_weight)
+            await interaction.response.send_message(
+                f"⚠️ Can't export yet - {len(missing_weight)} item(s) have no weight/dimensions saved "
+                f"(approved before that became required): {numbers}. Fix each with "
+                f"`/ebay retry-item item_number:<n> weight_lb:<lb> dimensions:<LxWxH in>` "
+                f"(run inside that pallet's category), then try exporting again.",
+                ephemeral=True,
+            )
+            return
+
         path = ebay_csv.export_and_archive()
         if path is None:
             await interaction.response.send_message("The eBay batch is empty - nothing to export.", ephemeral=True)
@@ -314,17 +358,20 @@ class Ebay(commands.Cog):
 
     @ebay_group.command(
         name="retry-item",
-        description="Re-queue a failed batch item, correcting category/condition/specifics. Run in its pallet's category.",
+        description="Re-queue a failed batch item, fixing whatever caused the failure. Run in its pallet's category.",
     )
     @app_commands.describe(
         item_number="The item's number shown on its card (e.g. 3)",
         category_id="Optional - a corrected eBay leaf category ID (error 87, 'not a leaf category')",
         condition_id="Optional - a corrected condition ID (error: 'condition id is invalid for the selected category')",
         specifics="Optional - item specifics to add/fix, as 'Key=Value, Key2=Value2' - merged into what's already saved",
+        weight_lb="Optional - a corrected weight in pounds, e.g. 2.5",
+        dimensions="Optional - corrected dimensions as 'L x W x H' in inches, e.g. '12 x 8 x 4'",
     )
     async def retry_item(
         self, interaction: discord.Interaction, item_number: int,
         category_id: str = None, condition_id: str = None, specifics: str = None,
+        weight_lb: float = None, dimensions: str = None,
     ):
         if not await _require_admin(interaction):
             return
@@ -370,12 +417,33 @@ class Ebay(commands.Cog):
                 return
             listing["item_specifics"].update(added)
             corrections.append(f"specifics +{', '.join(added)}")
+        if weight_lb is not None:
+            if weight_lb <= 0:
+                await interaction.response.send_message("`weight_lb` must be greater than 0.", ephemeral=True)
+                return
+            listing["weight_lb"] = weight_lb
+            corrections.append(f"weight → `{weight_lb:g} lb`")
+        if dimensions:
+            try:
+                length_in, width_in, height_in = _parse_dimensions(dimensions)
+            except ValueError as e:
+                await interaction.response.send_message(f"`dimensions` {e}.", ephemeral=True)
+                return
+            listing["length_in"], listing["width_in"], listing["height_in"] = length_in, width_in, height_in
+            corrections.append(f"dimensions → `{length_in:g}x{width_in:g}x{height_in:g} in`")
 
         if corrections:
+            # Always thread weight/dims through, whether or not THIS retry
+            # touched them - save_ebay_listing_data is a full upsert, so
+            # omitting them here would silently null out a previously-saved
+            # weight/dimensions on every category/condition/specifics-only
+            # correction, not just leave them unchanged.
             db.save_ebay_listing_data(
                 item["id"], listing["ebay_title"], listing["category_id"], listing["condition_id"],
                 listing["price"], listing["item_specifics"], listing_format=listing["listing_format"],
-                auction_duration=listing["auction_duration"], actor_id=interaction.user.id,
+                auction_duration=listing["auction_duration"], weight_lb=listing.get("weight_lb"),
+                length_in=listing.get("length_in"), width_in=listing.get("width_in"),
+                height_in=listing.get("height_in"), actor_id=interaction.user.id,
             )
 
         db.clear_ebay_batch_id(item["id"])

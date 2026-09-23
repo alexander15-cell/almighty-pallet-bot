@@ -109,13 +109,51 @@ def test_row_includes_configured_shipping_fields(tmp_path, monkeypatch):
     # at least one valid shipping service option to your listing") - a
     # second real upload failure this test guards against recurring.
     monkeypatch.setattr(ebay_csv, "BATCH_CSV_PATH", tmp_path / "batch.csv")
-    monkeypatch.setattr(config, "EBAY_SHIPPING_TYPE", "Flat")
+    monkeypatch.setattr(config, "EBAY_SHIPPING_TYPE", "Calculated")
     monkeypatch.setattr(config, "EBAY_SHIPPING_SERVICE", "USPSPriority")
-    monkeypatch.setattr(config, "EBAY_SHIPPING_COST", "8.00")
+    monkeypatch.setattr(config, "EBAY_SHIPPING_PACKAGE_TYPE", "PackageThickEnvelope")
     ebay_csv.append_item_to_batch(_fake_item(), _fake_listing())
 
     _, rows = ebay_csv._read_existing_rows()
     row = rows[0]
-    assert row["ShippingType"] == "Flat"
+    assert row["ShippingType"] == "Calculated"
     assert row["ShippingService-1:Option"] == "USPSPriority"
-    assert row["ShippingService-1:Cost"] == "8.00"
+    assert row["ShippingPackage"] == "PackageThickEnvelope"
+
+
+def test_split_weight_lb():
+    assert ebay_csv._split_weight_lb(None) == ("", "")
+    assert ebay_csv._split_weight_lb(2.5) == ("2", "8")
+    assert ebay_csv._split_weight_lb(3.0) == ("3", "0")
+    assert ebay_csv._split_weight_lb(2.999) == ("3", "0")
+
+
+def test_row_includes_weight_and_dimensions(tmp_path, monkeypatch):
+    # eBay's Calculated shipping needs real per-item weight/dims to compute
+    # an accurate charge - a required field on EbayListingModal going
+    # forward (see item_flow.py), populated here as WeightMajor/WeightMinor
+    # (whole lb + remaining oz) and PackageLength/Width/Depth.
+    monkeypatch.setattr(ebay_csv, "BATCH_CSV_PATH", tmp_path / "batch.csv")
+    listing = _fake_listing(weight_lb=2.5, length_in=12, width_in=8, height_in=4)
+    ebay_csv.append_item_to_batch(_fake_item(), listing)
+
+    _, rows = ebay_csv._read_existing_rows()
+    row = rows[0]
+    assert row["WeightMajor"] == "2"
+    assert row["WeightMinor"] == "8"
+    assert row["PackageLength"] == "12"
+    assert row["PackageWidth"] == "8"
+    assert row["PackageDepth"] == "4"
+
+
+def test_row_leaves_weight_and_dimensions_blank_when_unset(tmp_path, monkeypatch):
+    monkeypatch.setattr(ebay_csv, "BATCH_CSV_PATH", tmp_path / "batch.csv")
+    ebay_csv.append_item_to_batch(_fake_item(), _fake_listing())
+
+    _, rows = ebay_csv._read_existing_rows()
+    row = rows[0]
+    assert row["WeightMajor"] == ""
+    assert row["WeightMinor"] == ""
+    assert row["PackageLength"] == ""
+    assert row["PackageWidth"] == ""
+    assert row["PackageDepth"] == ""

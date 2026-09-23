@@ -166,3 +166,105 @@ def test_retry_item_can_correct_the_category_before_requeueing(fresh_db):
     assert updated["category_id"] == "12345"
     assert updated["ebay_title"] == "Title"  # everything else preserved
     assert updated["item_specifics"] == {"Brand": "Test"}
+
+
+def test_ebay_listing_weight_dims_are_wiped_if_omitted_on_upsert(fresh_db):
+    # save_ebay_listing_data is a full-column upsert, not a partial merge -
+    # documents the exact hazard /ebay retry-item's weight/dims preservation
+    # fix guards against: omitting weight/dims on a later save silently
+    # nulls out a previously-saved value instead of leaving it unchanged.
+    pallet_id = fresh_db.create_pallet("Pallet H", category_id=888, created_by=1)
+    item_id = fresh_db.create_item(pallet_id, "item", [], 1)
+    fresh_db.save_ebay_listing_data(
+        item_id, "Title", "12345", "1500", 19.99, {}, weight_lb=2.5,
+        length_in=12, width_in=8, height_in=4, actor_id=1,
+    )
+    fresh_db.save_ebay_listing_data(item_id, "Title", "99999", "1500", 19.99, {}, actor_id=1)
+
+    updated = fresh_db.get_ebay_listing_data(item_id)
+    assert updated["category_id"] == "99999"
+    assert updated["weight_lb"] is None  # the hazard, if not guarded against
+
+
+def test_retry_item_style_correction_preserves_previously_saved_weight(fresh_db):
+    # The actual fix in /ebay retry-item (cogs/ebay.py): always thread
+    # listing.get("weight_lb")/etc. through on every corrections-triggered
+    # save, so a category-only (or condition/specifics-only) retry doesn't
+    # wipe a previously-saved weight/dimensions. This mirrors retry_item's
+    # real save_ebay_listing_data call exactly.
+    pallet_id = fresh_db.create_pallet("Pallet I", category_id=999, created_by=1)
+    item_id = fresh_db.create_item(pallet_id, "item", [], 1)
+    fresh_db.save_ebay_listing_data(
+        item_id, "Title", "259482", "1500", 19.99, {}, weight_lb=2.5,
+        length_in=12, width_in=8, height_in=4, actor_id=1,
+    )
+
+    listing = fresh_db.get_ebay_listing_data(item_id)
+    listing["category_id"] = "12345"  # the only field this retry corrects
+    fresh_db.save_ebay_listing_data(
+        item_id, listing["ebay_title"], listing["category_id"], listing["condition_id"],
+        listing["price"], listing["item_specifics"], listing_format=listing["listing_format"],
+        auction_duration=listing["auction_duration"], weight_lb=listing.get("weight_lb"),
+        length_in=listing.get("length_in"), width_in=listing.get("width_in"),
+        height_in=listing.get("height_in"), actor_id=1,
+    )
+
+    updated = fresh_db.get_ebay_listing_data(item_id)
+    assert updated["category_id"] == "12345"
+    assert updated["weight_lb"] == 2.5
+    assert updated["length_in"] == 12
+    assert updated["width_in"] == 8
+    assert updated["height_in"] == 4
+
+
+def test_pirate_ship_weight_prefers_confirmed_ebay_listing_data(fresh_db):
+    # An item that went through Queue Review's EbayListingModal (human-
+    # confirmed weight) but ended up sold on another platform should use
+    # that confirmed value, not the AI's rougher automated-review guess.
+    pallet_id = fresh_db.create_pallet("Pallet J", category_id=1001, created_by=1)
+    item_id = fresh_db.create_item(pallet_id, "item", [], 1)
+    fresh_db.save_ai_review(item_id, "AI Title", "AI desc", "[]", suggested_weight_lb=9.9,
+                             suggested_length_in=9, suggested_width_in=9, suggested_height_in=9)
+    fresh_db.save_ebay_listing_data(
+        item_id, "Title", "12345", "1500", 19.99, {}, weight_lb=2.5,
+        length_in=12, width_in=8, height_in=4, actor_id=1,
+    )
+    fresh_db.record_item_sale(item_id, 25.0, "Facebook Marketplace", actor_id=1)
+    fresh_db.update_status(item_id, fresh_db.STATUS_SOLD)
+
+    rows = fresh_db.get_unexported_other_platform_sales()
+    row = next(r for r in rows if r["id"] == item_id)
+    assert row["pirate_ship_weight_lb"] == 2.5
+    assert row["pirate_ship_length_in"] == 12
+    assert row["pirate_ship_width_in"] == 8
+    assert row["pirate_ship_height_in"] == 4
+
+
+def test_pirate_ship_weight_falls_back_to_ai_suggestion(fresh_db):
+    # Most other-platform sales never go through the eBay approval flow at
+    # all, so ebay_listing_data has no row for them - the AI's automated-
+    # review estimate is the only weight/dims data available.
+    pallet_id = fresh_db.create_pallet("Pallet K", category_id=1002, created_by=1)
+    item_id = fresh_db.create_item(pallet_id, "item", [], 1)
+    fresh_db.save_ai_review(item_id, "AI Title", "AI desc", "[]", suggested_weight_lb=4.0,
+                             suggested_length_in=10, suggested_width_in=6, suggested_height_in=3)
+    fresh_db.record_item_sale(item_id, 25.0, "Facebook Marketplace", actor_id=1)
+    fresh_db.update_status(item_id, fresh_db.STATUS_SOLD)
+
+    rows = fresh_db.get_unexported_other_platform_sales()
+    row = next(r for r in rows if r["id"] == item_id)
+    assert row["pirate_ship_weight_lb"] == 4.0
+    assert row["pirate_ship_length_in"] == 10
+    assert row["pirate_ship_width_in"] == 6
+    assert row["pirate_ship_height_in"] == 3
+
+
+def test_pirate_ship_weight_null_when_never_captured(fresh_db):
+    pallet_id = fresh_db.create_pallet("Pallet L", category_id=1003, created_by=1)
+    item_id = fresh_db.create_item(pallet_id, "item", [], 1)
+    fresh_db.record_item_sale(item_id, 25.0, "Facebook Marketplace", actor_id=1)
+    fresh_db.update_status(item_id, fresh_db.STATUS_SOLD)
+
+    rows = fresh_db.get_unexported_other_platform_sales()
+    row = next(r for r in rows if r["id"] == item_id)
+    assert row["pirate_ship_weight_lb"] is None

@@ -90,6 +90,11 @@ invent a category name that isn't in this list):
 7. Suggest a realistic USD starting price, based on your general knowledge of resale values \
 for this kind of item. This is a rough estimate from general knowledge, NOT real market \
 data - it always needs a human to confirm or adjust it before the item is actually listed.
+8. Estimate the item's shipping weight in pounds, and its packaged dimensions (length, width, \
+height in inches) - a rough visual estimate from the photo and your general knowledge of \
+similar items, NOT an actual measurement. This is only ever a starting point for a human to \
+weigh/measure and correct before it's used for real shipping calculations - never treat it as \
+accurate. If you cannot make any reasonable estimate, use null instead of guessing wildly.
 
 Respond ONLY with valid JSON, no other text, in this exact shape:
 {{
@@ -99,7 +104,11 @@ Respond ONLY with valid JSON, no other text, in this exact shape:
   "flags": ["list of strings, empty list if nothing to flag"],
   "confidence": "high" | "medium" | "low",
   "suggested_category": "exact category name from the list above, or null",
-  "suggested_price": number or null
+  "suggested_price": number or null,
+  "estimated_weight_lb": number or null,
+  "estimated_length_in": number or null,
+  "estimated_width_in": number or null,
+  "estimated_height_in": number or null
 }}"""
 
 
@@ -120,6 +129,14 @@ def _build_system_prompt() -> str:
 # not implemented here, since it needs its own eBay API credentials/calls
 # beyond what config.EBAY_ENABLED currently gates.
 
+# estimated_weight_lb/estimated_*_in (step 8 above) are visual guesses from
+# the photo, same "never authoritative" status as suggested_price - the
+# eBay listing modal pre-fills these fields but always requires a human to
+# confirm or correct them before Approve, since eBay's Calculated shipping
+# charges the buyer based on whatever weight/dimensions end up on the
+# listing - a wildly wrong AI guess here has a real dollar cost, not just a
+# cosmetic one.
+
 
 def _fallback(raw_description: str, reason: str) -> dict:
     """Safe default so a single AI hiccup (either backend) never silently
@@ -132,6 +149,10 @@ def _fallback(raw_description: str, reason: str) -> dict:
         "confidence": "low",
         "suggested_category": None,
         "suggested_price": None,
+        "estimated_weight_lb": None,
+        "estimated_length_in": None,
+        "estimated_width_in": None,
+        "estimated_height_in": None,
     }
 
 

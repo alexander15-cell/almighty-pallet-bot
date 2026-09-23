@@ -368,17 +368,24 @@ EBAY_ITEM_LOCATION = os.getenv("EBAY_ITEM_LOCATION", "").strip()
 
 # eBay's bulk upload also REQUIRES at least one shipping service on every
 # row (confirmed against a real upload: "Please add at least one valid
-# shipping service option to your listing") - this bot doesn't track
-# per-item weight/dimensions for calculated shipping, so this is one flat
-# rate/service applied to every item in a batch, a blunt instrument until
-# per-item shipping is built. EBAY_SHIPPING_SERVICE must be one of eBay's
-# own ShippingService codes (e.g. "USPSPriority", "USPSGround",
-# "UPSGround") - there's no safe default to guess here any more than there
-# was for EBAY_ITEM_LOCATION, so all three are required before /ebay
-# export-batch will export anything.
-EBAY_SHIPPING_TYPE = os.getenv("EBAY_SHIPPING_TYPE", "Flat").strip()
+# shipping service option to your listing"). Uses eBay's Calculated
+# (weight-based) shipping type, not one flat cost for every item - each
+# item's own weight/dimensions (captured as required fields on
+# EbayListingModal, see item_flow.py) drive the actual per-listing charge,
+# so a small light item and a big heavy one aren't priced the same.
+# EBAY_SHIPPING_SERVICE must still be one of eBay's own ShippingService
+# codes (e.g. "USPSPriority", "USPSGround", "UPSGround") - it says WHICH
+# carrier service to calculate with, not a price - and
+# EBAY_SHIPPING_PACKAGE_TYPE must be one of eBay's ShippingPackage codes
+# (e.g. "PackageThickEnvelope", "IrregularPackage" - what's right depends
+# on what you're actually shipping). Neither has a safe default to guess
+# any more than EBAY_ITEM_LOCATION did - verify both via eBay's own listing
+# flow (start a listing by hand, choose Calculated shipping, see what it's
+# called) rather than trusting this comment's examples blindly. All three
+# are required before /ebay export-batch will export anything.
+EBAY_SHIPPING_TYPE = os.getenv("EBAY_SHIPPING_TYPE", "Calculated").strip()
 EBAY_SHIPPING_SERVICE = os.getenv("EBAY_SHIPPING_SERVICE", "").strip()
-EBAY_SHIPPING_COST = os.getenv("EBAY_SHIPPING_COST", "").strip()
+EBAY_SHIPPING_PACKAGE_TYPE = os.getenv("EBAY_SHIPPING_PACKAGE_TYPE", "").strip()
 
 # ---- Pirate Ship CSV export (see pirate_ship_csv.py) ----
 # Only for "Other"-platform sales (FB Marketplace, website, etc.) that were

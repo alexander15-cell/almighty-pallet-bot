@@ -19,10 +19,17 @@ the sale-price recording the same way Mark as Sold is decoupled from price
 recording, since a buyer's address often isn't known until after the price
 is agreed on. Items shipped before the structured form existed only have
 the old freeform shipping_address blob; _legacy_split_address() best-effort
-splits that for those rows only. Weight/dimensions aren't tracked anywhere
-in this bot yet, so those columns are left blank for whoever processes the
-batch to fill in by hand before uploading - same "leave it blank, fill in
-by hand" precedent as ebay_csv.py's PicURL.
+splits that for those rows only.
+
+Weight/dimensions reuse the same data eBay's Calculated shipping uses (see
+ebay_csv.py) - database.get_unexported_other_platform_sales() resolves each
+item's best-available weight_lb/length_in/width_in/height_in (human-
+confirmed via Queue Review's EbayListingModal when the item went through
+that flow, else the AI's automated-review estimate) as
+pirate_ship_weight_lb/length_in/width_in/height_in. Still left blank when
+neither source ever captured a value (e.g. very old items from before this
+feature existed) for whoever processes the batch to fill in by hand - same
+"leave it blank, fill in by hand" precedent as ebay_csv.py's PicURL.
 """
 import csv
 from datetime import datetime, timezone
@@ -55,6 +62,26 @@ FIELDS = [
 ]
 
 
+def _split_weight_lb(weight_lb) -> tuple:
+    """
+    Pirate Ship's import wants whole pounds and remaining ounces as separate
+    columns (Weight (lb)/Weight (oz)), not one decimal-pounds value - same
+    split ebay_csv.py's WeightMajor/WeightMinor columns need, duplicated
+    here rather than imported since it's a tiny pure function and these two
+    export modules otherwise have no dependency on each other. Returns
+    ("", "") if weight_lb is None (no weight captured for this item yet)
+    rather than guessing.
+    """
+    if weight_lb is None:
+        return "", ""
+    major = int(weight_lb)
+    minor = round((weight_lb - major) * 16)
+    if minor == 16:  # rounding 0.999... lb up to the next whole pound
+        major += 1
+        minor = 0
+    return str(major), str(minor)
+
+
 def _legacy_split_address(shipping_address: str) -> dict:
     """
     Fallback for rows shipped before structured address fields existed -
@@ -82,12 +109,18 @@ def build_export_rows(items: list) -> list:
     without touching the filesystem."""
     rows = []
     for item in items:
+        weight_lb, weight_oz = _split_weight_lb(item.get("pirate_ship_weight_lb"))
         row = {field: "" for field in FIELDS}
         row.update({
             "Order Number": order_number(item),
             "Recipient Name": item.get("recipient_name") or "",
             "Item Description": item.get("ai_title") or item.get("ai_description") or item.get("raw_description") or "",
             "Value (USD)": f"{item['sale_price']:.2f}" if item.get("sale_price") is not None else "",
+            "Weight (lb)": weight_lb,
+            "Weight (oz)": weight_oz,
+            "Length (in)": f"{item['pirate_ship_length_in']:g}" if item.get("pirate_ship_length_in") is not None else "",
+            "Width (in)": f"{item['pirate_ship_width_in']:g}" if item.get("pirate_ship_width_in") is not None else "",
+            "Height (in)": f"{item['pirate_ship_height_in']:g}" if item.get("pirate_ship_height_in") is not None else "",
         })
         if item.get("address_line1"):
             row.update({

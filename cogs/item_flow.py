@@ -30,6 +30,7 @@ so that card never goes stale.
 """
 import asyncio
 import json
+import re
 from pathlib import Path
 
 import discord
@@ -329,19 +330,58 @@ class EbayAuctionDurationSelectView(discord.ui.View):
         )
 
 
+def _parse_weight_lb(weight_raw: str) -> float:
+    """Parses EbayListingModal's weight field into pounds > 0, or raises
+    ValueError with the exact message to show the reviewer."""
+    try:
+        weight_lb = float(weight_raw)
+    except ValueError:
+        raise ValueError("Weight must be a number (pounds), e.g. 2.5.")
+    if weight_lb <= 0:
+        raise ValueError("Weight must be greater than 0.")
+    return weight_lb
+
+
+def _parse_dimensions(dims_raw: str) -> tuple:
+    """Parses EbayListingModal's "L x W x H" dimensions field into three
+    positive inch values, or raises ValueError with the exact message to
+    show the reviewer."""
+    parts = [p.strip() for p in re.split(r"[xX×]", dims_raw) if p.strip()]
+    if len(parts) != 3:
+        raise ValueError("Dimensions must be three numbers separated by 'x', e.g. 12 x 8 x 4.")
+    try:
+        length_in, width_in, height_in = (float(p) for p in parts)
+    except ValueError:
+        raise ValueError("Dimensions must all be numbers, e.g. 12 x 8 x 4.")
+    if any(d <= 0 for d in (length_in, width_in, height_in)):
+        raise ValueError("Dimensions must all be greater than 0.")
+    return length_in, width_in, height_in
+
+
 class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
     """
-    Final step of Approve. Title/price are required (condition/category/
-    format were already picked in steps 1-3, and are required too since
-    they're selects, not optional text fields); item specifics are freeform
-    "Key: Value" lines, one per attribute, and can be left blank. Description
-    and photos are reused as-is from Data Entry - not re-entered here.
+    Final step of Approve. Title/price/weight/dimensions are required
+    (condition/category/format were already picked in steps 1-3, and are
+    required too since they're selects, not optional text fields); item
+    specifics are freeform "Key: Value" lines, one per attribute, and can
+    be left blank. Description and photos are reused as-is from Data
+    Entry - not re-entered here. That's 5 fields total, right at Discord's
+    modal cap.
 
-    If there's no existing eBay listing data yet, the price field pre-fills
-    from items.ai_suggested_price (Automated Review's rough estimate from
-    general knowledge, NOT real market data) - always editable, never
-    treated as final. See ai_review.py for a note on a possible future
-    improvement (real eBay "sold" comps via the Browse API).
+    Weight/dimensions are mandatory (not optional like specifics) because
+    eBay's Calculated shipping (see ebay_csv.py) needs them on every row -
+    without real values here, every listing in a batch would fail exactly
+    like the missing Item.Location/shipping-service bugs already fixed.
+    They feed the Pirate Ship CSV export too, since every approved item
+    reaches this same modal regardless of which platform it eventually
+    sells on.
+
+    If there's no existing eBay listing data yet, price/weight/dimensions
+    pre-fill from Automated Review's own rough estimates (items.
+    ai_suggested_price / ai_suggested_weight_lb / ai_suggested_*_in) -
+    general-knowledge/visual guesses, NOT real market data or actual
+    measurements - always editable, never treated as final. See ai_review.py
+    for more on both estimates' limits.
     """
 
     def __init__(self, item_id: int, condition_id: str, category_id: str,
@@ -370,6 +410,31 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
         if not existing and item.get("ai_suggested_price") is not None:
             price_label += " - AI est., confirm"
 
+        if existing and existing.get("weight_lb") is not None:
+            weight_default = f"{existing['weight_lb']:g}"
+            weight_label = "Weight (lb)"
+        elif item.get("ai_suggested_weight_lb") is not None:
+            weight_default = f"{item['ai_suggested_weight_lb']:g}"
+            weight_label = "Weight (lb) - AI est., confirm"
+        else:
+            weight_default = ""
+            weight_label = "Weight (lb)"
+
+        dims_existing = existing and all(existing.get(k) is not None for k in ("length_in", "width_in", "height_in"))
+        dims_ai = all(item.get(k) is not None for k in ("ai_suggested_length_in", "ai_suggested_width_in", "ai_suggested_height_in"))
+        if dims_existing:
+            dims_default = f"{existing['length_in']:g} x {existing['width_in']:g} x {existing['height_in']:g}"
+            dims_label = "Dimensions L x W x H (in)"
+        elif dims_ai:
+            dims_default = (
+                f"{item['ai_suggested_length_in']:g} x {item['ai_suggested_width_in']:g} x "
+                f"{item['ai_suggested_height_in']:g}"
+            )
+            dims_label = "Dimensions LxWxH (in) - AI est., confirm"
+        else:
+            dims_default = ""
+            dims_label = "Dimensions L x W x H (in)"
+
         self.ebay_title = discord.ui.TextInput(
             label="eBay Title (max 80 chars)",
             default=(existing["ebay_title"] if existing else (item.get("ai_title") or "")[:80]),
@@ -380,6 +445,17 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
             default=price_default,
             max_length=12,
         )
+        self.weight = discord.ui.TextInput(
+            label=weight_label[:45],
+            default=weight_default,
+            max_length=10,
+        )
+        self.dimensions = discord.ui.TextInput(
+            label=dims_label[:45],
+            placeholder="e.g. 12 x 8 x 4",
+            default=dims_default,
+            max_length=30,
+        )
         self.item_specifics = discord.ui.TextInput(
             label="Item Specifics (one per line: Key: Value)",
             style=discord.TextStyle.paragraph,
@@ -389,11 +465,15 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
         )
         self.add_item(self.ebay_title)
         self.add_item(self.price)
+        self.add_item(self.weight)
+        self.add_item(self.dimensions)
         self.add_item(self.item_specifics)
 
     async def on_submit(self, interaction: discord.Interaction):
         title = self.ebay_title.value.strip()
         price_raw = self.price.value.strip()
+        weight_raw = self.weight.value.strip()
+        dims_raw = self.dimensions.value.strip()
 
         errors = []
         if not title:
@@ -405,6 +485,18 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
                 errors.append("Price can't be negative.")
         except ValueError:
             errors.append("Price must be a number.")
+
+        weight_lb = None
+        try:
+            weight_lb = _parse_weight_lb(weight_raw)
+        except ValueError as e:
+            errors.append(str(e))
+
+        length_in = width_in = height_in = None
+        try:
+            length_in, width_in, height_in = _parse_dimensions(dims_raw)
+        except ValueError as e:
+            errors.append(str(e))
 
         if errors:
             await interaction.response.send_message(
@@ -426,7 +518,7 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
         cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
         await cog.finalize_ebay_approval(
             interaction, self.item_id, self.condition_id, self.category_id, title, price, specifics,
-            self.listing_format, self.auction_duration,
+            self.listing_format, self.auction_duration, weight_lb, length_in, width_in, height_in,
         )
 
 
@@ -702,11 +794,11 @@ class ItemFlow(commands.Cog):
 
         result = await ai_review.review_item(photo_paths, item["raw_description"])
 
-        suggested_price = result.get("suggested_price")
-        try:
-            suggested_price = float(suggested_price) if suggested_price is not None else None
-        except (TypeError, ValueError):
-            suggested_price = None  # model returned something non-numeric - just skip the pre-fill
+        def _safe_float(value):
+            try:
+                return float(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None  # model returned something non-numeric - just skip the pre-fill
 
         db.save_ai_review(
             item_id,
@@ -714,7 +806,11 @@ class ItemFlow(commands.Cog):
             description=result.get("suggested_description", ""),
             flags=", ".join(result.get("flags", [])) if result.get("flags") else "",
             suggested_category=result.get("suggested_category") or None,
-            suggested_price=suggested_price,
+            suggested_price=_safe_float(result.get("suggested_price")),
+            suggested_weight_lb=_safe_float(result.get("estimated_weight_lb")),
+            suggested_length_in=_safe_float(result.get("estimated_length_in")),
+            suggested_width_in=_safe_float(result.get("estimated_width_in")),
+            suggested_height_in=_safe_float(result.get("estimated_height_in")),
         )
 
         try:
@@ -756,7 +852,9 @@ class ItemFlow(commands.Cog):
 
     async def finalize_ebay_approval(self, interaction: discord.Interaction, item_id: int, condition_id: str,
                                       category_id: str, title: str, price: float, specifics: dict,
-                                      listing_format: str = "FixedPrice", auction_duration: str = None):
+                                      listing_format: str = "FixedPrice", auction_duration: str = None,
+                                      weight_lb: float = None, length_in: float = None,
+                                      width_in: float = None, height_in: float = None):
         """Final step of Approve, called from EbayListingModal.on_submit: saves
         the eBay data and actually moves the item to Awaiting Listing."""
         item = db.get_item(item_id)
@@ -770,7 +868,8 @@ class ItemFlow(commands.Cog):
         db.save_ebay_listing_data(
             item_id, ebay_title=title, category_id=category_id, condition_id=condition_id,
             price=price, item_specifics=specifics, listing_format=listing_format,
-            auction_duration=auction_duration, actor_id=interaction.user.id,
+            auction_duration=auction_duration, weight_lb=weight_lb, length_in=length_in,
+            width_in=width_in, height_in=height_in, actor_id=interaction.user.id,
         )
         db.record_ebay_category_use(category_id)
 
@@ -799,7 +898,8 @@ class ItemFlow(commands.Cog):
             f"Fixed Price, ${price:.2f}"
         )
         await interaction.response.send_message(
-            f"Approved. eBay listing data saved (condition: **{condition_label}**, {format_note}). "
+            f"Approved. eBay listing data saved (condition: **{condition_label}**, {format_note}, "
+            f"{weight_lb:g} lb, {length_in:g}x{width_in:g}x{height_in:g} in). "
             f"Moved to <#{channel.id}> for listing.",
             ephemeral=True,
         )

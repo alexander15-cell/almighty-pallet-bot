@@ -16,6 +16,25 @@ def test_fallback_has_expected_shape_and_null_suggestions():
     assert "some reason" in result["flags"][0]
 
 
+def test_fallback_has_null_weight_and_dimensions():
+    # A failed AI call must never invent a weight/dimensions guess - those
+    # feed eBay's Calculated shipping and have a real dollar cost if wrong,
+    # so a fallback item should always need a human to fill these in.
+    result = ai_review._fallback("a raw note", "some reason")
+    assert result["estimated_weight_lb"] is None
+    assert result["estimated_length_in"] is None
+    assert result["estimated_width_in"] is None
+    assert result["estimated_height_in"] is None
+
+
+def test_system_prompt_asks_for_weight_and_dimension_estimate():
+    prompt = ai_review._build_system_prompt()
+    assert "estimated_weight_lb" in prompt
+    assert "estimated_length_in" in prompt
+    assert "estimated_width_in" in prompt
+    assert "estimated_height_in" in prompt
+
+
 def test_fallback_truncates_and_defaults_title():
     result = ai_review._fallback("", "reason")
     assert result["suggested_title"] == "Untitled item"
