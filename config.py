@@ -185,6 +185,22 @@ STALE_CHECK_INTERVAL_HOURS = 12  # how often the background job checks for stale
 # ---- Database ----
 DATABASE_PATH = os.getenv("DATABASE_PATH", "data/pallet_tracker.db")
 
+# ---- Local backups (see backup.py) ----
+# Verified zip snapshots of the database + photos + CSV batch archives.
+# Created automatically every BACKUP_INTERVAL_HOURS while the bot is
+# running (cogs/admin_tools.py) and on demand via /admin backup-now or
+# `python backup.py create`. BACKUP_KEEP_COUNT/BACKUP_MAX_AGE_DAYS bound
+# how many pile up in BACKUP_DIR - whichever limit is hit first prunes the
+# oldest. Backups contain real business/customer data - don't upload them
+# anywhere public.
+BACKUP_DIR = os.getenv("BACKUP_DIR", "backups")
+BACKUP_INTERVAL_HOURS = int(os.getenv("BACKUP_INTERVAL_HOURS", "24"))
+BACKUP_KEEP_COUNT = int(os.getenv("BACKUP_KEEP_COUNT", "14"))
+BACKUP_MAX_AGE_DAYS = int(os.getenv("BACKUP_MAX_AGE_DAYS", "14"))
+
+# ---- Local photo storage (see workflow photo handling in item_flow.py) ----
+PHOTO_DIR = os.getenv("PHOTO_DIR", "data/photos")
+
 # ---- AI review model (only used by the "anthropic" backend) ----
 ANTHROPIC_MODEL = "claude-sonnet-5"
 

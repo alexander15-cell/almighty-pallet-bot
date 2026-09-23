@@ -412,6 +412,39 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   so those columns are left blank to fill in before creating labels. eBay
   sales are never included - Pirate Ship pulls those directly via its own
   native eBay integration.
+- `/backup-now` - creates and verifies a local backup immediately (see
+  "Backups" below); `/backups` lists recent ones with size and age.
+
+## Backups
+
+A verified zip snapshot (database, photos, eBay/Pirate Ship CSV archives)
+is created automatically every `BACKUP_INTERVAL_HOURS` (default 24) while
+the bot is running, and saved under `BACKUP_DIR` (default `backups/`).
+`BACKUP_KEEP_COUNT`/`BACKUP_MAX_AGE_DAYS` (defaults: 14 snapshots / 14
+days) bound how many pile up - whichever limit is hit first prunes the
+oldest. The database is captured with SQLite's own backup API, not a plain
+file copy, so a backup taken mid-write is still a consistent, valid
+snapshot. Every backup's manifest is hash-checked right after it's
+created, and again before any restore - a backup that fails that check is
+never restored from, and a newly-created one that fails it is discarded
+immediately rather than left on disk looking valid.
+
+Backups contain real business/customer data - don't upload them anywhere
+public. Restoring one is deliberately **not** a Discord command (it's the
+one operation here that can put stale data back in place of current data)
+- run it from the command line with the bot stopped:
+
+```
+python backup.py verify path/to/backup.zip
+python backup.py restore path/to/backup.zip --destination path/to/new-data
+```
+
+Restore only ever writes into a new, empty directory - it refuses to touch
+one that already has files in it, so a bad restore can't overwrite a
+working installation. The restored directory has the same layout as
+`data/` (`pallet_tracker.db`, `photos/`, `ebay_batch_archive/`,
+`pirate_ship_exports/`); point `DATABASE_PATH`/`PHOTO_DIR`/etc at it, or
+move its contents into your real `data/` directory, then restart the bot.
 
 ---
 

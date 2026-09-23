@@ -43,7 +43,7 @@ import ebay_csv
 import finance_utils
 import r2_storage
 
-PHOTO_DIR = Path("data/photos")
+PHOTO_DIR = Path(config.PHOTO_DIR)
 
 
 def photo_dir_for(item_id: int) -> Path:
