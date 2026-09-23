@@ -98,6 +98,20 @@ SHARED_STAGE_CHANNELS = [
 ]
 SHARED_PIPELINE_CATEGORY_NAME = "Shared Pallet Pipeline"
 
+# Also created ONCE via /setup shared-channels, alongside the item-pipeline
+# channels above - kept in a SEPARATE list rather than folded into
+# SHARED_STAGE_CHANNELS since these aren't stages an item moves through
+# (resolve_channel_id/is_shared_channels_setup/pipeline status-counting all
+# assume SHARED_STAGE_CHANNELS entries correspond to an item status). This
+# is where the QuickBooks credit-card-charge -> pallet allocation workflow
+# lives instead (see cogs/finance.py, quickbooks.py) - still stored in the
+# same shared_channels DB table so the bot can look their IDs up at
+# runtime, just outside that item-status list.
+FINANCE_SHARED_CHANNELS = [
+    "credit-card-charges",
+    "awaiting-pallet-charges",
+]
+
 # A read-only orientation channel explaining how this bot works, posted by
 # /setup info-channel (see information_content.py) - created in the same
 # shared category as the pipeline stage channels, but visible to @everyone
@@ -136,6 +150,8 @@ CHANNEL_ROLE_PERMISSIONS = {
     "listed": [ROLE_LISTING_MGMT],
     "sold": [ROLE_LISTING_MGMT],
     "10-day-alerts": [ROLE_LISTING_MGMT, ROLE_FINANCE_MGMT],
+    "credit-card-charges": [ROLE_FINANCE_MGMT, ROLE_PURCHASE_MGMT],
+    "awaiting-pallet-charges": [ROLE_FINANCE_MGMT, ROLE_PURCHASE_MGMT],
 }
 
 # ---- Onboarding text ----
@@ -198,6 +214,19 @@ CHANNEL_INFO = {
         "No action needed most of the time - this channel gets an automatic ping "
         "whenever an item has been sitting in Listed for 10+ days, across every "
         "pallet, as a nudge to consider a price drop or refreshed photos."
+    ),
+    "credit-card-charges": (
+        "New QuickBooks credit card charges show up here automatically (needs "
+        "/finance connect-quickbooks first) with a select menu - pick which pallet "
+        "the charge belongs to, or \"New Pallet (not arrived yet)\" if it hasn't been "
+        "created here yet. Allocating pushes a matching categorized expense back "
+        "into QuickBooks too, so the books and this bot stay in sync."
+    ),
+    "awaiting-pallet-charges": (
+        "Charges allocated to \"New Pallet (not arrived yet)\" sit here until a "
+        "matching pallet is actually created - Start New Pallet will then offer to "
+        "attach any unclaimed charges shown here to it. Nothing to do here directly; "
+        "this is just a standing board of what's still unclaimed."
     ),
 }
 
@@ -328,6 +357,52 @@ EBAY_SHIPPING_SERVICE = os.getenv("EBAY_SHIPPING_SERVICE", "").strip()
 # time it runs, so nothing needs accumulating on disk between exports - only
 # where the resulting CSV gets archived for a paper trail.
 PIRATE_SHIP_EXPORT_ARCHIVE_DIR = os.getenv("PIRATE_SHIP_EXPORT_ARCHIVE_DIR", "data/pirate_ship_exports")
+
+# ---- QuickBooks Online (optional, see quickbooks.py) ----
+# CLIENT_ID/CLIENT_SECRET come from a registered app at
+# https://developer.intuit.com (My Apps -> create an app -> Keys & OAuth).
+# ENVIRONMENT is "sandbox" or "production" depending on which set of keys
+# you're using - QuickBooks uses a completely separate API host and company
+# data for each, so this must match. REDIRECT_URI must be entered EXACTLY
+# (including http/https and trailing slash presence) as one of the app's
+# "Redirect URIs" in that same Keys & OAuth page - this bot has no web
+# server to actually receive that redirect, so /finance connect-quickbooks
+# has you paste the resulting (page-may-fail-to-load, that's fine) URL back
+# in rather than needing one; http://localhost:8000/callback works fine as
+# a placeholder to register, since nothing needs to actually be listening
+# there for this to work.
+QUICKBOOKS_CLIENT_ID = os.getenv("QUICKBOOKS_CLIENT_ID")
+QUICKBOOKS_CLIENT_SECRET = os.getenv("QUICKBOOKS_CLIENT_SECRET")
+QUICKBOOKS_ENVIRONMENT = os.getenv("QUICKBOOKS_ENVIRONMENT", "sandbox").strip().lower()
+QUICKBOOKS_REDIRECT_URI = os.getenv("QUICKBOOKS_REDIRECT_URI", "http://localhost:8000/callback")
+
+# REQUIRED before the credit-card poller does anything - the QuickBooks
+# Account ID (not the last-4 digits; the internal QuickBooks record ID -
+# Accounting -> Chart of Accounts -> open the card account -> the "id="
+# value in the browser URL) of the ONE credit card account to watch for new
+# charges. Deliberately scoped to a single account rather than "every
+# connected card" - if the same QuickBooks company also has accounts
+# unrelated to this pallet business, those should never show up here asking
+# to be allocated to a pallet.
+QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID = os.getenv("QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID", "").strip()
+
+# How often the credit-card poller checks QuickBooks for new charges.
+QUICKBOOKS_POLL_MINUTES = int(os.getenv("QUICKBOOKS_POLL_MINUTES") or "20")
+
+# Whether the QuickBooks integration is usable at all - the app credentials
+# are enough to run /finance connect-quickbooks; the credit-card poller
+# additionally needs QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID set (checked
+# separately, see cogs/finance.py) since watching zero accounts is the safe
+# default until that's deliberately configured.
+QUICKBOOKS_ENABLED = bool(QUICKBOOKS_CLIENT_ID and QUICKBOOKS_CLIENT_SECRET)
+
+# A pallet's cost basis (see database.get_pallet_financials) is the legacy
+# manual /finance setprice lump sum PLUS every itemized pallet_costs row
+# (credit card charges/shipping/supplies allocated via the workflows below)
+# - additive, not a replacement, so /finance setprice keeps working exactly
+# as it already does for pallets that never touch these newer workflows.
+# Used by the low-margin early-warning below.
+QUICKBOOKS_MARGIN_WARNING_THRESHOLD_PCT = float(os.getenv("QUICKBOOKS_MARGIN_WARNING_THRESHOLD_PCT") or "20")
 
 # ---- Cloudflare R2 image hosting (optional, see r2_storage.py) ----
 # Gives each Data Entry photo a durable public URL for the eBay CSV batch's

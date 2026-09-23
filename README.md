@@ -133,6 +133,10 @@ and type a number:
     to differ from what's been logged in Data Entry (e.g. junk that was
     never entered).
   - `/finance summary` - posts a fresh, non-pinned copy of the same numbers.
+  - `/finance pallet-summary [pallet_name]` / `/finance overview` - see
+    "QuickBooks Online integration" below (useful with or without
+    QuickBooks connected - the cost-by-type breakdown and pallet-progress
+    counts don't require it, only the account balance does).
 
 Every pallet's **#pallet-discussion** channel gets a pinned card, posted as
 the very first message, that shows: cost, items received, cost-per-item,
@@ -142,6 +146,66 @@ itself in place** every time something relevant changes - a new item is
 logged, an item moves stage, a price is set or corrected, or the received
 count is overridden. You never have to run a command to see current status;
 just look at the pinned message.
+
+## QuickBooks Online integration (optional)
+
+Connects the bot to QuickBooks Online for automatic credit-card cost
+tracking and Pirate Ship shipping-cost allocation. Entirely optional -
+leave `QUICKBOOKS_CLIENT_ID`/`QUICKBOOKS_CLIENT_SECRET` blank in `.env` to
+run without it, exactly as before this feature existed. **Read/allocate/
+report only, by deliberate design** - nothing here can initiate a payment,
+transfer, or card action (freeze, limit change, etc), and no partner
+profit-distribution/payout calculation is built (a possible future feature,
+not built without an explicit spec).
+
+- **Connecting**: `/finance connect-quickbooks` (Pallet Admin) walks
+  through the OAuth authorization URL, then has you paste the resulting
+  redirect URL back in (the bot has no web server to receive it directly -
+  the page failing to load after you approve access is expected). The
+  refresh token is persisted in the database and auto-refreshed before
+  every ~1 hour access-token expiry.
+- **Credit card tracking**: every `QUICKBOOKS_POLL_MINUTES` (default 20),
+  the bot checks the ONE configured `QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID`
+  account for new charges and posts each one to `#credit-card-charges`
+  with an **Allocate to a pallet** button - pick an active pallet (adds the
+  charge to that pallet's cost basis and pushes a matching categorized
+  expense back into QuickBooks, tagged with the pallet's name for
+  traceability) or **New Pallet (not arrived yet)** (files it in
+  `#awaiting-pallet-charges` until a real pallet is created, at which point
+  its creation flow offers to attach any unclaimed charges - more than one
+  at once, e.g. the purchase price plus a separate deposit/fee).
+- **Cost basis is additive**: a pallet's total cost is `/finance setprice`'s
+  manual lump sum PLUS every itemized charge/shipping cost allocated
+  through this integration (`pallet_costs` table, one row per cost,
+  broken down by type) - not a replacement, so `/finance setprice` keeps
+  working exactly as it always has for pallets that never touch these
+  newer workflows.
+- **Pirate Ship shipping costs**: `/finance import-pirateship <csv>`
+  (Pallet Admin) uploads a Pirate Ship order/shipping export; rows are
+  matched to a specific sold item via the same `pallet-<id>-item-<number>`
+  reference already used internally for eBay/Pirate Ship exports, and that
+  shipping cost is allocated to the item's pallet automatically. Pirate
+  Ship's exact export column names weren't available to pin down when this
+  was built, so matching is deliberately flexible (scans every column for
+  the reference and for a cost-looking value/header) rather than assuming
+  one fixed layout; unmatched rows get a manual pallet-picker in the
+  response instead of being silently dropped or guessed at.
+- **Reporting**: `/finance pallet-summary [pallet_name]` shows one
+  pallet's cost basis broken down by type, revenue, and profit/margin.
+  `/finance overview` shows the connected QuickBooks account balance,
+  month-to-date spend/revenue across the whole business, and how many
+  pallets are in progress vs. fully sold out. The pallet's own live status
+  card also auto-posts a plain warning message (not pinned, not spammy -
+  only when a mutation actually crosses a threshold) if its running cost
+  basis exceeds its manifest retail value estimate (sum of every item's
+  AI-suggested price - a rough guess, used because it's the only
+  "what should this be worth" figure the bot has without a human entering
+  one by hand) or, once fully sold out, its realized margin drops below
+  `QUICKBOOKS_MARGIN_WARNING_THRESHOLD_PCT` (default 20%).
+- Run `/setup shared-channels` again (safe to re-run) to create
+  `#credit-card-charges` and `#awaiting-pallet-charges` if you're adding
+  this to a server that already ran that command before this feature
+  existed - it only creates whatever's still missing.
 
 ## Important limitation: no Vendoo API, and eBay has two paths
 
@@ -596,6 +660,9 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   sale price, and audit history are never touched - only buyer contact
   info. CSVs/Discord attachments downloaded before a purge still have the
   old data; that needs separate manual cleanup.
+- `/finance connect-quickbooks` - see "QuickBooks Online integration" above.
+- `/finance import-pirateship <csv_file>` - see "QuickBooks Online
+  integration" above.
 
 ## Role bindings
 
@@ -657,7 +724,14 @@ structured shipping addresses, buyer-data retention, the eBay batch
 lifecycle), `ai_review.py`'s fallback shape and timeout path, `ebay_csv.py`/
 `pirate_ship_csv.py`'s row-building (including the legacy-address fallback
 and buyer-data redaction), `ebay_results.py`'s flexible results-CSV
-parsing, `runtime_settings.py`'s role-ID bindings, and a regression guard
+parsing, `runtime_settings.py`'s role-ID bindings, `quickbooks.py`'s OAuth
+token exchange/refresh (rotation included) and API request shaping (all
+against a fake `aiohttp.ClientSession`, no real network calls), the
+credit-card charge → pallet allocation workflow and awaiting-pallet-charge
+claiming (cogs/finance.py, cogs/pallet_setup.py), `pirate_ship_import.py`'s
+flexible CSV column-scanning, and the new financial reporting queries
+(cost-by-type breakdown, month-to-date spend/revenue, pallet
+in-progress/sold-out counts, the auto-flag early warnings), and a regression guard
 that fails if a `discord.ui.SelectOption` in `cogs/item_flow.py` is ever
 marked `default=True` again - that reintroduces a real bug where Discord's
 mobile client won't register a tap on an already-checked option. Every
@@ -695,6 +769,21 @@ Tables:
   proven success - see "Known limitations" below)
 - **item_events** - an append-only audit log of every status change and
   price recording, including deletions
+- **finance_transactions** - refunds/expenses/reversals logged via
+  `/finance refund`/`/finance expense`/`/finance reverse-sale`
+- **pallet_costs** - itemized costs allocated to a pallet from the
+  QuickBooks/Pirate Ship workflows (one row per cost, typed as
+  `credit_card`/`shipping`/`supplies`/`misc`) - additive on top of
+  `pallets.pallet_cost`, not a replacement; see "QuickBooks Online
+  integration" above
+- **awaiting_pallet_charges** - QuickBooks charges allocated to "New
+  Pallet (not arrived yet)" before that pallet exists, until a real
+  pallet's creation flow claims them into `pallet_costs`
+- **quickbooks_seen_charges** - every QuickBooks transaction ID the
+  credit-card poller has ever shown in Discord, so re-polling never posts
+  the same charge twice
+- **quickbooks_connection** - the single-row OAuth token for the one
+  connected QuickBooks company, auto-refreshed before every expiry
 
 The eBay CSV batch itself is **not** in the database - it's a plain CSV file
 at `data/ebay_batch.csv` (see `ebay_csv.py`), archived to
@@ -790,3 +879,22 @@ this scale.
   only have the old freeform address blob, which is still split into
   address lines best-effort for
   the CSV (city/state/zip are left blank for those older rows).
+- **QuickBooks watches exactly one credit-card account, by design.** If
+  your QuickBooks company has other connected accounts unrelated to this
+  pallet business, they're never touched - `QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID`
+  is a deliberate single-account scope, not a current limitation to widen
+  later.
+- **Pirate Ship CSV matching is flexible/best-guess, not pinned to a known
+  column layout.** No real Pirate Ship export sample was available when
+  this was built, so `pirate_ship_import.py` scans every column for a
+  `pallet-<id>-item-<number>` reference and a cost-looking value/header
+  rather than trusting one fixed schema. If a real export's columns don't
+  match well in practice, tighten the matching in that module rather than
+  guessing further - don't widen it speculatively.
+- **No automatic partner profit distribution.** Flagged as a possible
+  future feature, deliberately not built without an explicit spec for how
+  payouts/splits should actually work.
+- **QuickBooks integration is read/allocate/report only, on purpose.**
+  Nothing in `quickbooks.py` (or anywhere else) can initiate a payment,
+  transfer, or card action (freeze, limit change, etc) - a deliberate
+  safety boundary, not an oversight to revisit.

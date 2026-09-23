@@ -132,3 +132,53 @@ async def refresh_finance_message(bot: discord.Client, pallet_id: int):
         await msg.edit(embed=embed)
     except discord.HTTPException as e:
         print(f"[finance_utils] Could not refresh status card for pallet {pallet_id}: {e}")
+        return
+
+    await _post_pallet_warnings(channel, pallet, fin)
+
+
+async def _post_pallet_warnings(channel: discord.TextChannel, pallet: dict, fin: dict):
+    """
+    Simple early-warning checks (see config.QUICKBOOKS_MARGIN_WARNING_THRESHOLD_PCT)
+    run every time the live card refreshes - i.e. reactively after any
+    cost/sale mutation, since every one of those call sites already calls
+    refresh_finance_message(). Not a full analytics system, just two flags
+    worth surfacing without someone having to go look:
+      - running cost basis has crept past the pallet's manifest retail
+        value estimate (sum of every item's AI-suggested price - a rough
+        guess, but the only "what should this pallet be worth" figure the
+        bot has without a human entering one by hand)
+      - once every item is sold/shipped, the realized margin came in below
+        the configured threshold
+    Posted as a plain (non-pinned) message in the pallet's own discussion
+    channel, right after its live status card. Not deduplicated across
+    calls - the mutations that trigger this happen rarely enough that a
+    fresh nudge each time is useful, not spam.
+    """
+    warnings = []
+
+    manifest_estimate = db.get_pallet_manifest_value_estimate(pallet["id"])
+    if fin["cost"] is not None and manifest_estimate > 0 and fin["cost"] > manifest_estimate:
+        warnings.append(
+            f"⚠️ **Cost basis (${fin['cost']:.2f}) has exceeded this pallet's manifest retail "
+            f"value estimate (${manifest_estimate:.2f})** - based on summed AI-suggested prices, "
+            f"so treat this as a rough heads-up, not a precise number."
+        )
+
+    status_counts = fin["status_counts"]
+    real_counts = {status: n for status, n in status_counts.items() if status != db.STATUS_DELETED and n}
+    fully_sold_out = bool(real_counts) and all(status in (db.STATUS_SOLD, db.STATUS_SHIPPED) for status in real_counts)
+    if fully_sold_out and fin["cost"] is not None and fin["revenue_so_far"] > 0 and fin["profit_so_far"] is not None:
+        margin_pct = (fin["profit_so_far"] / fin["revenue_so_far"]) * 100
+        if margin_pct < config.QUICKBOOKS_MARGIN_WARNING_THRESHOLD_PCT:
+            warnings.append(
+                f"⚠️ **{pallet['name']} is fully sold out with a {margin_pct:.1f}% margin** - "
+                f"below the {config.QUICKBOOKS_MARGIN_WARNING_THRESHOLD_PCT:.0f}% early-warning threshold."
+            )
+
+    if not warnings:
+        return
+    try:
+        await channel.send("\n".join(warnings))
+    except discord.HTTPException as e:
+        print(f"[finance_utils] Could not post warning(s) for pallet {pallet['id']}: {e}")

@@ -105,6 +105,12 @@ def _migrate_add_columns(conn):
         "ALTER TABLE ebay_listing_data ADD COLUMN length_in REAL",
         "ALTER TABLE ebay_listing_data ADD COLUMN width_in REAL",
         "ALTER TABLE ebay_listing_data ADD COLUMN height_in REAL",
+        # Set only by record_item_sale, independent of items.updated_at
+        # (which other, later, unrelated changes to the same item also
+        # bump) - /finance overview's month-to-date revenue needs a
+        # timestamp that means specifically "when this sale was recorded",
+        # not "whenever this item was last touched for any reason".
+        "ALTER TABLE items ADD COLUMN sale_recorded_at TEXT",
     ]
     for stmt in migrations:
         try:
@@ -173,6 +179,7 @@ def init_db():
                 sold_at             TEXT,
                 sale_price          REAL,
                 sale_platform       TEXT,
+                sale_recorded_at    TEXT,               -- when record_item_sale last set sale_price - see its own migration comment for why this isn't just updated_at/sold_at
                 recipient_name      TEXT,               -- non-eBay ("Other" platform) sales only - for the Pirate Ship CSV export
                 shipping_address    TEXT,               -- legacy freeform address (pre-structured-fields items) - kept for old rows, see address_line1 etc. below
                 address_line1       TEXT,               -- non-eBay ("Other" platform) sales only - structured shipping address for the Pirate Ship CSV export
@@ -271,6 +278,79 @@ def init_db():
                 actor_id    INTEGER,
                 created_at  TEXT NOT NULL
             );
+
+            -- Itemized ADDITIONAL costs allocated to a pallet from the
+            -- QuickBooks credit-card and Pirate Ship shipping workflows
+            -- (see quickbooks.py, cogs/finance.py) - deliberately separate
+            -- from finance_transactions' pre-existing 'expense' type, which
+            -- stays exactly what it always was (a manual, freeform
+            -- /finance expense entry). This table exists because these
+            -- newer workflows need a structured cost_type (for the
+            -- /finance pallet-summary breakdown) and a durable link back to
+            -- the QuickBooks transaction they came from, for traceability
+            -- and so the same charge can never be allocated twice.
+            --
+            -- A pallet's full cost basis = pallets.pallet_cost (the legacy
+            -- manual /finance setprice lump sum) + SUM(pallet_costs.amount)
+            -- - additive, not a replacement; see get_pallet_financials().
+            CREATE TABLE IF NOT EXISTS pallet_costs (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                pallet_id          INTEGER NOT NULL REFERENCES pallets(id),
+                item_id            INTEGER REFERENCES items(id),  -- set for a shipping cost tied to one sold item; NULL for a pallet-level charge
+                cost_type          TEXT NOT NULL,                  -- 'credit_card', 'shipping', 'supplies', 'misc'
+                amount             REAL NOT NULL,
+                description        TEXT,                            -- e.g. the merchant name, or a shipment reference
+                source             TEXT NOT NULL,                    -- 'quickbooks', 'pirateship', 'manual'
+                quickbooks_txn_id  TEXT,                             -- the QuickBooks Purchase transaction this came from, if any
+                created_by         INTEGER,
+                created_at         TEXT NOT NULL
+            );
+
+            -- A QuickBooks credit-card charge allocated to "New Pallet (not
+            -- arrived yet)" before that pallet exists in Discord - sits
+            -- here, shown in #awaiting-pallet-charges, until a real pallet
+            -- claims it at creation time (see pallet_setup.py), which
+            -- copies it into pallet_costs above and marks it claimed here.
+            CREATE TABLE IF NOT EXISTS awaiting_pallet_charges (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                quickbooks_txn_id  TEXT NOT NULL UNIQUE,
+                amount             REAL NOT NULL,
+                merchant           TEXT,
+                txn_date           TEXT,
+                allocated_by       INTEGER,
+                message_id         INTEGER,           -- its #awaiting-pallet-charges card, so it can be removed once claimed
+                claimed            INTEGER NOT NULL DEFAULT 0,
+                claimed_pallet_id  INTEGER REFERENCES pallets(id),
+                claimed_at         TEXT,
+                created_at         TEXT NOT NULL
+            );
+
+            -- Every QuickBooks transaction ID the credit-card poller has
+            -- ever shown in Discord, regardless of what happened to it
+            -- afterward - makes re-polling idempotent (a charge is never
+            -- posted twice) without relying solely on QuickBooks' own date
+            -- filtering, which an edited/backdated transaction could fool.
+            CREATE TABLE IF NOT EXISTS quickbooks_seen_charges (
+                quickbooks_txn_id  TEXT PRIMARY KEY,
+                first_seen_at      TEXT NOT NULL
+            );
+
+            -- Single-row OAuth token storage for the one connected
+            -- QuickBooks company (id is always 1 - CHECK enforces that).
+            -- refresh_token is overwritten on every refresh since
+            -- QuickBooks rotates it and the old one stops working;
+            -- access_token_expires_at drives proactive refresh-before-
+            -- expiry (see quickbooks.py) rather than waiting for a 401.
+            CREATE TABLE IF NOT EXISTS quickbooks_connection (
+                id                       INTEGER PRIMARY KEY CHECK (id = 1),
+                realm_id                 TEXT NOT NULL,
+                access_token             TEXT NOT NULL,
+                refresh_token            TEXT NOT NULL,
+                access_token_expires_at  TEXT NOT NULL,
+                connected_by             INTEGER,
+                connected_at             TEXT NOT NULL,
+                updated_at               TEXT NOT NULL
+            );
             """
         )
         _migrate_add_columns(conn)
@@ -285,6 +365,15 @@ def create_pallet(name: str, category_id: int, created_by: int, notes: str = Non
             (name, category_id, created_by, _now(), notes),
         )
         return cur.lastrowid
+
+
+def get_pallet_by_name(name: str):
+    """Case-insensitive exact match - used by /finance pallet-summary so it
+    can be run from anywhere (e.g. a finance channel), not just from inside
+    that pallet's own channels."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM pallets WHERE name = ? COLLATE NOCASE", (name,)).fetchone()
+        return dict(row) if row else None
 
 
 def get_pallet_by_category(category_id: int):
@@ -757,7 +846,14 @@ def get_pallet_financials(pallet_id: int):
     Full financial + pipeline snapshot for a pallet:
       - items_received: items_received_override if Finance set one,
         otherwise a live count of non-deleted items logged for this pallet
-      - cost_per_item: pallet_cost / items_received
+      - cost: pallets.pallet_cost (the legacy manual /finance setprice lump
+        sum) PLUS SUM(pallet_costs.amount) (itemized QuickBooks/Pirate Ship
+        allocations - see pallet_costs' own CREATE TABLE comment) - additive,
+        not a replacement, so /finance setprice keeps meaning exactly what
+        it always has. Stays None (not 0) if NEITHER source has anything
+        yet, same as before this table existed, so "no cost entered" still
+        reads as genuinely unknown rather than a misleading $0.
+      - cost_per_item: cost / items_received
       - revenue_so_far: raw sum of sale_price across every item that has one
         set (regardless of status - Finance can record a price whenever)
       - refunds_total / expenses_total: sums from finance_transactions
@@ -789,6 +885,10 @@ def get_pallet_financials(pallet_id: int):
                FROM finance_transactions WHERE pallet_id = ?""",
             (pallet_id,),
         ).fetchone()
+        itemized_costs_row = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS total FROM pallet_costs WHERE pallet_id = ?",
+            (pallet_id,),
+        ).fetchone()
         counts = conn.execute(
             "SELECT status, COUNT(*) AS n FROM items WHERE pallet_id = ? GROUP BY status",
             (pallet_id,),
@@ -798,7 +898,12 @@ def get_pallet_financials(pallet_id: int):
     if items_received is None:
         items_received = received_row["n"]
 
-    cost = pallet.get("pallet_cost")
+    manual_pallet_cost = pallet.get("pallet_cost")
+    itemized_costs_total = itemized_costs_row["total"] or 0.0
+    if manual_pallet_cost is None and itemized_costs_total == 0.0:
+        cost = None  # genuinely nothing entered anywhere - stays unknown, not a misleading $0
+    else:
+        cost = (manual_pallet_cost or 0.0) + itemized_costs_total
     cost_per_item = (cost / items_received) if (cost and items_received) else None
     revenue = revenue_row["revenue"] or 0.0
     n_priced = revenue_row["n_priced"]
@@ -811,6 +916,8 @@ def get_pallet_financials(pallet_id: int):
         "items_received": items_received,
         "items_received_is_override": pallet.get("items_received_override") is not None,
         "cost": cost,
+        "manual_pallet_cost": manual_pallet_cost,
+        "itemized_costs_total": itemized_costs_total,
         "cost_per_item": cost_per_item,
         "items_priced": n_priced,
         "revenue_so_far": revenue,
@@ -823,6 +930,81 @@ def get_pallet_financials(pallet_id: int):
         "broke_even": (cost is not None and net_revenue >= cost),
         "status_counts": {r["status"]: r["n"] for r in counts},
     }
+
+
+def get_pallet_manifest_value_estimate(pallet_id: int) -> float:
+    """
+    Sum of ai_suggested_price across every real (non-deleted) item logged
+    for a pallet - the "manifest retail value estimate" used by the
+    cost-basis-exceeds-estimate early warning (see finance_utils.py). Items
+    with no AI price guess yet contribute 0, not None, so a pallet still
+    mid data-entry doesn't spuriously trigger a warning against its own
+    still-incomplete estimate.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(ai_suggested_price), 0) AS total FROM items WHERE pallet_id = ? AND status != ?",
+            (pallet_id, STATUS_DELETED),
+        ).fetchone()
+        return row["total"] or 0.0
+
+
+def get_pallet_progress_counts() -> dict:
+    """
+    {'in_progress': n, 'sold_out': n} across every non-archived pallet -
+    'sold_out' means the pallet has at least one real (non-deleted) item
+    and every one of them has reached STATUS_SOLD or STATUS_SHIPPED;
+    everything else non-archived (including a pallet with zero items yet)
+    counts as still in progress. Used by /finance overview.
+    """
+    with get_conn() as conn:
+        pallet_ids = [r["id"] for r in conn.execute("SELECT id FROM pallets WHERE archived = 0").fetchall()]
+        in_progress = 0
+        sold_out = 0
+        for pallet_id in pallet_ids:
+            counts = conn.execute(
+                "SELECT status, COUNT(*) AS n FROM items WHERE pallet_id = ? AND status != ? GROUP BY status",
+                (pallet_id, STATUS_DELETED),
+            ).fetchall()
+            total = sum(c["n"] for c in counts)
+            done = sum(c["n"] for c in counts if c["status"] in (STATUS_SOLD, STATUS_SHIPPED))
+            if total > 0 and done == total:
+                sold_out += 1
+            else:
+                in_progress += 1
+        return {"in_progress": in_progress, "sold_out": sold_out}
+
+
+def get_month_to_date_financials() -> dict:
+    """
+    {'revenue': float, 'spend': float} across every pallet for the current
+    calendar month (UTC), for /finance overview:
+      - revenue: sum of items.sale_price for sales recorded (see
+        record_item_sale's sale_recorded_at, NOT items.updated_at/sold_at -
+        see that column's migration comment) this month.
+      - spend: sum of pallet_costs.amount (QuickBooks/Pirate Ship
+        allocations) PLUS finance_transactions type='expense' rows,
+        created this month. Deliberately doesn't include a pallet's
+        /finance setprice lump sum, which isn't dated to a specific month.
+    """
+    month_start = datetime.now(timezone.utc).strftime("%Y-%m-01")
+    with get_conn() as conn:
+        revenue_row = conn.execute(
+            "SELECT COALESCE(SUM(sale_price), 0) AS total FROM items WHERE sale_recorded_at >= ?",
+            (month_start,),
+        ).fetchone()
+        pallet_costs_row = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS total FROM pallet_costs WHERE created_at >= ?",
+            (month_start,),
+        ).fetchone()
+        expenses_row = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS total FROM finance_transactions WHERE type = 'expense' AND created_at >= ?",
+            (month_start,),
+        ).fetchone()
+        return {
+            "revenue": revenue_row["total"] or 0.0,
+            "spend": (pallet_costs_row["total"] or 0.0) + (expenses_row["total"] or 0.0),
+        }
 
 
 def set_pallet_cost(pallet_id: int, cost: float, actor_id: int):
@@ -852,14 +1034,15 @@ def record_item_sale(item_id: int, price: float, platform: str, actor_id: int):
     Sold click.
     """
     with get_conn() as conn:
+        now = _now()
         conn.execute(
-            "UPDATE items SET sale_price = ?, sale_platform = ?, updated_at = ? WHERE id = ?",
-            (price, platform, _now(), item_id),
+            "UPDATE items SET sale_price = ?, sale_platform = ?, updated_at = ?, sale_recorded_at = ? WHERE id = ?",
+            (price, platform, now, now, item_id),
         )
         conn.execute(
             "INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp) "
             "VALUES (?, NULL, (SELECT status FROM items WHERE id = ?), ?, ?, ?)",
-            (item_id, item_id, actor_id, f"Sale price recorded: ${price:.2f} on {platform}", _now()),
+            (item_id, item_id, actor_id, f"Sale price recorded: ${price:.2f} on {platform}", now),
         )
 
 
@@ -923,7 +1106,7 @@ def reverse_sale(item_id: int, reason: str, actor_id: int) -> float:
             (item["pallet_id"], item_id, old_price, reason, actor_id, _now()),
         )
         conn.execute(
-            "UPDATE items SET sale_price = NULL, sale_platform = NULL, updated_at = ? WHERE id = ?",
+            "UPDATE items SET sale_price = NULL, sale_platform = NULL, updated_at = ?, sale_recorded_at = NULL WHERE id = ?",
             (_now(), item_id),
         )
         conn.execute(
@@ -945,6 +1128,177 @@ def get_finance_transactions(pallet_id: int, limit: int = 20) -> list:
             (pallet_id, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# -------------------------------------------------------- pallet_costs ----
+
+def add_pallet_cost(pallet_id: int, cost_type: str, amount: float, source: str,
+                     description: str = None, item_id: int = None,
+                     quickbooks_txn_id: str = None, actor_id: int = None) -> int:
+    """
+    Records one itemized cost against a pallet - see pallet_costs' own
+    CREATE TABLE comment for why this is separate from record_expense()
+    above. cost_type is 'credit_card', 'shipping', 'supplies', or 'misc';
+    source is 'quickbooks', 'pirateship', or 'manual'. Returns the new row's id.
+    """
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO pallet_costs
+               (pallet_id, item_id, cost_type, amount, description, source, quickbooks_txn_id, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (pallet_id, item_id, cost_type, amount, description, source, quickbooks_txn_id, actor_id, _now()),
+        )
+        return cur.lastrowid
+
+
+def get_pallet_costs(pallet_id: int) -> list:
+    """Every itemized cost row for a pallet, newest first - what /finance
+    pallet-summary's breakdown is built from."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM pallet_costs WHERE pallet_id = ? ORDER BY created_at DESC", (pallet_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_pallet_cost_breakdown(pallet_id: int) -> dict:
+    """cost_type -> total amount for a pallet, e.g. {'credit_card': 120.0,
+    'shipping': 34.50} - types with no rows yet are simply absent, not 0."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT cost_type, SUM(amount) AS total FROM pallet_costs WHERE pallet_id = ? GROUP BY cost_type",
+            (pallet_id,),
+        ).fetchall()
+        return {r["cost_type"]: r["total"] for r in rows}
+
+
+def has_quickbooks_txn_been_allocated(quickbooks_txn_id: str) -> bool:
+    """True if this QuickBooks transaction already has a pallet_costs row
+    (allocated to an existing pallet) - checked before allocating again, so
+    the same charge can never be double-counted."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM pallet_costs WHERE quickbooks_txn_id = ? LIMIT 1", (quickbooks_txn_id,)
+        ).fetchone()
+        return row is not None
+
+
+# ------------------------------------------------- awaiting_pallet_charges --
+
+def create_awaiting_pallet_charge(quickbooks_txn_id: str, amount: float, merchant: str,
+                                   txn_date: str, allocated_by: int) -> int:
+    """A charge allocated to "New Pallet (not arrived yet)" - see
+    awaiting_pallet_charges' own CREATE TABLE comment. Returns the new row's id."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO awaiting_pallet_charges
+               (quickbooks_txn_id, amount, merchant, txn_date, allocated_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (quickbooks_txn_id, amount, merchant, txn_date, allocated_by, _now()),
+        )
+        return cur.lastrowid
+
+
+def set_awaiting_pallet_charge_message(charge_id: int, message_id: int):
+    with get_conn() as conn:
+        conn.execute("UPDATE awaiting_pallet_charges SET message_id = ? WHERE id = ?", (message_id, charge_id))
+
+
+def get_awaiting_pallet_charge_by_txn(quickbooks_txn_id: str):
+    """Looks up an awaiting_pallet_charges row by its source QuickBooks
+    transaction (claimed or not) - used to detect "this charge was already
+    sent to New Pallet" so the Allocate button can't file the same charge
+    there twice."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM awaiting_pallet_charges WHERE quickbooks_txn_id = ?", (quickbooks_txn_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_unclaimed_pallet_charges() -> list:
+    """Every not-yet-claimed charge, oldest first - what a new pallet's
+    creation flow offers to attach (pallet_setup.py)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM awaiting_pallet_charges WHERE claimed = 0 ORDER BY created_at ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def claim_awaiting_pallet_charge(charge_id: int, pallet_id: int, actor_id: int) -> dict:
+    """
+    Moves an awaiting_pallet_charges row onto a real, just-created pallet:
+    copies it into pallet_costs (cost_type='credit_card', source='quickbooks')
+    and marks the awaiting_pallet_charges row claimed. Returns the charge
+    dict (as it was before claiming) so the caller can push a matching
+    QuickBooks expense with the now-known pallet name, and remove its
+    #awaiting-pallet-charges card.
+    """
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM awaiting_pallet_charges WHERE id = ?", (charge_id,)).fetchone()
+        charge = dict(row) if row else None
+        if not charge or charge["claimed"]:
+            return charge
+
+        conn.execute(
+            """INSERT INTO pallet_costs
+               (pallet_id, cost_type, amount, description, source, quickbooks_txn_id, created_by, created_at)
+               VALUES (?, 'credit_card', ?, ?, 'quickbooks', ?, ?, ?)""",
+            (pallet_id, charge["amount"], charge["merchant"], charge["quickbooks_txn_id"], actor_id, _now()),
+        )
+        conn.execute(
+            "UPDATE awaiting_pallet_charges SET claimed = 1, claimed_pallet_id = ?, claimed_at = ? WHERE id = ?",
+            (pallet_id, _now(), charge_id),
+        )
+    return charge
+
+
+# ------------------------------------------------------------ quickbooks --
+
+def save_quickbooks_connection(realm_id: str, access_token: str, refresh_token: str,
+                                access_token_expires_at: str, actor_id: int = None):
+    """
+    Upserts the single-row OAuth connection - called both at initial
+    /finance connect-quickbooks time and on every subsequent token refresh
+    (QuickBooks rotates refresh_token on every use, so the new one must be
+    saved each time or the next refresh would fail with the old, dead one).
+    """
+    with get_conn() as conn:
+        now = _now()
+        conn.execute(
+            """INSERT INTO quickbooks_connection
+                   (id, realm_id, access_token, refresh_token, access_token_expires_at, connected_by, connected_at, updated_at)
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   realm_id = excluded.realm_id, access_token = excluded.access_token,
+                   refresh_token = excluded.refresh_token,
+                   access_token_expires_at = excluded.access_token_expires_at,
+                   updated_at = excluded.updated_at""",
+            (realm_id, access_token, refresh_token, access_token_expires_at, actor_id, now, now),
+        )
+
+
+def get_quickbooks_connection():
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM quickbooks_connection WHERE id = 1").fetchone()
+        return dict(row) if row else None
+
+
+def has_seen_quickbooks_txn(quickbooks_txn_id: str) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM quickbooks_seen_charges WHERE quickbooks_txn_id = ?", (quickbooks_txn_id,)
+        ).fetchone()
+        return row is not None
+
+
+def mark_quickbooks_txn_seen(quickbooks_txn_id: str):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO quickbooks_seen_charges (quickbooks_txn_id, first_seen_at) VALUES (?, ?)",
+            (quickbooks_txn_id, _now()),
+        )
 
 
 def set_shipping_info(item_id: int, recipient_name: str, address_line1: str, address_line2: str,

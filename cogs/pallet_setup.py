@@ -16,6 +16,8 @@ Handles two things:
 No cost/price fields live in the pallet-creation modal - Purchase Management
 sets cost afterward with /finance setprice (see cogs/finance.py).
 """
+import logging
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -24,6 +26,9 @@ import config
 import database as db
 import finance_utils
 import information_content
+import quickbooks
+
+log = logging.getLogger(__name__)
 
 
 def role_overwrites(guild: discord.Guild, allowed_role_names: list[str]) -> dict:
@@ -73,6 +78,90 @@ class NewPalletView(discord.ui.View):
             )
             return
         await interaction.response.send_modal(NewPalletModal())
+
+
+async def _claim_awaiting_charges(interaction: discord.Interaction, pallet_id: int, pallet_name: str, charge_ids: list):
+    """
+    Moves each selected awaiting_pallet_charges row onto the just-created
+    pallet (into pallet_costs) and pushes a matching QuickBooks expense
+    tagged with the pallet's name/id. Pulled out of
+    AwaitingChargesSelect.callback so it can be exercised directly in
+    tests without fighting discord.py's Select/Interaction internals - see
+    cogs/finance.py's _handle_allocation_choice for the same pattern.
+    """
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    if not charge_ids:
+        await interaction.followup.send("No charges attached.", ephemeral=True)
+        return
+
+    awaiting_channel_id = db.get_shared_channel_id("awaiting-pallet-charges")
+    awaiting_channel = interaction.client.get_channel(awaiting_channel_id) if awaiting_channel_id else None
+
+    claimed_total = 0.0
+    for value in charge_ids:
+        charge = db.claim_awaiting_pallet_charge(int(value), pallet_id, interaction.user.id)
+        if not charge or charge["claimed"]:
+            continue  # already claimed by someone else in the meantime
+        claimed_total += charge["amount"]
+
+        try:
+            await quickbooks.create_expense(
+                config.QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID, charge["amount"], charge["txn_date"],
+                memo=f"{pallet_name} (Pallet #{pallet_id}) - {charge['merchant']}",
+            )
+        except quickbooks.QuickBooksError:
+            log.exception(
+                "Claimed awaiting charge %s locally but failed to push the matching QuickBooks expense",
+                charge["quickbooks_txn_id"],
+            )
+
+        if awaiting_channel and charge.get("message_id"):
+            try:
+                msg = await awaiting_channel.fetch_message(charge["message_id"])
+                await msg.delete()
+            except discord.HTTPException:
+                pass
+
+    await finance_utils.refresh_finance_message(interaction.client, pallet_id)
+    await interaction.followup.send(
+        f"🧾 Attached {len(charge_ids)} charge(s) totaling ${claimed_total:.2f} to **{pallet_name}**.",
+        ephemeral=True,
+    )
+
+
+class AwaitingChargesSelect(discord.ui.Select):
+    """
+    Shown right after a new pallet is created, only if there are any
+    QuickBooks credit-card charges sitting in #awaiting-pallet-charges
+    (allocated to "New Pallet (not arrived yet)" before this one existed).
+    Multi-select since a pallet often has more than one charge to claim at
+    once - e.g. the purchase price plus a separate deposit/fee charge.
+    """
+
+    def __init__(self, pallet_id: int, pallet_name: str, charges: list):
+        options = [
+            discord.SelectOption(
+                label=f"{c['merchant'] or 'Unknown merchant'} - ${c['amount']:.2f}"[:100],
+                description=(c["txn_date"] or "")[:100],
+                value=str(c["id"]),
+            )
+            for c in charges
+        ]
+        super().__init__(
+            placeholder="Attach any of these charges to this pallet (optional)...",
+            options=options, min_values=0, max_values=len(options),
+        )
+        self.pallet_id = pallet_id
+        self.pallet_name = pallet_name
+
+    async def callback(self, interaction: discord.Interaction):
+        await _claim_awaiting_charges(interaction, self.pallet_id, self.pallet_name, self.values)
+
+
+class AwaitingChargesView(discord.ui.View):
+    def __init__(self, pallet_id: int, pallet_name: str, charges: list):
+        super().__init__(timeout=600)
+        self.add_item(AwaitingChargesSelect(pallet_id, pallet_name, charges))
 
 
 class NewPalletModal(discord.ui.Modal, title="New Pallet"):
@@ -142,6 +231,20 @@ class NewPalletModal(discord.ui.Modal, title="New Pallet"):
             ephemeral=True,
         )
 
+        # Any QuickBooks credit-card charges filed under "New Pallet (not
+        # arrived yet)" before this pallet existed (see cogs/finance.py's
+        # Allocate button) - offer to attach them now that a real pallet id
+        # exists. Silently skipped if there are none, so this is a no-op
+        # for anyone not using the QuickBooks integration.
+        unclaimed = db.get_unclaimed_pallet_charges()
+        if unclaimed:
+            view = AwaitingChargesView(pallet_id, name, unclaimed[:25])
+            await interaction.followup.send(
+                f"📥 There {'is' if len(unclaimed) == 1 else 'are'} {len(unclaimed)} unclaimed QuickBooks "
+                f"charge(s) waiting in #awaiting-pallet-charges - attach any that belong to **{name}**:",
+                view=view, ephemeral=True,
+            )
+
 
 class PalletSetup(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -180,7 +283,16 @@ class PalletSetup(commands.Cog):
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def setup_shared_channels(self, interaction: discord.Interaction):
-        if db.is_shared_channels_setup():
+        # FINANCE_SHARED_CHANNELS (QuickBooks credit-card allocation) is
+        # checked and created alongside SHARED_STAGE_CHANNELS here since
+        # both are stored the same way (db.set_shared_channel), but kept a
+        # separate config list - re-running this command on an install that
+        # already has the pipeline channels but not the finance ones (added
+        # later) fills in just what's missing rather than doing nothing.
+        all_stages = list(config.SHARED_STAGE_CHANNELS) + list(config.FINANCE_SHARED_CHANNELS)
+        existing_channels = db.get_all_shared_channels()
+        missing = [s for s in all_stages if s not in existing_channels]
+        if not missing:
             await interaction.response.send_message(
                 "Shared pipeline channels already exist. Nothing to do. "
                 "(If you need to move/recreate them, update the channel IDs manually in the database.)",
@@ -196,7 +308,7 @@ class PalletSetup(commands.Cog):
             category = await guild.create_category(name=config.SHARED_PIPELINE_CATEGORY_NAME)
 
         created = []
-        for stage in config.SHARED_STAGE_CHANNELS:
+        for stage in missing:
             existing_channel = discord.utils.get(category.channels, name=stage)
             if existing_channel:
                 channel = existing_channel
