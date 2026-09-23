@@ -28,10 +28,24 @@ def test_fallback_truncates_and_defaults_title():
 def test_system_prompt_excludes_fallback_only_categories():
     prompt = ai_review._build_system_prompt()
     for name in config.EBAY_CATEGORIES:
-        if "(top-level)" in name or "(parent/fallback)" in name:
-            assert name not in prompt, f"fallback-only category {name!r} should never be offered to the AI"
+        if "(top-level)" in name or "(parent/fallback)" in name or "(NOT A LEAF" in name:
+            assert name not in prompt, f"fallback-only/invalid category {name!r} should never be offered to the AI"
     # at least one real category should still be listed
     assert any(name in prompt for name in config.EBAY_CATEGORIES_FOR_AI_SUGGESTION)
+
+
+def test_categories_confirmed_not_a_leaf_are_quarantined():
+    # "Electrical Supplies (general)" (259482) and "Hand Tools" (3244) both
+    # failed a real eBay upload with error 87 ("category selected is not a
+    # leaf category") - guards against either silently losing its
+    # quarantine tag and being suggested/picked again before its ID is
+    # actually corrected.
+    for category_id in ("259482", "3244"):
+        matching_names = [name for name, cid in config.EBAY_CATEGORIES.items() if cid == category_id]
+        assert matching_names, f"category id {category_id} should still be present (just quarantined, not removed)"
+        for name in matching_names:
+            assert "(NOT A LEAF" in name, f"{name!r} (id {category_id}) confirmed failing but isn't quarantined"
+            assert name not in config.EBAY_CATEGORIES_FOR_AI_SUGGESTION
 
 
 def test_review_item_times_out_instead_of_hanging(monkeypatch):

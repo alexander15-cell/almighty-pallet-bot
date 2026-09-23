@@ -281,12 +281,25 @@ EBAY_AUCTION_DURATIONS = [
 # name -> eBay leaf category ID. Shown as a Discord select menu when
 # approving an item in Queue Review, sorted by how often each has actually
 # been picked (see database.get_ebay_category_counts) so your most-used
-# categories stay on top - entries whose name is tagged "(top-level)" or
-# "(parent/fallback)" (not individually listable on eBay - only useful as a
-# last resort or to group the manual dropdown) sort after everything else
-# at equal usage, so they don't crowd out real leaf categories. Discord
-# select menus cap out at 25 options - if this grows past that, only the 25
-# top-ranked show (logged to console) until pagination gets added.
+# categories stay on top - entries whose name is tagged "(top-level)",
+# "(parent/fallback)", or "(NOT A LEAF" (not individually listable on eBay -
+# either intentionally, as a last-resort fallback, or confirmed broken and
+# awaiting a real ID) sort after everything else at equal usage, so they
+# don't crowd out real leaf categories. Discord select menus cap out at 25
+# options - if this grows past that, only the 25 top-ranked show (logged to
+# console) until pagination gets added.
+#
+# IMPORTANT: these IDs were supplied by hand, not verified against eBay's
+# real taxonomy (this bot has no eBay API access to check them) - two of
+# them ("Electrical Supplies (general)" / 259482 and "Hand Tools" / 3244)
+# already failed a real upload with eBay error 87 ("category selected is
+# not a leaf category") and are flagged below. Any other entry could have
+# the same problem and just hasn't been used yet - if a batch export fails
+# with error 87 for a category not already flagged here, add the same
+# "(NOT A LEAF - ...)" tag to its name once confirmed, so it stops being
+# suggested/picked until corrected. Look up a category's real ID via
+# eBay's own "Sell similar" flow on an existing listing in that category,
+# or eBay's category search when creating a listing by hand.
 EBAY_CATEGORIES = {
     # --- Lighting / electrical (Home Depot pallet) ---
     "Ceiling Fans": "176937",
@@ -299,7 +312,7 @@ EBAY_CATEGORIES = {
     "Smoke & CO Detectors": "41970",
     "Circuit Breakers & Fuse Boxes": "259485",
     "Extension Cords": "259493",
-    "Electrical Supplies (general)": "259482",
+    "Electrical Supplies (general) (NOT A LEAF - eBay error 87, needs correct ID)": "259482",
     "Lamps, Lighting & Ceiling Fans (parent/fallback)": "20697",
 
     # --- EV chargers ---
@@ -308,7 +321,7 @@ EBAY_CATEGORIES = {
     "EV Charging Components": "262101",
 
     # --- General liquidation categories ---
-    "Hand Tools": "3244",
+    "Hand Tools (NOT A LEAF - eBay error 87, needs correct ID)": "3244",
     "Small Kitchen Appliances": "20667",
     "Cell Phone Accessories": "9394",
 
@@ -327,14 +340,15 @@ EBAY_CATEGORIES = {
 }
 
 # Subset of EBAY_CATEGORIES actually offered to Automated Review as a
-# suggestion (ai_review.py) - excludes the top-level/parent fallback
-# entries above, since those aren't real listable leaf categories and
-# should never be what the AI proposes as "the" category for an item, only
-# something a human picks manually as a last resort.
+# suggestion (ai_review.py) - excludes the top-level/parent fallback and
+# confirmed-not-a-leaf entries above, since none of those are real listable
+# leaf categories and should never be what the AI proposes as "the"
+# category for an item, only something a human picks manually as a last
+# resort (or after correcting a flagged entry's ID).
 EBAY_CATEGORIES_FOR_AI_SUGGESTION = {
     name: category_id
     for name, category_id in EBAY_CATEGORIES.items()
-    if "(top-level)" not in name and "(parent/fallback)" not in name
+    if "(top-level)" not in name and "(parent/fallback)" not in name and "(NOT A LEAF" not in name
 }
 
 # ---- eBay CSV batch (Seller Hub bulk upload / File Exchange fallback) ----

@@ -143,3 +143,26 @@ def test_clear_ebay_batch_id_requeues_item_for_a_fresh_export(fresh_db):
     assert [i["id"] for i in fresh_db.get_unbatched_pending_items()] == [item_id]
     # The old batch record itself is untouched - just the item's link to it.
     assert fresh_db.get_ebay_batch(batch_id)["item_count"] == 1
+
+
+def test_retry_item_can_correct_the_category_before_requeueing(fresh_db):
+    # /ebay retry-item accepts an optional corrected category_id - confirmed
+    # against a real eBay error 87 ("category selected is not a leaf
+    # category") where simply re-submitting the same bad category would
+    # just fail again identically.
+    pallet_id = fresh_db.create_pallet("Pallet G", category_id=777, created_by=1)
+    item_id = fresh_db.create_item(pallet_id, "item", [], 1)
+    fresh_db.save_ebay_listing_data(item_id, "Title", "259482", "1500", 19.99, {"Brand": "Test"}, actor_id=1)
+
+    listing = fresh_db.get_ebay_listing_data(item_id)
+    listing["category_id"] = "12345"  # the corrected leaf category
+    fresh_db.save_ebay_listing_data(
+        item_id, listing["ebay_title"], listing["category_id"], listing["condition_id"],
+        listing["price"], listing["item_specifics"], listing_format=listing["listing_format"],
+        auction_duration=listing["auction_duration"], actor_id=1,
+    )
+
+    updated = fresh_db.get_ebay_listing_data(item_id)
+    assert updated["category_id"] == "12345"
+    assert updated["ebay_title"] == "Title"  # everything else preserved
+    assert updated["item_specifics"] == {"Brand": "Test"}

@@ -434,11 +434,14 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   snapshot (`/ebay batches`/`/ebay batch`) of exactly which items went out
   in it. Refuses to export at all if `EBAY_ITEM_LOCATION` isn't set (see
   "Installation" - eBay rejects every row without it).
-- `/ebay retry-item <item_number>` - run inside a pallet's category. For an
-  item whose batch upload actually failed (check the results CSV or
-  Seller Hub) - re-queues it into the current live CSV so the next
-  `/ebay export-batch` picks it up again, with any config fixes since its
-  last attempt (e.g. `EBAY_ITEM_LOCATION`) applied fresh.
+- `/ebay retry-item <item_number> [category_id]` - run inside a pallet's
+  category. For an item whose batch upload actually failed (check the
+  results CSV or Seller Hub) - re-queues it into the current live CSV so
+  the next `/ebay export-batch` picks it up again, with any config fixes
+  since its last attempt (e.g. `EBAY_ITEM_LOCATION`) applied fresh. Pass
+  `category_id` to correct the category too if the failure was eBay error
+  87 ("category selected is not a leaf category") - otherwise the retry
+  would just resubmit the same bad category and fail identically.
 - `/ebay import-results <batch_id> <results_csv>` - reconciles a batch
   against the results/report CSV Seller Hub gives you after processing an
   upload. Column names in eBay's results CSVs vary, so this matches them
@@ -623,6 +626,18 @@ this scale.
 - **`/ebay confirm-listed` is a manual step.** There's no live eBay API to
   automatically detect that an uploaded CSV batch was actually processed, so
   someone has to check Seller Hub and confirm it by hand.
+- **`config.EBAY_CATEGORIES`' IDs were entered by hand, not verified against
+  eBay's real taxonomy** - this bot has no eBay API access to check them.
+  Two entries have already failed a real upload with eBay error 87
+  ("category selected is not a leaf category") and are tagged
+  `(NOT A LEAF - ...)` in `config.py` so they're excluded from AI
+  suggestions and sorted to the bottom of the manual dropdown. Any
+  category not yet used could have the same problem; if `/ebay
+  export-batch` comes back with error 87 for one, use `/ebay retry-item
+  <item_number> category_id:<corrected id>` to fix that item and add the
+  same tag to that entry in `config.py` so it's not offered again until
+  corrected. Look up a real leaf category ID via eBay's own "Sell similar"
+  flow on an existing listing in that category.
 - **Automated Review's suggested price is a general-knowledge guess, not
   real market data.** The model has no access to actual eBay sold listings
   for the item - it's only ever a Queue Review pre-fill, always editable,

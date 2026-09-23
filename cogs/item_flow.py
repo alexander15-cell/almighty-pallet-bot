@@ -203,7 +203,7 @@ class EbayCategorySelectView(discord.ui.View):
         self.condition_id = condition_id
 
         def _is_fallback_only(name: str) -> bool:
-            return "(top-level)" in name or "(parent/fallback)" in name
+            return "(top-level)" in name or "(parent/fallback)" in name or "(NOT A LEAF" in name
 
         counts = db.get_ebay_category_counts()
         ranked = sorted(

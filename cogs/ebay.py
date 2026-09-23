@@ -270,10 +270,13 @@ class Ebay(commands.Cog):
 
     @ebay_group.command(
         name="retry-item",
-        description="Re-queue an item whose batch upload failed into the current eBay CSV. Run in its pallet's category.",
+        description="Re-queue a failed batch item, optionally correcting its category. Run in its pallet's category.",
     )
-    @app_commands.describe(item_number="The item's number shown on its card (e.g. 3)")
-    async def retry_item(self, interaction: discord.Interaction, item_number: int):
+    @app_commands.describe(
+        item_number="The item's number shown on its card (e.g. 3)",
+        category_id="Optional - a corrected eBay leaf category ID, if the failure was 'not a leaf category' (error 87)",
+    )
+    async def retry_item(self, interaction: discord.Interaction, item_number: int, category_id: str = None):
         if not await _require_admin(interaction):
             return
 
@@ -303,12 +306,22 @@ class Ebay(commands.Cog):
             )
             return
 
+        category_note = ""
+        if category_id:
+            listing["category_id"] = category_id.strip()
+            db.save_ebay_listing_data(
+                item["id"], listing["ebay_title"], listing["category_id"], listing["condition_id"],
+                listing["price"], listing["item_specifics"], listing_format=listing["listing_format"],
+                auction_duration=listing["auction_duration"], actor_id=interaction.user.id,
+            )
+            category_note = f" with category corrected to `{listing['category_id']}`"
+
         db.clear_ebay_batch_id(item["id"])
         ebay_csv.append_item_to_batch(item, listing)
         await interaction.response.send_message(
-            f"🔁 Re-queued item #{item_number} into the current (live) eBay CSV batch, picking up any "
-            f"config changes since its last export (e.g. `EBAY_ITEM_LOCATION`) - it'll go out in the "
-            f"next `/ebay export-batch`.",
+            f"🔁 Re-queued item #{item_number} into the current (live) eBay CSV batch{category_note}, "
+            f"picking up any config changes since its last export (e.g. `EBAY_ITEM_LOCATION`) - it'll "
+            f"go out in the next `/ebay export-batch`.",
             ephemeral=True,
         )
 
