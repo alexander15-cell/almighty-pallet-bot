@@ -344,6 +344,14 @@ EBAY_CATEGORIES_FOR_AI_SUGGESTION = {
 EBAY_BATCH_CSV_PATH = os.getenv("EBAY_BATCH_CSV_PATH", "data/ebay_batch.csv")
 EBAY_BATCH_ARCHIVE_DIR = os.getenv("EBAY_BATCH_ARCHIVE_DIR", "data/ebay_batch_archive")
 
+# eBay's bulk upload REQUIRES an item location on every single row (a city/
+# state or postal code - whatever your seller account was set up with) -
+# without it, eBay rejects every row with "No <Item.Location> exists".
+# There's no reasonable default to guess here (it's your business's real
+# ship-from location), so /ebay export-batch refuses to export until this
+# is set, rather than producing a CSV that's guaranteed to fail on every row.
+EBAY_ITEM_LOCATION = os.getenv("EBAY_ITEM_LOCATION", "").strip()
+
 # ---- Pirate Ship CSV export (see pirate_ship_csv.py) ----
 # Only for "Other"-platform sales (FB Marketplace, website, etc.) that were
 # sold outside eBay - eBay sales don't need this, since Pirate Ship pulls

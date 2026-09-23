@@ -295,6 +295,13 @@ four values are set, restart the bot and the API button reappears - though
 `ebay_api.py` itself still needs a real integration written before it does
 anything.
 
+**`EBAY_ITEM_LOCATION` is required regardless of the above** - set it in
+`.env` to your seller account's real ship-from location (a city/state like
+`Columbus, OH`, or a ZIP code) before running `/ebay export-batch`. eBay
+rejects every row in a bulk upload without it (`No <Item.Location>
+exists`); the bot refuses to export a batch at all until this is set,
+rather than handing you a CSV that's guaranteed to fail on every row.
+
 ### Running without R2
 
 Leave `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
@@ -425,7 +432,13 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   Discord attachment, archives and clears it so the next **Add to eBay
   Batch** click starts a fresh file, and records a durable, numbered batch
   snapshot (`/ebay batches`/`/ebay batch`) of exactly which items went out
-  in it.
+  in it. Refuses to export at all if `EBAY_ITEM_LOCATION` isn't set (see
+  "Installation" - eBay rejects every row without it).
+- `/ebay retry-item <item_number>` - run inside a pallet's category. For an
+  item whose batch upload actually failed (check the results CSV or
+  Seller Hub) - re-queues it into the current live CSV so the next
+  `/ebay export-batch` picks it up again, with any config fixes since its
+  last attempt (e.g. `EBAY_ITEM_LOCATION`) applied fresh.
 - `/ebay import-results <batch_id> <results_csv>` - reconciles a batch
   against the results/report CSV Seller Hub gives you after processing an
   upload. Column names in eBay's results CSVs vary, so this matches them

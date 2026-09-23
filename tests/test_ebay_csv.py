@@ -2,6 +2,7 @@
 *Duration/*StartPrice, matching eBay's File Exchange conventions."""
 import json
 
+import config
 import ebay_csv
 
 
@@ -73,3 +74,31 @@ def test_readding_same_item_replaces_its_row_not_duplicates(tmp_path, monkeypatc
     _, rows = ebay_csv._read_existing_rows()
     assert len(rows) == 1
     assert rows[0]["*StartPrice"] == "20.00"
+
+
+def test_row_includes_configured_item_location(tmp_path, monkeypatch):
+    # eBay rejects every row in a batch without *Location ("No <Item.Location>
+    # exists") - a real upload failure this test guards against recurring.
+    monkeypatch.setattr(ebay_csv, "BATCH_CSV_PATH", tmp_path / "batch.csv")
+    monkeypatch.setattr(config, "EBAY_ITEM_LOCATION", "Columbus, OH")
+    ebay_csv.append_item_to_batch(_fake_item(), _fake_listing())
+
+    _, rows = ebay_csv._read_existing_rows()
+    assert rows[0]["*Location"] == "Columbus, OH"
+
+
+def test_existing_batch_file_gains_new_base_columns_on_next_append(tmp_path, monkeypatch):
+    # A batch file already on disk from before *Location was added to
+    # BASE_FIELDS must not keep missing it forever - the next append should
+    # heal the header, not silently perpetuate the old (broken) one.
+    batch_path = tmp_path / "batch.csv"
+    monkeypatch.setattr(ebay_csv, "BATCH_CSV_PATH", batch_path)
+    batch_path.write_text("CustomLabel,*Category,*Title\npallet-1-item-1,999,Old Row\n", encoding="utf-8")
+
+    monkeypatch.setattr(config, "EBAY_ITEM_LOCATION", "Columbus, OH")
+    ebay_csv.append_item_to_batch(_fake_item(pallet_id=1, item_number=2), _fake_listing())
+
+    fieldnames, rows = ebay_csv._read_existing_rows()
+    assert "*Location" in fieldnames
+    new_row = next(r for r in rows if r["CustomLabel"] == "pallet-1-item-2")
+    assert new_row["*Location"] == "Columbus, OH"

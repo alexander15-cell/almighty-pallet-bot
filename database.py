@@ -618,6 +618,19 @@ def set_ebay_item_id(item_id: int, ebay_item_id: str):
         )
 
 
+def clear_ebay_batch_id(item_id: int):
+    """
+    Detaches an item from whichever batch it's currently stamped with,
+    making it show up in get_unbatched_pending_items() again (still
+    pending_ebay_upload, but no longer tied to a specific past batch) - used
+    by /ebay retry-item to re-queue an item whose upload failed (e.g. a
+    config-driven required field, like eBay's item location, wasn't set
+    yet) back into the live batch for a corrected re-export.
+    """
+    with get_conn() as conn:
+        conn.execute("UPDATE items SET ebay_batch_id = NULL WHERE id = ?", (item_id,))
+
+
 def record_ebay_category_use(category_id: str):
     """Bumps this category's pick count - called once per successful Queue
     Review approval, so the category select menu can sort by actual usage."""

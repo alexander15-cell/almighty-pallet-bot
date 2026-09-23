@@ -124,3 +124,22 @@ def test_ebay_batch_lifecycle(fresh_db):
 
     listing = fresh_db.get_ebay_listing_data(item_ids[0])
     assert listing["ebay_item_id"] == "110099998888"
+
+
+def test_clear_ebay_batch_id_requeues_item_for_a_fresh_export(fresh_db):
+    # Used by /ebay retry-item: an item whose upload actually failed (e.g.
+    # missing a config-driven required field) stays pending_ebay_upload but
+    # is still stamped with the failed batch's id - clearing it must make
+    # the item eligible for the *next* export again.
+    pallet_id = fresh_db.create_pallet("Pallet F", category_id=666, created_by=1)
+    item_id = fresh_db.create_item(pallet_id, "item", [], 1)
+    fresh_db.save_ebay_listing_data(item_id, "Title", "12345", "1500", 19.99, {}, actor_id=1)
+    fresh_db.update_status(item_id, fresh_db.STATUS_PENDING_EBAY_UPLOAD, actor_id=1)
+
+    batch_id = fresh_db.create_ebay_batch(csv_filename="failed_batch.csv", exported_by=1, item_ids=[item_id])
+    assert fresh_db.get_unbatched_pending_items() == []  # now tied to the failed batch
+
+    fresh_db.clear_ebay_batch_id(item_id)
+    assert [i["id"] for i in fresh_db.get_unbatched_pending_items()] == [item_id]
+    # The old batch record itself is untouched - just the item's link to it.
+    assert fresh_db.get_ebay_batch(batch_id)["item_count"] == 1

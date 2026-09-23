@@ -68,6 +68,15 @@ class Ebay(commands.Cog):
         if not await _require_admin(interaction):
             return
 
+        if not config.EBAY_ITEM_LOCATION:
+            await interaction.response.send_message(
+                "⚠️ `EBAY_ITEM_LOCATION` isn't set in `.env` - eBay rejects **every** row in a batch "
+                "without it (`No <Item.Location> exists`). Set it to your ship-from city/state or ZIP "
+                "(e.g. `Columbus, OH`), restart the bot, then try exporting again.",
+                ephemeral=True,
+            )
+            return
+
         pending_items = db.get_unbatched_pending_items()
         path = ebay_csv.export_and_archive()
         if path is None:
@@ -256,6 +265,50 @@ class Ebay(commands.Cog):
         await finance_utils.refresh_finance_message(self.bot, pallet["id"])
         await interaction.followup.send(
             f"✅ Confirmed {confirmed} item(s) in **{pallet['name']}** live on eBay. Moved to Listed.",
+            ephemeral=True,
+        )
+
+    @ebay_group.command(
+        name="retry-item",
+        description="Re-queue an item whose batch upload failed into the current eBay CSV. Run in its pallet's category.",
+    )
+    @app_commands.describe(item_number="The item's number shown on its card (e.g. 3)")
+    async def retry_item(self, interaction: discord.Interaction, item_number: int):
+        if not await _require_admin(interaction):
+            return
+
+        pallet = db.get_pallet_by_category(interaction.channel.category_id) if interaction.channel.category_id else None
+        if not pallet:
+            await interaction.response.send_message(
+                "Run this inside one of the pallet's own channels, not somewhere else.", ephemeral=True
+            )
+            return
+
+        item = db.get_item_by_pallet_and_number(pallet["id"], item_number)
+        if not item:
+            await interaction.response.send_message(f"No item #{item_number} found in **{pallet['name']}**.", ephemeral=True)
+            return
+        if item["status"] != db.STATUS_PENDING_EBAY_UPLOAD:
+            await interaction.response.send_message(
+                f"Item #{item_number} isn't sitting in a pending-upload state (current status: "
+                f"{item['status']}) - there's nothing to retry.",
+                ephemeral=True,
+            )
+            return
+
+        listing = db.get_ebay_listing_data(item["id"])
+        if not listing:
+            await interaction.response.send_message(
+                "No eBay listing data found for this item - can't rebuild its row.", ephemeral=True
+            )
+            return
+
+        db.clear_ebay_batch_id(item["id"])
+        ebay_csv.append_item_to_batch(item, listing)
+        await interaction.response.send_message(
+            f"🔁 Re-queued item #{item_number} into the current (live) eBay CSV batch, picking up any "
+            f"config changes since its last export (e.g. `EBAY_ITEM_LOCATION`) - it'll go out in the "
+            f"next `/ebay export-batch`.",
             ephemeral=True,
         )
 

@@ -21,6 +21,12 @@ local disk in that case, not to a public URL eBay's bulk upload can fetch,
 so whoever processes the batch still needs to attach photos in Seller Hub
 (or fill PicURL in by hand) before uploading.
 
+*Location is your seller account's real ship-from location
+(config.EBAY_ITEM_LOCATION) - unlike PicURL, eBay rejects EVERY row
+without it ("No <Item.Location> exists"), so cogs/ebay.py's export-batch
+command refuses to export at all until this is configured, rather than
+producing a batch that's guaranteed to fail on every row.
+
 This lives outside any single cog, same as finance_utils.py, because both
 item_flow.py (writes rows) and ebay.py (exports/archives the file) need the
 same logic.
@@ -52,6 +58,7 @@ BASE_FIELDS = [
     "*Duration",
     "*StartPrice",
     "*Quantity",
+    "*Location",
 ]
 
 
@@ -73,6 +80,15 @@ def _read_existing_rows() -> tuple[list, list]:
         reader = csv.DictReader(f)
         fieldnames = list(reader.fieldnames or BASE_FIELDS)
         rows = list(reader)
+    # A batch file already sitting on disk from before BASE_FIELDS grew a new
+    # required column (e.g. *Location, added after *Location's absence broke
+    # a real upload) would otherwise keep missing it until the batch is
+    # exported and a fresh file started - self-heal by adding any BASE_FIELDS
+    # not already in this file's header, same as new C:<Specific> columns
+    # already get added below.
+    for field in BASE_FIELDS:
+        if field not in fieldnames:
+            fieldnames.append(field)
     return fieldnames, rows
 
 
@@ -115,6 +131,7 @@ def append_item_to_batch(item: dict, listing: dict) -> None:
         "*Duration": duration,
         "*StartPrice": f"{listing['price']:.2f}",
         "*Quantity": "1",
+        "*Location": config.EBAY_ITEM_LOCATION,
     })
     for key, value in specifics.items():
         row[f"C:{key}"] = value
