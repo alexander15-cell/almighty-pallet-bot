@@ -39,6 +39,7 @@ from discord.ext import commands, tasks
 import config
 import database as db
 import ai_review
+import discord_resilience
 import ebay_api
 import ebay_csv
 import ebay_taxonomy
@@ -910,7 +911,7 @@ class ItemFlow(commands.Cog):
 
         try:
             await message.delete()
-        except discord.HTTPException:
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
             pass
 
         # Either new item(s) were received, or a rejected one just got fixed -
@@ -1062,7 +1063,7 @@ class ItemFlow(commands.Cog):
 
         try:
             await placeholder_message.delete()
-        except discord.HTTPException:
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
             pass
 
         confidence = result.get("confidence", "unknown")
@@ -1237,7 +1238,7 @@ class ItemFlow(commands.Cog):
         db.update_status(item_id, db.STATUS_LISTED, actor_id=interaction.user.id, new_message_id=msg.id)
         try:
             await interaction.message.delete()
-        except discord.HTTPException:
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
             pass
         await interaction.followup.send(f"Listed live on eBay. See <#{channel.id}>.", ephemeral=True)
         await finance_utils.refresh_finance_message(self.bot, pallet_id)

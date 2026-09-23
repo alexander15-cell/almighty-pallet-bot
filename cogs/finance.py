@@ -58,6 +58,7 @@ from discord.ext import commands, tasks
 
 import config
 import database as db
+import discord_resilience
 import finance_utils
 import pirate_ship_import
 import quickbooks
@@ -258,7 +259,7 @@ async def _mark_charge_message_handled(message: discord.Message, note: str):
         embed = message.embeds[0] if message.embeds else discord.Embed()
         embed.add_field(name="Status", value=note, inline=False)
         await message.edit(embed=embed, view=None)
-    except discord.HTTPException:
+    except discord_resilience.TRANSIENT_DISCORD_ERRORS:
         log.warning("Couldn't update charge message %s after allocation", message.id)
 
 
@@ -524,11 +525,15 @@ class Finance(commands.Cog):
         for txn in transactions:
             if db.has_seen_quickbooks_txn(txn["id"]):
                 continue
-            db.mark_quickbooks_txn_seen(txn["id"])
             try:
                 await _post_credit_card_charge(self.bot, txn)
-            except discord.HTTPException:
-                log.exception("Failed to post QuickBooks charge %s", txn["id"])
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                # Marked seen only on a successful post, below - a transient
+                # failure here (e.g. a DNS/network blip) should retry on the
+                # next poll, not silently drop the charge forever.
+                log.exception("Failed to post QuickBooks charge %s - will retry next poll", txn["id"])
+                continue
+            db.mark_quickbooks_txn_seen(txn["id"])
 
     @credit_card_poll_loop.before_loop
     async def _before_credit_card_poll_loop(self):

@@ -14,6 +14,7 @@ import discord
 
 import config
 import database as db
+import discord_resilience
 
 
 def build_finance_embed(pallet: dict, fin: dict) -> discord.Embed:
@@ -95,7 +96,7 @@ async def post_initial_finance_message(bot: discord.Client, pallet_id: int, disc
     msg = await discussion_channel.send(embed=embed)
     try:
         await msg.pin(reason="Live pallet status card")
-    except discord.HTTPException as e:
+    except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
         print(f"[finance_utils] Could not pin status card for pallet {pallet_id}: {e}")
     db.set_finance_message(pallet_id, msg.id)
 
@@ -123,14 +124,14 @@ async def refresh_finance_message(bot: discord.Client, pallet_id: int):
 
     try:
         msg = await channel.fetch_message(pallet["finance_message_id"])
-    except (discord.NotFound, discord.HTTPException):
+    except discord_resilience.TRANSIENT_DISCORD_ERRORS:
         return
 
     fin = db.get_pallet_financials(pallet_id)
     embed = build_finance_embed(pallet, fin)
     try:
         await msg.edit(embed=embed)
-    except discord.HTTPException as e:
+    except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
         print(f"[finance_utils] Could not refresh status card for pallet {pallet_id}: {e}")
         return
 
@@ -180,5 +181,5 @@ async def _post_pallet_warnings(channel: discord.TextChannel, pallet: dict, fin:
         return
     try:
         await channel.send("\n".join(warnings))
-    except discord.HTTPException as e:
+    except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
         print(f"[finance_utils] Could not post warning(s) for pallet {pallet['id']}: {e}")

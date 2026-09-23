@@ -32,6 +32,7 @@ from discord.ext import commands, tasks
 import backup
 import config
 import database as db
+import discord_resilience
 import finance_utils
 import runtime_settings
 from cogs import item_flow
@@ -113,7 +114,7 @@ class ConfirmWipeModal(discord.ui.Modal, title="⚠️ Confirm Full Database Wip
                     await channel.delete(reason="Database wipe")
                 await category.delete(reason="Database wipe")
                 deleted_categories += 1
-            except discord.HTTPException as e:
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
                 print(f"[admin_tools] Failed to delete category {cat_id} during wipe: {e}")
 
         # The shared pipeline channels are reusable infrastructure and are
@@ -131,7 +132,7 @@ class ConfirmWipeModal(discord.ui.Modal, title="⚠️ Confirm Full Database Wip
             try:
                 await channel.purge(limit=1000, bulk=True)
                 purged_channels += 1
-            except discord.HTTPException as e:
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
                 print(f"[admin_tools] Failed to purge shared channel {stage}: {e}")
 
         db.wipe_database()
@@ -145,7 +146,7 @@ class ConfirmWipeModal(discord.ui.Modal, title="⚠️ Confirm Full Database Wip
                 f"Starting from nothing - use **Start New Pallet** in your hub channel to begin again.",
                 ephemeral=True,
             )
-        except discord.HTTPException:
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
             # If this command was run from inside a pallet channel, that
             # channel (and the webhook this followup needs) may have just
             # been deleted as part of the wipe - nothing more to do here.
@@ -222,7 +223,7 @@ class AdminTools(commands.Cog):
                     break
                 except discord.NotFound:
                     continue
-                except discord.HTTPException:
+                except discord_resilience.TRANSIENT_DISCORD_ERRORS:
                     continue
 
         db.soft_delete_item(item["id"], actor_id=interaction.user.id)
@@ -339,7 +340,7 @@ class AdminTools(commands.Cog):
                 for channel in list(category.channels):
                     await channel.delete(reason=f"Pallet {pallet['name']} archived")
                 await category.delete(reason=f"Pallet {pallet['name']} archived")
-            except discord.HTTPException as e:
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
                 await interaction.followup.send(f"Partially failed to delete channels: {e}", ephemeral=True)
 
         db.archive_pallet(pallet["id"])
@@ -347,7 +348,7 @@ class AdminTools(commands.Cog):
         # be seen via Discord's toast/notification, not a normal message.
         try:
             await interaction.followup.send(f"✅ **{pallet['name']}** archived.", ephemeral=True)
-        except discord.HTTPException:
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
             pass
 
     @pallet_group.command(name="list", description="List all pallets and their item counts (admin only).")

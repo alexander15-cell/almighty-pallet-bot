@@ -24,6 +24,7 @@ from discord.ext import commands
 
 import config
 import database as db
+import discord_resilience
 import finance_utils
 import information_content
 import quickbooks
@@ -119,7 +120,7 @@ async def _claim_awaiting_charges(interaction: discord.Interaction, pallet_id: i
             try:
                 msg = await awaiting_channel.fetch_message(charge["message_id"])
                 await msg.delete()
-            except discord.HTTPException:
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
                 pass
 
     await finance_utils.refresh_finance_message(interaction.client, pallet_id)
@@ -323,7 +324,7 @@ class PalletSetup(commands.Cog):
                     info_msg = await channel.send(f"ℹ️ {info_text}")
                     try:
                         await info_msg.pin(reason="Channel usage info")
-                    except discord.HTTPException:
+                    except discord_resilience.TRANSIENT_DISCORD_ERRORS:
                         pass
             db.set_shared_channel(stage, channel.id)
             created.append(channel.name)
@@ -373,7 +374,7 @@ class PalletSetup(commands.Cog):
                 if msg.author == interaction.client.user:
                     try:
                         await msg.delete()
-                    except discord.HTTPException:
+                    except discord_resilience.TRANSIENT_DISCORD_ERRORS:
                         pass
 
         for embed in information_content.build_embeds():
