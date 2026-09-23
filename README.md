@@ -637,7 +637,14 @@ this scale.
   <item_number> category_id:<corrected id>` to fix that item and add the
   same tag to that entry in `config.py` so it's not offered again until
   corrected. Look up a real leaf category ID via eBay's own "Sell similar"
-  flow on an existing listing in that category.
+  flow on an existing listing in that category. Since this bot has no
+  eBay API access to verify categories ahead of time, the category select
+  instead sorts by what's actually **confirmed working**: once an item in
+  a category is confirmed live (via `/ebay confirm-listed` or a matched
+  success row in `/ebay import-results`), that category gets a "✅ " label
+  and sorts ahead of everything else, including categories picked more
+  often but never confirmed - the team naturally converges on
+  proven-working categories over time without anyone tracking this by hand.
 - **Automated Review's suggested price is a general-knowledge guess, not
   real market data.** The model has no access to actual eBay sold listings
   for the item - it's only ever a Queue Review pre-fill, always editable,

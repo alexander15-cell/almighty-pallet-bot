@@ -96,6 +96,7 @@ def _migrate_add_columns(conn):
         "ALTER TABLE ebay_listing_data ADD COLUMN auction_duration TEXT",
         "ALTER TABLE ebay_listing_data ADD COLUMN ebay_item_id TEXT",
         "ALTER TABLE items ADD COLUMN ebay_batch_id INTEGER",
+        "ALTER TABLE ebay_category_usage ADD COLUMN confirmed_count INTEGER NOT NULL DEFAULT 0",
     ]
     for stmt in migrations:
         try:
@@ -223,10 +224,20 @@ def init_db():
             -- One row per eBay category ID that's ever been picked during
             -- Queue Review approval. Lets the category select menu in
             -- item_flow.py sort config.EBAY_CATEGORIES by actual usage
-            -- (most-picked first) instead of a fixed order.
+            -- (most-picked first) instead of a fixed order. confirmed_count
+            -- (unlike use_count, bumped as soon as a category is picked
+            -- during Queue Review) only increments once an item in that
+            -- category is actually confirmed live on eBay - see
+            -- record_ebay_category_confirmed - so a category that's been
+            -- picked but never successfully gone live (or, worse, already
+            -- failed with a real eBay error) doesn't look just as trusted
+            -- as one that's proven to work. This is the only "is this
+            -- category actually good" signal available without eBay API
+            -- access to verify categories directly.
             CREATE TABLE IF NOT EXISTS ebay_category_usage (
                 category_id     TEXT PRIMARY KEY,
-                use_count       INTEGER NOT NULL DEFAULT 0
+                use_count       INTEGER NOT NULL DEFAULT 0,
+                confirmed_count INTEGER NOT NULL DEFAULT 0
             );
 
             -- Refunds, pallet/item-level expenses, and sale reversals - kept
@@ -632,8 +643,10 @@ def clear_ebay_batch_id(item_id: int):
 
 
 def record_ebay_category_use(category_id: str):
-    """Bumps this category's pick count - called once per successful Queue
-    Review approval, so the category select menu can sort by actual usage."""
+    """Bumps this category's pick count - called once per Queue Review
+    approval, so the category select menu can sort by actual usage. Just
+    being picked doesn't mean it actually worked on eBay - see
+    record_ebay_category_confirmed for that stronger signal."""
     with get_conn() as conn:
         conn.execute(
             """INSERT INTO ebay_category_usage (category_id, use_count) VALUES (?, 1)
@@ -642,10 +655,36 @@ def record_ebay_category_use(category_id: str):
         )
 
 
+def record_ebay_category_confirmed(category_id: str):
+    """
+    Bumps this category's confirmed-working count - called only once an
+    item in this category is actually confirmed live on eBay (via /ebay
+    confirm-listed or a matched success row in /ebay import-results), never
+    just at Queue Review pick time. Since this bot has no eBay API access
+    to verify a category is real/listable ahead of time, this is the only
+    trustworthy "this category actually works" signal available - the
+    category select sorts confirmed categories first, ahead of ones
+    that have only ever been picked (or that already failed), so the whole
+    team converges on proven-working categories over time.
+    """
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO ebay_category_usage (category_id, use_count, confirmed_count) VALUES (?, 0, 1)
+               ON CONFLICT(category_id) DO UPDATE SET confirmed_count = confirmed_count + 1""",
+            (category_id,),
+        )
+
+
 def get_ebay_category_counts() -> dict:
     with get_conn() as conn:
         rows = conn.execute("SELECT category_id, use_count FROM ebay_category_usage").fetchall()
         return {r["category_id"]: r["use_count"] for r in rows}
+
+
+def get_ebay_category_confirmed_counts() -> dict:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT category_id, confirmed_count FROM ebay_category_usage").fetchall()
+        return {r["category_id"]: r["confirmed_count"] for r in rows}
 
 
 def update_photo_public_urls(item_id: int, urls: list):

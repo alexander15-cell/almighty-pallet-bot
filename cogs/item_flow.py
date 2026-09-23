@@ -183,10 +183,14 @@ class EbayCategorySelectView(discord.ui.View):
     Category picker: shown as step 2 when Automated Review didn't suggest a
     usable category, or when the reviewer taps "Change category" after an
     AI suggestion was auto-applied. Built from config.EBAY_CATEGORIES,
-    sorted by how often each has actually been picked (database.
-    get_ebay_category_counts) - most-used first, unused/new categories
-    alphabetically after. Discord select menus cap out at 25 options; if
-    EBAY_CATEGORIES ever grows past that, only the 25 most-used show here
+    sorted first by whether the category has ever been CONFIRMED live on
+    eBay (database.get_ebay_category_confirmed_counts - the only "this
+    category actually works" signal available without eBay API access),
+    then by how often it's been picked at all (get_ebay_category_counts),
+    then unused/new categories alphabetically. A confirmed category's label
+    gets a "✅ " prefix so it's visually obvious which ones are proven, not
+    just picked before. Discord select menus cap out at 25 options; if
+    EBAY_CATEGORIES ever grows past that, only the top-ranked 25 show here
     (logged to console) until pagination gets added.
 
     Nothing here is pre-checked (`default`) - see EbayConditionSelectView's
@@ -206,11 +210,13 @@ class EbayCategorySelectView(discord.ui.View):
             return "(top-level)" in name or "(parent/fallback)" in name or "(NOT A LEAF" in name
 
         counts = db.get_ebay_category_counts()
+        confirmed_counts = db.get_ebay_category_confirmed_counts()
         ranked = sorted(
             config.EBAY_CATEGORIES.items(),
             key=lambda name_and_id: (
-                -counts.get(name_and_id[1], 0),
                 _is_fallback_only(name_and_id[0]),
+                -confirmed_counts.get(name_and_id[1], 0),
+                -counts.get(name_and_id[1], 0),
                 name_and_id[0].lower(),
             ),
         )
@@ -226,7 +232,10 @@ class EbayCategorySelectView(discord.ui.View):
         self.select = discord.ui.Select(
             placeholder="Select this item's eBay category..." + (" (list truncated)" if truncated else ""),
             options=[
-                discord.SelectOption(label=name[:100], value=category_id)
+                discord.SelectOption(
+                    label=(f"✅ {name}" if confirmed_counts.get(category_id) else name)[:100],
+                    value=category_id,
+                )
                 for name, category_id in ranked
             ],
         )
@@ -900,6 +909,15 @@ class ItemFlow(commands.Cog):
 
         if ebay_item_id:
             db.set_ebay_item_id(item["id"], ebay_item_id)
+
+        listing = db.get_ebay_listing_data(item["id"])
+        if listing:
+            # Only a REAL confirmed listing bumps this - not just being
+            # picked during Queue Review - so the category select can trust
+            # it as "this category actually works on eBay" and sort/label
+            # it accordingly. This is the only such signal available
+            # without eBay API access to verify categories directly.
+            db.record_ebay_category_confirmed(listing["category_id"])
 
         pallet_id = item["pallet_id"]
         old_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "pending-ebay-upload"))

@@ -10,8 +10,12 @@ over time, so this matches header names loosely (case-insensitive, ignoring
 punctuation/spacing) instead of expecting one fixed schema:
   - the SKU column: a header containing "customlabel" or "sku"
   - the listing ID column: a header containing "itemnumber" or "itemid"
-  - an optional status/error column: a header containing "error", "status",
-    or "message"
+  - a status/error column: checked in priority order - "errormessage"
+    (eBay's classic File Exchange format has this as its own column,
+    holding the actual descriptive text, e.g. "Error - No <Item.Location>
+    exists..." - far more useful than the bare "Failure" its separate
+    "Status" column would otherwise say), then "message", then "status",
+    then any other "error"-ish column
 
 A row only counts as a confirmed success if it has a non-empty listing ID
 and (when a status/error column exists) that column doesn't look like a
@@ -32,10 +36,17 @@ def _normalize(header: str) -> str:
 
 
 def _find_column(fieldnames, *substrings):
-    for name in fieldnames:
-        normalized = _normalize(name)
-        if any(sub in normalized for sub in substrings):
-            return name
+    """
+    Substrings are tried in priority order (not fieldname order) - e.g.
+    with ("errormessage", "message", "status"), a header matching
+    "errormessage" wins even if a "Status" column appears earlier in the
+    file, since it's the more descriptive one when both exist (eBay's
+    classic File Exchange format has both).
+    """
+    for sub in substrings:
+        for name in fieldnames:
+            if sub in _normalize(name):
+                return name
     return None
 
 
@@ -55,7 +66,7 @@ def parse_results(csv_bytes: bytes) -> dict:
 
     label_col = _find_column(fieldnames, "customlabel", "sku")
     item_id_col = _find_column(fieldnames, "itemnumber", "itemid")
-    status_col = _find_column(fieldnames, "error", "status", "message")
+    status_col = _find_column(fieldnames, "errormessage", "message", "status", "error")
 
     succeeded, failed = [], []
     unparsed_rows = 0

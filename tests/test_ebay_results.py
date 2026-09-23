@@ -40,3 +40,32 @@ def test_no_listing_id_never_counts_as_success():
     result = ebay_results.parse_results(csv_bytes)
     assert result["succeeded"] == []
     assert result["failed"][0]["reason"] == "no listing ID returned"
+
+
+def test_real_ebay_classic_format_prefers_errormessage_over_bare_status():
+    # This is eBay's actual "classic File Exchange" results format,
+    # confirmed against a real failed upload - it has BOTH a bare "Status"
+    # column (just says "Failure") and a much more useful "ErrorMessage"
+    # column with the real reason. Confirming the parser surfaces the
+    # useful one, not "Failure".
+    header = (
+        "Line Number,Action,Status,ErrorCode,ErrorMessage,WarningCode,WarningMessage,Code,Message,"
+        "ItemID,ReferenceID,ApplicationData,StartTime,EndTime,AuctionLengthFee,BoldFee,BorderFee,"
+        "BuyItNowFee,CategoryFeaturedFee,CurrencyID,FeaturedFee,FeaturedGalleryFee,FixedPriceDurationFee,"
+        "GalleryFee,GiftIconFee,HighlightFee,InsertionFee,InternationalInsertionFee,ListingDesignerFee,"
+        "ListingFee,PhotoDisplayFee,PhotoFee,ProPackBundleFee,ReserveFee,SchedulingFee,SubtitleFee,"
+        "CustomLabel,PrivateNotes,BasicUpgradePackBundleFee,ValuePackBundleFee,ProPackPlusBundleFee,"
+        "SellerInventoryID,CrossBorderTradeNorthAmericaFee,CrossBorderTradeGBFee,RefundFromSeller,"
+        "TotalRefundToBuyer,CorrelationID\n"
+    )
+    row = (
+        "2,Add,Failure,10009,"
+        '"Error - No <Item.Location> exists or <Item.Location> is specified as an empty tag in the request.|Item.Location|"'
+        ",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,pallet-1-item-1,,,,,,,,,,\n"
+    )
+    result = ebay_results.parse_results((header + row).encode("utf-8"))
+
+    assert result["columns_found"]["status"] == "ErrorMessage"
+    assert len(result["failed"]) == 1
+    assert "Item.Location" in result["failed"][0]["reason"]
+    assert result["failed"][0]["reason"] != "Failure"
