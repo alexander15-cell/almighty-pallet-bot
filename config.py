@@ -201,6 +201,9 @@ BACKUP_MAX_AGE_DAYS = int(os.getenv("BACKUP_MAX_AGE_DAYS", "14"))
 # ---- Local photo storage (see workflow photo handling in item_flow.py) ----
 PHOTO_DIR = os.getenv("PHOTO_DIR", "data/photos")
 
+# ---- Single-instance lock (see instance_lock.py) ----
+INSTANCE_LOCK_PATH = os.getenv("INSTANCE_LOCK_PATH", "data/.bot.lock")
+
 # ---- AI review model (only used by the "anthropic" backend) ----
 ANTHROPIC_MODEL = "claude-sonnet-5"
 

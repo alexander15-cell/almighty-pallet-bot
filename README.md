@@ -198,6 +198,12 @@ cp .env.example .env
 python bot.py
 ```
 
+The bot refuses to start a second instance against the same data directory
+(a lock file under `data/`, released automatically even if the process
+crashes) - if `python bot.py` exits immediately saying another process
+already holds the lock, an existing instance is still running against this
+same `data/` directory somewhere.
+
 Once it's running and logged in, run these slash commands **once, in this
 order**:
 
