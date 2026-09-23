@@ -494,6 +494,12 @@ photo saved from then on gets uploaded to R2 automatically, no other setup
 needed. Photos saved before R2 was configured are not retroactively
 uploaded.
 
+Once R2 is configured, two admin commands manage the photos it holds:
+`/admin purge-old-photos` clears R2 copies for items sold past
+`PHOTO_RETENTION_DAYS_AFTER_SALE` (a retention buffer, not automatic - see
+the admin commands list above), and `/admin db-wipe` deletes every photo in
+the bucket as part of a full reset.
+
 ### Running it 24/7 on your friend's server
 
 ```ini
@@ -617,9 +623,14 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   Opens a form requiring you to type `DELETE EVERYTHING` exactly. On
   confirmation: deletes every pallet's category/channels, purges messages
   from the shared pipeline channels (best-effort - Discord won't bulk-delete
-  messages older than 14 days), and drops/recreates every database table.
-  The shared pipeline channels themselves are NOT deleted, since they're
-  reusable infrastructure - only their message history is cleared.
+  messages older than 14 days), drops/recreates every pallet/item-scoped
+  database table (pallets, items, financial records, eBay batches - see
+  `database.wipe_database`'s own docstring for exactly what's kept, like the
+  QuickBooks connection and shared-channel setup), and - if R2 is configured
+  - deletes every photo from the R2 bucket too, so photos don't silently
+  keep accumulating there after everything else is gone. The shared
+  pipeline channels themselves are NOT deleted, since they're reusable
+  infrastructure - only their message history is cleared.
 - `/ebay export-batch` - downloads the accumulated eBay CSV batch as a
   Discord attachment, archives and clears it so the next **Add to eBay
   Batch** click starts a fresh file, and records a durable, numbered batch
@@ -695,6 +706,14 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   directly via its own native eBay integration.
 - `/admin backup-now` - creates and verifies a local backup immediately (see
   "Backups" below); `/admin backups` lists recent ones with size and age.
+- `/admin purge-old-photos [days] [confirm]` - only meaningful if R2 is
+  configured. Previews (default) or, with `confirm:True`, deletes R2-hosted
+  photo copies for items marked SOLD (or SHIPPED) more than `days` days ago
+  (default `PHOTO_RETENTION_DAYS_AFTER_SALE`, 30) - a retention buffer so
+  photos stay available for a while after a sale in case of a return/
+  refund, without keeping every photo in R2 forever. Only the R2 (public,
+  durable-URL) copy is ever touched - the local disk copy, inventory
+  identity, sale price, and audit history are all untouched.
 - `/admin bind-role <role_name> <role>` / `/admin unbind-role <role_name>` /
   `/admin role-bindings` - optional role-ID bindings (see "Role bindings" below),
   editable live from Discord, no restart needed.
@@ -765,8 +784,10 @@ pytest tests/
 
 An early, incremental suite (not exhaustive) covering: core `database.py`
 behavior (pallets/items, financials including refunds/expenses/reversals,
-structured shipping addresses, buyer-data retention, the eBay batch
-lifecycle), `ai_review.py`'s fallback shape and timeout path, `ebay_csv.py`/
+structured shipping addresses, buyer-data retention, R2 photo retention
+after a sale, `wipe_database`'s table-by-table scope, the eBay batch
+lifecycle), `r2_storage.py`'s deletion helpers (mocked boto3 client, no
+real network calls), `ai_review.py`'s fallback shape and timeout path, `ebay_csv.py`/
 `fb_marketplace_csv.py`/`pirate_ship_csv.py`'s row-building (including the
 legacy-address fallback and buyer-data redaction), `ebay_results.py`'s
 flexible results-CSV parsing, `runtime_settings.py`'s role-ID bindings,
@@ -964,3 +985,10 @@ this scale.
   processed results file the way eBay's Seller Hub does, so
   `/fb-marketplace confirm-listed` (checking Facebook by hand) is the only
   way to move an item out of `#pending-fb-marketplace-upload`.
+- **`/admin purge-old-photos` and the R2 wipe in `/admin db-wipe` only ever
+  touch R2 - never the local disk copy under `PHOTO_DIR`.** Local photos
+  are cheap to keep and are what Discord item cards render from, so they're
+  left alone on purpose; only the durable, publicly-linkable R2 copy (used
+  for eBay/FB Marketplace CSV uploads and nothing else) gets cleaned up.
+  Retention is a manual admin action (preview by default, `confirm:True` to
+  run), never an automatic background job - same as buyer data retention.

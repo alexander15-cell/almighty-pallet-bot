@@ -1435,6 +1435,56 @@ def purge_buyer_data(item_ids: list, actor_id: int = None):
             )
 
 
+def get_photo_purge_candidates(days: int):
+    """
+    Sold/shipped items whose sold_at is older than `days` days ago and
+    still have R2-hosted photo URLs on file - what /admin purge-old-photos
+    previews and, on confirm, clears. The retention window exists so
+    photos stay available for a buffer after a sale in case of a return/
+    refund (see config.PHOTO_RETENTION_DAYS_AFTER_SALE); after that,
+    nothing left in this bot still needs a durable public URL for these
+    photos (the listing's done, Pirate Ship doesn't use photos), so
+    keeping them in R2 indefinitely is just paying storage for nothing.
+    Local photo_urls (disk copies) are untouched either way - only the R2
+    copy is ever a purge candidate.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT * FROM items
+               WHERE status IN (?, ?) AND sold_at IS NOT NULL AND sold_at < ?
+               AND photo_public_urls IS NOT NULL
+               ORDER BY pallet_id, item_number""",
+            (STATUS_SOLD, STATUS_SHIPPED, cutoff),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def clear_photo_public_urls(item_ids: list, actor_id: int = None):
+    """
+    Clears photo_public_urls (the R2-hosted links) for the given items -
+    call this AFTER the matching R2 objects have actually been deleted
+    (see r2_storage.delete_photos), never before, so this column never
+    claims a URL is gone when the object might still exist (or vice versa).
+    Local photo_urls (disk paths) are left alone, so a Discord item card
+    still renders if one's ever reposted; only the durable, publicly-
+    linkable R2 copy is gone. Irreversible once run; the caller should
+    always show a preview and require an explicit confirm before calling
+    this, same as purge_buyer_data.
+    """
+    with get_conn() as conn:
+        for item_id in item_ids:
+            conn.execute(
+                "UPDATE items SET photo_public_urls = NULL, updated_at = ? WHERE id = ?",
+                (_now(), item_id),
+            )
+            conn.execute(
+                "INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp) "
+                "VALUES (?, NULL, (SELECT status FROM items WHERE id = ?), ?, ?, ?)",
+                (item_id, item_id, actor_id, "R2-hosted photos purged (retention policy)", _now()),
+            )
+
+
 def set_finance_message(pallet_id: int, message_id: int):
     with get_conn() as conn:
         conn.execute("UPDATE pallets SET finance_message_id = ? WHERE id = ?", (message_id, pallet_id))
@@ -1516,19 +1566,32 @@ def get_all_category_ids() -> list[int]:
 
 def wipe_database():
     """
-    Drops and recreates every table, permanently erasing all pallets, items,
-    and event history. This is called ONLY after the multi-step confirmation
-    in admin_tools.py (typed confirmation phrase + role + Discord Administrator
-    permission) - this function itself does no confirmation of its own and
-    will wipe immediately when called, so nothing should call it directly
-    outside that confirmed flow.
+    Drops and recreates every pallet/item-scoped table, permanently erasing
+    all pallets, items, event history, and financial records. This is called
+    ONLY after the multi-step confirmation in admin_tools.py (typed
+    confirmation phrase + role + Discord Administrator permission) - this
+    function itself does no confirmation of its own and will wipe
+    immediately when called, so nothing should call it directly outside
+    that confirmed flow.
+
+    Deliberately NOT dropped - infrastructure/company-level state that has
+    nothing to do with any specific pallet's data, and would just have to be
+    redone/reconnected for no reason after a reset:
+      - shared_channels: the one-time /setup shared-channels channel IDs
+      - quickbooks_connection: the OAuth token for the connected company
+      - quickbooks_seen_charges: poll dedup ledger, tied to the bank
+        connection, not to any pallet
     """
     with get_conn() as conn:
         conn.executescript(
             """
             DROP TABLE IF EXISTS item_events;
             DROP TABLE IF EXISTS ebay_listing_data;
+            DROP TABLE IF EXISTS ebay_batches;
             DROP TABLE IF EXISTS ebay_category_usage;
+            DROP TABLE IF EXISTS finance_transactions;
+            DROP TABLE IF EXISTS pallet_costs;
+            DROP TABLE IF EXISTS awaiting_pallet_charges;
             DROP TABLE IF EXISTS items;
             DROP TABLE IF EXISTS channel_map;
             DROP TABLE IF EXISTS pallets;

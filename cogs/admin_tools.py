@@ -21,6 +21,7 @@ survive a rename. Purely optional and editable at runtime - an unbound role
 just keeps matching by name like today.
 """
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +35,7 @@ import config
 import database as db
 import discord_resilience
 import finance_utils
+import r2_storage
 import runtime_settings
 from cogs import item_flow
 
@@ -137,12 +139,21 @@ class ConfirmWipeModal(discord.ui.Modal, title="⚠️ Confirm Full Database Wip
 
         db.wipe_database()
 
+        r2_note = ""
+        if config.R2_ENABLED:
+            try:
+                deleted_photos = await asyncio.to_thread(r2_storage.wipe_all_photos)
+                r2_note = f" Also deleted {deleted_photos} photo(s) from R2."
+            except Exception as e:
+                log.exception("Failed to wipe R2 photos during database wipe")
+                r2_note = f" ⚠️ Failed to wipe R2 photos: {e} - clear the bucket manually if needed."
+
         try:
             await interaction.followup.send(
                 f"☠️ Database wiped. Removed {deleted_categories} pallet categor"
                 f"{'y' if deleted_categories == 1 else 'ies'} and cleared {purged_channels} "
                 f"shared pipeline channel(s) (messages older than 14 days couldn't be bulk-"
-                f"deleted - remove those manually if needed). "
+                f"deleted - remove those manually if needed).{r2_note} "
                 f"Starting from nothing - use **Start New Pallet** in your hub channel to begin again.",
                 ephemeral=True,
             )
@@ -438,6 +449,73 @@ class AdminTools(commands.Cog):
         )
         embed.set_footer(text=f"Showing {min(len(files), 15)} of {len(files)}. Kept up to {config.BACKUP_KEEP_COUNT} snapshots / {config.BACKUP_MAX_AGE_DAYS} days.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @admin_group.command(
+        name="purge-old-photos",
+        description="Preview, or (confirm:True) delete, R2 photo copies for items sold past the retention window.",
+    )
+    @app_commands.describe(
+        days=f"Days after a sale before R2 photos are eligible (default {config.PHOTO_RETENTION_DAYS_AFTER_SALE})",
+        confirm="Set True to actually delete them - default is preview-only",
+    )
+    async def purge_old_photos(self, interaction: discord.Interaction, days: int = None, confirm: bool = False):
+        if not await _require_admin(interaction):
+            return
+        if not config.R2_ENABLED:
+            await interaction.response.send_message(
+                "R2 isn't configured, so there are no R2 photo copies to purge (see \"Running without R2\" "
+                "in the README).",
+                ephemeral=True,
+            )
+            return
+
+        days = config.PHOTO_RETENTION_DAYS_AFTER_SALE if days is None else days
+        if days < 0:
+            await interaction.response.send_message("Days can't be negative.", ephemeral=True)
+            return
+
+        candidates = db.get_photo_purge_candidates(days)
+        if not candidates:
+            await interaction.response.send_message(
+                f"No sold items have R2 photos eligible for removal (sold more than {days} day(s) ago).",
+                ephemeral=True,
+            )
+            return
+
+        numbers = ", ".join(f"#{item['item_number']}" for item in candidates[:25])
+        if len(candidates) > 25:
+            numbers += f", and {len(candidates) - 25} more"
+
+        if not confirm:
+            await interaction.response.send_message(
+                f"**Preview only** - {len(candidates)} item(s) sold more than {days} day(s) ago still "
+                f"have R2-hosted photos on file: {numbers}.\nLocal photo copies and every other record "
+                f"(inventory identity, sale price, audit history) are never touched - only the R2 "
+                f"(public, durable-URL) copy. Run again with `confirm:True` to actually delete them.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        object_keys = []
+        for item in candidates:
+            urls = json.loads(item.get("photo_public_urls") or "[]")
+            object_keys.extend(r2_storage.object_key_from_public_url(u) for u in urls)
+
+        try:
+            deleted_count = await asyncio.to_thread(r2_storage.delete_photos, object_keys)
+        except Exception as e:
+            log.exception("Failed to delete R2 photos during purge-old-photos")
+            await interaction.followup.send(f"Failed to delete photos from R2: {e}", ephemeral=True)
+            return
+
+        db.clear_photo_public_urls([item["id"] for item in candidates], actor_id=interaction.user.id)
+
+        await interaction.followup.send(
+            f"🗑️ Deleted {deleted_count} photo(s) from R2 for {len(candidates)} item(s): {numbers}.\n"
+            f"Local photo copies and every other record are untouched.",
+            ephemeral=True,
+        )
 
     @admin_group.command(name="bind-role", description="Bind one of this bot's roles to a specific Discord role, so a future rename doesn't break it.")
     @app_commands.describe(role_name="Which of this bot's roles to bind", role="The actual Discord role to bind it to")

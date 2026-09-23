@@ -277,6 +277,17 @@ SETTINGS_PATH = os.getenv("SETTINGS_PATH", "data/settings.json")
 # (preview by default, confirm:True to actually run it), never automatic.
 BUYER_DATA_RETENTION_DAYS = int(os.getenv("BUYER_DATA_RETENTION_DAYS") or "90")
 
+# ---- R2 photo retention after a sale (see /admin purge-old-photos) ----
+# How many days after an item is marked SOLD before its R2-hosted photo
+# copies (config.R2_ENABLED) are eligible for removal - a buffer so photos
+# stay available in case of a return/refund shortly after the sale. Only
+# the R2 (public, durable) copy is ever purged - the local disk copy under
+# PHOTO_DIR is untouched, so a Discord item card still renders if one's
+# ever reposted. Purging is always an explicit admin action (preview by
+# default, confirm:True to actually run it), never automatic, same as
+# buyer data retention above.
+PHOTO_RETENTION_DAYS_AFTER_SALE = int(os.getenv("PHOTO_RETENTION_DAYS_AFTER_SALE") or "30")
+
 # ---- AI review model (only used by the "anthropic" backend) ----
 ANTHROPIC_MODEL = "claude-sonnet-5"
 

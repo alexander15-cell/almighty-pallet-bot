@@ -199,7 +199,8 @@ def _admin_setup_commands_embed() -> discord.Embed:
     embed = discord.Embed(title="💬 Commands - Admin & Setup", color=COLOR)
     embed.add_field(name="/admin backup-now / backups", value="Create or list local backups of the database/photos/CSVs.", inline=False)
     embed.add_field(name="/admin bind-role / unbind-role / role-bindings", value="Bind a bot role to a specific Discord role ID, so a rename doesn't break permission checks.", inline=False)
-    embed.add_field(name="/admin db-wipe", value="⚠️ Irreversible - permanently erases all pallet/item data.", inline=False)
+    embed.add_field(name="/admin purge-old-photos [days] [confirm]", value="Preview/delete R2 photo copies for items sold past the retention window (local copies untouched).", inline=False)
+    embed.add_field(name="/admin db-wipe", value="⚠️ Irreversible - permanently erases all pallet/item data, and R2 photos too if configured.", inline=False)
     embed.add_field(name="/setup shared-channels / hub / info-channel", value="One-time server setup commands (this channel included).", inline=False)
     embed.set_footer(text="All /admin and /item, /pallet, /setup commands require the Pallet Admin role.")
     return embed
