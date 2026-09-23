@@ -64,10 +64,43 @@ if errorlevel 1 (
 )
 
 :: --- Make sure a .env file exists, offering to create one from the example ---
+:: This is also the one-time first-setup wizard for optional, credential-gated
+:: features (currently just QuickBooks) - it only runs here, the moment .env
+:: is first created, so it never nags you again on later launches. Turning a
+:: feature on/off later is just editing its settings in .env and restarting.
 if not exist ".env" (
     if exist ".env.example" (
         copy ".env.example" ".env" >nul
         echo A new .env file was created from .env.example.
+        echo.
+        echo ------------------------------------------------------------------
+        echo  Optional feature: QuickBooks Online integration
+        echo ------------------------------------------------------------------
+        echo  Tracks credit-card charges and Pirate Ship shipping costs against
+        echo  your pallets automatically. Needs a free app registered at
+        echo  https://developer.intuit.com. It's OFF by default - safe to skip
+        echo  for now and turn on later by filling in the QUICKBOOKS_* settings
+        echo  in .env and restarting the bot.
+        echo.
+        choice /c YN /n /m "Enable QuickBooks integration now? [Y/N]: "
+        if errorlevel 2 (
+            echo QuickBooks integration left OFF - nothing else to do for it.
+        ) else (
+            echo.
+            echo After this window closes:
+            echo   1. Create an app at https://developer.intuit.com
+            echo      ^(My Apps -^> create an app -^> Keys ^& OAuth^)
+            echo   2. In the .env file about to open, fill in QUICKBOOKS_CLIENT_ID
+            echo      and QUICKBOOKS_CLIENT_SECRET from that app's Keys ^& OAuth page.
+            echo   3. Once the bot is running, a Pallet Admin runs
+            echo      /finance connect-quickbooks in Discord to finish connecting.
+            echo   4. Set QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID in .env to the ONE card
+            echo      account to watch ^(see the comment above it for where to find its ID^).
+            echo Opening .env now so you can fill these in - and DISCORD_BOT_TOKEN/
+            echo DISCORD_GUILD_ID below, if you haven't yet...
+            notepad ".env"
+        )
+        echo.
         echo Open .env in a text editor and fill in DISCORD_BOT_TOKEN and
         echo DISCORD_GUILD_ID, then run this script again.
         echo.

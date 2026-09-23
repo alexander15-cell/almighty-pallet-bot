@@ -29,10 +29,48 @@ echo "Installing/updating dependencies..."
 venv/bin/python -m pip install --upgrade pip >/dev/null
 venv/bin/python -m pip install -r requirements.txt || { echo "[ERROR] Failed to install dependencies."; exit 1; }
 
+# This is also the one-time first-setup wizard for optional, credential-gated
+# features (currently just QuickBooks) - it only runs here, the moment .env is
+# first created, so it never nags you again on later launches. Turning a
+# feature on/off later is just editing its settings in .env and restarting.
 if [ ! -f ".env" ]; then
     if [ -f ".env.example" ]; then
         cp ".env.example" ".env"
         echo "A new .env file was created from .env.example."
+        echo
+
+        echo "------------------------------------------------------------------"
+        echo " Optional feature: QuickBooks Online integration"
+        echo "------------------------------------------------------------------"
+        echo " Tracks credit-card charges and Pirate Ship shipping costs against"
+        echo " your pallets automatically. Needs a free app registered at"
+        echo " https://developer.intuit.com. It's OFF by default - safe to skip"
+        echo " for now and turn on later by filling in the QUICKBOOKS_* settings"
+        echo " in .env and restarting the bot."
+        echo
+        read -r -p "Enable QuickBooks integration now? [y/N]: " qb_choice
+        case "$qb_choice" in
+            y|Y)
+                echo
+                echo "Next steps:"
+                echo "  1. Create an app at https://developer.intuit.com"
+                echo "     (My Apps -> create an app -> Keys & OAuth)"
+                echo "  2. Open .env and fill in QUICKBOOKS_CLIENT_ID and"
+                echo "     QUICKBOOKS_CLIENT_SECRET from that app's Keys & OAuth page."
+                echo "  3. Once the bot is running, a Pallet Admin runs"
+                echo "     /finance connect-quickbooks in Discord to finish connecting."
+                echo "  4. Set QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID in .env to the ONE card"
+                echo "     account to watch (see the comment above it for where to find its ID)."
+                echo "Opening .env in ${EDITOR:-nano} now so you can fill these in - and"
+                echo "DISCORD_BOT_TOKEN/DISCORD_GUILD_ID below, if you haven't yet..."
+                "${EDITOR:-nano}" ".env"
+                ;;
+            *)
+                echo "QuickBooks integration left OFF - nothing else to do for it."
+                ;;
+        esac
+        echo
+
         echo "Open .env and fill in DISCORD_BOT_TOKEN and DISCORD_GUILD_ID,"
         echo "then run this script again."
         exit 1
