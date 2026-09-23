@@ -161,9 +161,17 @@ async def review_item(photo_paths: list[str], raw_description: str) -> dict:
     Should only be called when config.AI_ENABLED is True - the caller
     (item_flow.py) checks this before invoking the AI step at all.
     """
-    if config.AI_REVIEW_BACKEND == "ollama":
-        return await _review_item_ollama(photo_paths, raw_description)
-    return await _review_item_anthropic(photo_paths, raw_description)
+    backend_call = _review_item_ollama if config.AI_REVIEW_BACKEND == "ollama" else _review_item_anthropic
+    try:
+        return await asyncio.wait_for(backend_call(photo_paths, raw_description), timeout=config.AI_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        # The backend call already catches its own errors and returns a
+        # fallback dict internally - this only fires if the whole call
+        # (including Ollama's own inner socket timeout) took longer than
+        # config.AI_TIMEOUT_SECONDS. The abandoned network call may still
+        # finish in its background thread; its result is just discarded.
+        print(f"[ai_review] {config.AI_REVIEW_BACKEND} review timed out after {config.AI_TIMEOUT_SECONDS:.0f}s, returning fallback")
+        return _fallback(raw_description, f"timed out after {config.AI_TIMEOUT_SECONDS:.0f}s")
 
 
 # --------------------------------------------------------------- anthropic --
@@ -177,6 +185,23 @@ def _image_block(image_bytes: bytes, media_type: str) -> dict:
             "data": base64.b64encode(image_bytes).decode("utf-8"),
         },
     }
+
+
+def _call_anthropic(content_blocks: list) -> str:
+    """
+    Blocking call to the Anthropic SDK (it has no native async client here).
+    Run via asyncio.to_thread by _review_item_anthropic, same as the Ollama
+    backend's own blocking HTTP call - without that, this would block the
+    bot's entire event loop (every other command, every other item's
+    review) for the whole duration of each cloud request.
+    """
+    message = _client.messages.create(
+        model=config.ANTHROPIC_MODEL,
+        max_tokens=1000,
+        system=_build_system_prompt(),
+        messages=[{"role": "user", "content": content_blocks}],
+    )
+    return "".join(block.text for block in message.content if block.type == "text")
 
 
 async def _review_item_anthropic(photo_paths: list[str], raw_description: str) -> dict:
@@ -204,13 +229,7 @@ async def _review_item_anthropic(photo_paths: list[str], raw_description: str) -
     )
 
     try:
-        message = _client.messages.create(
-            model=config.ANTHROPIC_MODEL,
-            max_tokens=1000,
-            system=_build_system_prompt(),
-            messages=[{"role": "user", "content": content_blocks}],
-        )
-        text = "".join(block.text for block in message.content if block.type == "text")
+        text = await asyncio.to_thread(_call_anthropic, content_blocks)
         return json.loads(_strip_json_fences(text))
     except Exception as e:
         print(f"[ai_review] Anthropic review failed, returning fallback: {e}")
@@ -252,9 +271,11 @@ def _call_ollama(prompt: str, images_b64: list[str]) -> str:
         method="POST",
     )
     try:
-        # Local vision-model generation can take a while on modest hardware -
-        # generous timeout rather than a fast fail into the fallback path.
-        with urllib.request.urlopen(request, timeout=120) as response:
+        # This socket-level timeout is a backstop; the outer
+        # asyncio.wait_for in review_item() (config.AI_TIMEOUT_SECONDS)
+        # is what actually enforces the configured limit and returns the
+        # fallback promptly, so both agree on the same number here.
+        with urllib.request.urlopen(request, timeout=config.AI_TIMEOUT_SECONDS) as response:
             body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         # urllib's default str(e) for an HTTPError is just "HTTP Error 400:

@@ -37,6 +37,14 @@ OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "moondream")
 # more of the host machine's RAM/VRAM.
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "4096"))
 
+# How long to wait for either AI backend before giving up and falling back
+# to the raw submitted note (see ai_review.review_item) - without this, a
+# hung network call or an overloaded local Ollama server could block that
+# item's review indefinitely. 90s comfortably covers normal cloud latency
+# and most local generations; raise it if OLLAMA_NUM_CTX/slower hardware
+# means legitimate reviews are getting cut off.
+AI_TIMEOUT_SECONDS = float(os.getenv("AI_TIMEOUT_SECONDS", "90"))
+
 # Whether the Automated Review (AI) step is active:
 #   - "anthropic" backend: on the moment a real ANTHROPIC_API_KEY is set.
 #   - "ollama" backend: always on - there's no key to check for a local
