@@ -13,13 +13,16 @@ it's run, for every STATUS_SOLD item with a non-eBay sale_platform that
 hasn't been exported yet (see database.get_unexported_other_platform_sales),
 so nothing needs accumulating on disk between exports.
 
-Recipient name/address are freeform text captured via /finance
-set-shipping-info - decoupled from the sale-price recording the same way
-Mark as Sold is decoupled from price recording, since a buyer's address
-often isn't known until after the price is agreed on. Weight/dimensions
-aren't tracked anywhere in this bot yet, so those columns are left blank
-for whoever processes the batch to fill in by hand before uploading -
-same "leave it blank, fill in by hand" precedent as ebay_csv.py's PicURL.
+Recipient/address are captured as structured fields (address_line1/city/
+state/postal_code/country) via /finance set-shipping-info - decoupled from
+the sale-price recording the same way Mark as Sold is decoupled from price
+recording, since a buyer's address often isn't known until after the price
+is agreed on. Items shipped before the structured form existed only have
+the old freeform shipping_address blob; _legacy_split_address() best-effort
+splits that for those rows only. Weight/dimensions aren't tracked anywhere
+in this bot yet, so those columns are left blank for whoever processes the
+batch to fill in by hand before uploading - same "leave it blank, fill in
+by hand" precedent as ebay_csv.py's PicURL.
 """
 import csv
 from datetime import datetime, timezone
@@ -52,14 +55,13 @@ FIELDS = [
 ]
 
 
-def _split_address(shipping_address: str) -> dict:
+def _legacy_split_address(shipping_address: str) -> dict:
     """
-    shipping_address is captured as one freeform multi-line block (see
-    /finance set-shipping-info) - not broken into structured street/city/
-    state/zip fields, since this bot doesn't validate addresses. Splits it
-    on newlines into Address Line 1/2 best-effort; whoever processes the
-    batch should double-check City/State/Zip/Country before uploading,
-    since those are left blank here rather than guessed at from free text.
+    Fallback for rows shipped before structured address fields existed -
+    shipping_address there is one freeform multi-line block with no
+    city/state/zip/country captured at all. Splits it on newlines into
+    Address Line 1/2 best-effort; whoever processes the batch should fill
+    in City/State/Zip/Country by hand for these older rows.
     """
     lines = [line.strip() for line in (shipping_address or "").splitlines() if line.strip()]
     return {
@@ -77,11 +79,21 @@ def build_export_rows(items: list) -> list:
         row.update({
             "Order Number": f"pallet-{item['pallet_id']}-item-{item['item_number']}",
             "Recipient Name": item.get("recipient_name") or "",
-            "Country": "US",
             "Item Description": item.get("ai_title") or item.get("ai_description") or item.get("raw_description") or "",
             "Value (USD)": f"{item['sale_price']:.2f}" if item.get("sale_price") is not None else "",
         })
-        row.update(_split_address(item.get("shipping_address")))
+        if item.get("address_line1"):
+            row.update({
+                "Address Line 1": item.get("address_line1") or "",
+                "Address Line 2": item.get("address_line2") or "",
+                "City": item.get("city") or "",
+                "State": item.get("state") or "",
+                "Zip": item.get("postal_code") or "",
+                "Country": item.get("country") or "US",
+            })
+        else:
+            row["Country"] = "US"
+            row.update(_legacy_split_address(item.get("shipping_address")))
         rows.append(row)
     return rows
 

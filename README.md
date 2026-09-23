@@ -97,10 +97,11 @@ and type a number:
   - `/finance record-sale` - records (or corrects) an item's actual sale
     price + platform, whenever the price is actually known. Not tied to the
     Mark as Sold click at all.
-  - `/finance set-shipping-info` - opens a form for a buyer's recipient
-    name/address on a non-eBay sale, feeding `/pirate-ship export-batch`.
-    Decoupled from record-sale too, since the address often isn't known
-    until after the price is agreed on.
+  - `/finance set-shipping-info` - opens a two-step form for a buyer's
+    recipient name and structured address (address lines, city, state,
+    postal code, country) on a non-eBay sale, feeding `/pirate-ship
+    export-batch`. Decoupled from record-sale too, since the address often
+    isn't known until after the price is agreed on.
   - `/finance override-count` / `/finance clear-count-override` - manually
     corrects the "items received" figure if the real/accounting count needs
     to differ from what's been logged in Data Entry (e.g. junk that was
@@ -495,6 +496,10 @@ this scale.
   what `config.EBAY_ENABLED` currently gates).
 - **The Pirate Ship CSV doesn't track package weight/dimensions** - nothing
   in this bot captures those, so those columns are always blank; fill them
-  in before creating shipping labels. Recipient name/address also aren't
-  validated - `/finance set-shipping-info` stores whatever's typed in as
-  freeform text, split into address lines best-effort for the CSV.
+  in before creating shipping labels. `/finance set-shipping-info` captures
+  a structured address (address lines, city, state, postal code, country)
+  as of the fields themselves, but none of it is validated against a real
+  address database - a typo'd city or zip saves exactly as typed. Items
+  shipped before this structured form existed only have the old freeform
+  address blob, which is still split into address lines best-effort for
+  the CSV (city/state/zip are left blank for those older rows).

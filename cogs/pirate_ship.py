@@ -56,7 +56,10 @@ class PirateShip(commands.Cog):
             )
             return
 
-        missing_address = [item for item in items if not item.get("shipping_address")]
+        missing_address = [
+            item for item in items
+            if not item.get("address_line1") and not item.get("shipping_address")
+        ]
         path = pirate_ship_csv.export_pending(items)
         db.mark_pirate_ship_exported([item["id"] for item in items])
 

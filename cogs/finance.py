@@ -63,12 +63,15 @@ def _get_pallet_or_none(interaction: discord.Interaction):
     return db.get_pallet_by_category(interaction.channel.category_id) if interaction.channel.category_id else None
 
 
-class SetShippingInfoModal(discord.ui.Modal, title="Shipping Info"):
+class ShippingAddressModal(discord.ui.Modal, title="Shipping Address (1/2)"):
     """
-    Recipient name/address for a non-eBay sale, feeding /pirate-ship
-    export-batch. A modal (not slash command string options) since a real
-    mailing address needs a multi-line field - Discord slash command string
-    options are single-line.
+    First of two modals capturing a structured (not freeform) address for a
+    non-eBay sale, feeding /pirate-ship export-batch - split in two because
+    Discord modals cap out at 5 text inputs, and a real address needs 7
+    distinct fields (recipient, 2 address lines, city, state, postal code,
+    country). Submitting shows a button that opens ShippingPostalModal for
+    the rest, the same "chain through an intermediate interaction" pattern
+    item_flow.py uses for its own multi-step forms.
     """
 
     def __init__(self, item_number: int, item_id: int):
@@ -77,25 +80,87 @@ class SetShippingInfoModal(discord.ui.Modal, title="Shipping Info"):
         self.item_id = item_id
         item = db.get_item(item_id)
         self.recipient_name = discord.ui.TextInput(
-            label="Recipient Name",
-            default=item.get("recipient_name") or "",
-            max_length=100,
+            label="Recipient Name", default=item.get("recipient_name") or "", max_length=100,
         )
-        self.shipping_address = discord.ui.TextInput(
-            label="Shipping Address (street, city, state, zip)",
-            style=discord.TextStyle.paragraph,
-            default=item.get("shipping_address") or "",
-            max_length=500,
+        self.address_line1 = discord.ui.TextInput(
+            label="Address Line 1", default=item.get("address_line1") or "", max_length=200,
         )
-        self.add_item(self.recipient_name)
-        self.add_item(self.shipping_address)
+        self.address_line2 = discord.ui.TextInput(
+            label="Address Line 2 (apt/suite, optional)", required=False,
+            default=item.get("address_line2") or "", max_length=200,
+        )
+        self.city = discord.ui.TextInput(
+            label="City", default=item.get("city") or "", max_length=100,
+        )
+        self.state = discord.ui.TextInput(
+            label="State / Region", default=item.get("state") or "", max_length=100,
+        )
+        for field in (self.recipient_name, self.address_line1, self.address_line2, self.city, self.state):
+            self.add_item(field)
 
     async def on_submit(self, interaction: discord.Interaction):
-        name = self.recipient_name.value.strip()
-        address = self.shipping_address.value.strip()
-        db.set_shipping_info(self.item_id, name, address, actor_id=interaction.user.id)
+        view = discord.ui.View(timeout=300)
+        continue_button = discord.ui.Button(label="Continue: postal code & country", style=discord.ButtonStyle.primary)
+
+        async def _continue(inner_interaction: discord.Interaction):
+            await inner_interaction.response.send_modal(
+                ShippingPostalModal(
+                    self.item_number, self.item_id,
+                    recipient_name=self.recipient_name.value.strip(),
+                    address_line1=self.address_line1.value.strip(),
+                    address_line2=self.address_line2.value.strip(),
+                    city=self.city.value.strip(),
+                    state=self.state.value.strip(),
+                )
+            )
+
+        continue_button.callback = _continue
+        view.add_item(continue_button)
         await interaction.response.send_message(
-            f"📦 Shipping info saved for item #{self.item_number}. It'll go out in the next "
+            "Recipient, address, and city/state saved for this step - tap below to add the "
+            "postal code and country and finish.",
+            view=view, ephemeral=True,
+        )
+
+
+class ShippingPostalModal(discord.ui.Modal, title="Shipping Address (2/2)"):
+    """Second step - see ShippingAddressModal. Only reachable via its
+    "Continue" button, which carries the first modal's values forward."""
+
+    def __init__(self, item_number: int, item_id: int, recipient_name: str, address_line1: str,
+                 address_line2: str, city: str, state: str):
+        super().__init__()
+        self.item_number = item_number
+        self.item_id = item_id
+        self.recipient_name = recipient_name
+        self.address_line1 = address_line1
+        self.address_line2 = address_line2
+        self.city = city
+        self.state = state
+        item = db.get_item(item_id)
+        self.postal_code = discord.ui.TextInput(
+            label="Postal / ZIP Code", default=item.get("postal_code") or "", max_length=20,
+        )
+        self.country = discord.ui.TextInput(
+            label="Country", default=item.get("country") or "US", max_length=60,
+        )
+        self.add_item(self.postal_code)
+        self.add_item(self.country)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        db.set_shipping_info(
+            self.item_id,
+            recipient_name=self.recipient_name,
+            address_line1=self.address_line1,
+            address_line2=self.address_line2,
+            city=self.city,
+            state=self.state,
+            postal_code=self.postal_code.value.strip(),
+            country=self.country.value.strip() or "US",
+            actor_id=interaction.user.id,
+        )
+        await interaction.response.send_message(
+            f"📦 Shipping address saved for item #{self.item_number}. It'll go out in the next "
             f"`/pirate-ship export-batch`.",
             ephemeral=True,
         )
@@ -182,7 +247,7 @@ class Finance(commands.Cog):
             await interaction.response.send_message(f"No item #{item_number} found in **{pallet['name']}**.", ephemeral=True)
             return
 
-        await interaction.response.send_modal(SetShippingInfoModal(item_number, item["id"]))
+        await interaction.response.send_modal(ShippingAddressModal(item_number, item["id"]))
 
     @finance_group.command(name="override-count", description="Manually set the pallet's 'items received' count. Run inside that pallet's category.")
     @app_commands.describe(count="The correct number of items received for this pallet")

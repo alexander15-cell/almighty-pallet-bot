@@ -85,6 +85,12 @@ def _migrate_add_columns(conn):
         "ALTER TABLE items ADD COLUMN ai_suggested_price REAL",
         "ALTER TABLE items ADD COLUMN recipient_name TEXT",
         "ALTER TABLE items ADD COLUMN shipping_address TEXT",
+        "ALTER TABLE items ADD COLUMN address_line1 TEXT",
+        "ALTER TABLE items ADD COLUMN address_line2 TEXT",
+        "ALTER TABLE items ADD COLUMN city TEXT",
+        "ALTER TABLE items ADD COLUMN state TEXT",
+        "ALTER TABLE items ADD COLUMN postal_code TEXT",
+        "ALTER TABLE items ADD COLUMN country TEXT",
         "ALTER TABLE items ADD COLUMN pirate_ship_exported INTEGER DEFAULT 0",
         "ALTER TABLE ebay_listing_data ADD COLUMN listing_format TEXT NOT NULL DEFAULT 'FixedPrice'",
         "ALTER TABLE ebay_listing_data ADD COLUMN auction_duration TEXT",
@@ -153,7 +159,13 @@ def init_db():
                 sale_price          REAL,
                 sale_platform       TEXT,
                 recipient_name      TEXT,               -- non-eBay ("Other" platform) sales only - for the Pirate Ship CSV export
-                shipping_address    TEXT,               -- non-eBay ("Other" platform) sales only - for the Pirate Ship CSV export
+                shipping_address    TEXT,               -- legacy freeform address (pre-structured-fields items) - kept for old rows, see address_line1 etc. below
+                address_line1       TEXT,               -- non-eBay ("Other" platform) sales only - structured shipping address for the Pirate Ship CSV export
+                address_line2       TEXT,
+                city                TEXT,
+                state               TEXT,
+                postal_code         TEXT,
+                country             TEXT,
                 pirate_ship_exported INTEGER DEFAULT 0,  -- set once this item's shipping info has gone out in a /pirate-ship export-batch, so it isn't exported twice
                 shipped_at          TEXT,
                 stale_alert_sent    INTEGER DEFAULT 0,
@@ -647,7 +659,8 @@ def record_item_sale(item_id: int, price: float, platform: str, actor_id: int):
         )
 
 
-def set_shipping_info(item_id: int, recipient_name: str, shipping_address: str, actor_id: int = None):
+def set_shipping_info(item_id: int, recipient_name: str, address_line1: str, address_line2: str,
+                       city: str, state: str, postal_code: str, country: str, actor_id: int = None):
     """
     Used by /finance set-shipping-info for non-eBay ("Other" platform) sales
     - decoupled from record_item_sale the same way price-recording is
@@ -656,11 +669,18 @@ def set_shipping_info(item_id: int, recipient_name: str, shipping_address: str, 
     Feeds /pirate-ship export-batch (see pirate_ship_csv.py); eBay sales
     never need this, since Pirate Ship pulls those directly via its own
     native eBay integration.
+
+    Structured fields (address_line1/city/state/postal_code/country) replace
+    the old single freeform shipping_address text block - that column is
+    left alone here (only ever set by old code) so previously-captured
+    addresses aren't lost; pirate_ship_csv.py falls back to it for rows that
+    predate this structured form.
     """
     with get_conn() as conn:
         conn.execute(
-            "UPDATE items SET recipient_name = ?, shipping_address = ?, updated_at = ? WHERE id = ?",
-            (recipient_name, shipping_address, _now(), item_id),
+            """UPDATE items SET recipient_name = ?, address_line1 = ?, address_line2 = ?,
+               city = ?, state = ?, postal_code = ?, country = ?, updated_at = ? WHERE id = ?""",
+            (recipient_name, address_line1, address_line2, city, state, postal_code, country, _now(), item_id),
         )
         conn.execute(
             "INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp) "
