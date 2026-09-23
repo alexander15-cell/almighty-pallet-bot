@@ -884,16 +884,21 @@ class ItemFlow(commands.Cog):
         await interaction.followup.send(f"Listed live on eBay. See <#{channel.id}>.", ephemeral=True)
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
 
-    async def confirm_ebay_pending_item(self, item: dict, actor_id: int) -> bool:
+    async def confirm_ebay_pending_item(self, item: dict, actor_id: int, ebay_item_id: str = None) -> bool:
         """
-        Used by /ebay confirm-listed (cogs/ebay.py) once someone has checked
-        that an item from the CSV batch actually went live on eBay - there's
-        no live API to detect this automatically. Moves it from
-        pending_ebay_upload straight to Listed. Returns False (does nothing)
-        if the item isn't actually pending anymore.
+        Used by /ebay confirm-listed and /ebay import-results (cogs/ebay.py)
+        once an item from a CSV batch is confirmed to have actually gone
+        live on eBay - either by hand after checking Seller Hub, or parsed
+        from a downloaded results CSV. Moves it from pending_ebay_upload
+        straight to Listed, and records the real eBay listing ID when one's
+        known. Returns False (does nothing) if the item isn't actually
+        pending anymore.
         """
         if item["status"] != db.STATUS_PENDING_EBAY_UPLOAD:
             return False
+
+        if ebay_item_id:
+            db.set_ebay_item_id(item["id"], ebay_item_id)
 
         pallet_id = item["pallet_id"]
         old_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "pending-ebay-upload"))
@@ -906,9 +911,9 @@ class ItemFlow(commands.Cog):
 
         listed_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
         view = ListedView(item["id"])
-        msg = await send_item_card(
-            listed_channel, item, view=view, extra_text="✅ Confirmed live on eBay from batch upload.",
-        )
+        extra = f"✅ Confirmed live on eBay from batch upload (item ID: {ebay_item_id})." if ebay_item_id \
+            else "✅ Confirmed live on eBay from batch upload."
+        msg = await send_item_card(listed_channel, item, view=view, extra_text=extra)
         db.update_status(item["id"], db.STATUS_LISTED, actor_id=actor_id, new_message_id=msg.id)
         return True
 

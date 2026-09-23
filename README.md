@@ -410,13 +410,28 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   The shared pipeline channels themselves are NOT deleted, since they're
   reusable infrastructure - only their message history is cleared.
 - `/ebay export-batch` - downloads the accumulated eBay CSV batch as a
-  Discord attachment, then archives and clears it so the next **Add to eBay
-  Batch** click starts a fresh file.
+  Discord attachment, archives and clears it so the next **Add to eBay
+  Batch** click starts a fresh file, and records a durable, numbered batch
+  snapshot (`/ebay batches`/`/ebay batch`) of exactly which items went out
+  in it.
+- `/ebay import-results <batch_id> <results_csv>` - reconciles a batch
+  against the results/report CSV Seller Hub gives you after processing an
+  upload. Column names in eBay's results CSVs vary, so this matches them
+  loosely (a SKU-like column, a listing-ID-like column, an optional status/
+  error column) rather than expecting one fixed layout. Rows it can
+  confidently match as succeeded move that item to Listed and record the
+  real eBay item ID; anything else (no listing ID, an explicit error, an
+  unrecognized SKU) is reported back unresolved instead of guessed at - the
+  response lists exactly what wasn't resolved.
+- `/ebay batches` - lists recent batches with how many items in each are
+  still waiting on a result. `/ebay batch <batch_id>` shows one batch's
+  still-pending items.
 - `/ebay confirm-listed [item_number]` - run inside a pallet's category.
-  Confirms that item (or, with no `item_number`, every item in that pallet
-  still waiting) actually went live on eBay after a CSV batch upload, moving
-  it from `#pending-ebay-upload` to `#listed`. There's no live API to detect
-  this automatically, so it's a manual confirmation after checking Seller Hub.
+  The fully-manual fallback to `/ebay import-results`: confirms that item
+  (or, with no `item_number`, every item in that pallet still waiting)
+  actually went live on eBay, moving it from `#pending-ebay-upload` to
+  `#listed`, for anyone who'd rather just check Seller Hub directly than
+  download/upload a results CSV.
 - `/pirate-ship export-batch` - exports every sold item on a non-eBay
   platform ("Other"/FB Marketplace/website, recorded via `/finance
   record-sale`) that hasn't been exported yet, as a CSV for Pirate Ship's

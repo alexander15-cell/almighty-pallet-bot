@@ -94,6 +94,8 @@ def _migrate_add_columns(conn):
         "ALTER TABLE items ADD COLUMN pirate_ship_exported INTEGER DEFAULT 0",
         "ALTER TABLE ebay_listing_data ADD COLUMN listing_format TEXT NOT NULL DEFAULT 'FixedPrice'",
         "ALTER TABLE ebay_listing_data ADD COLUMN auction_duration TEXT",
+        "ALTER TABLE ebay_listing_data ADD COLUMN ebay_item_id TEXT",
+        "ALTER TABLE items ADD COLUMN ebay_batch_id INTEGER",
     ]
     for stmt in migrations:
         try:
@@ -167,6 +169,7 @@ def init_db():
                 postal_code         TEXT,
                 country             TEXT,
                 pirate_ship_exported INTEGER DEFAULT 0,  -- set once this item's shipping info has gone out in a /pirate-ship export-batch, so it isn't exported twice
+                ebay_batch_id       INTEGER,             -- set to ebay_batches.id at /ebay export-batch time, so /ebay import-results knows which batch this item belongs to
                 shipped_at          TEXT,
                 stale_alert_sent    INTEGER DEFAULT 0,
                 created_at          TEXT NOT NULL,
@@ -198,9 +201,23 @@ def init_db():
                 listing_format  TEXT NOT NULL DEFAULT 'FixedPrice',  -- 'FixedPrice' or 'Auction'
                 auction_duration TEXT,                -- eBay *Duration value (e.g. 'Days_7') - only set when listing_format = 'Auction'
                 item_specifics  TEXT,
+                ebay_item_id    TEXT,                 -- the real eBay listing ID, set once /ebay import-results (or confirm-listed) confirms this item went live
                 set_by          INTEGER,
                 created_at      TEXT NOT NULL,
                 updated_at      TEXT NOT NULL
+            );
+
+            -- One row per /ebay export-batch run - a durable, numbered
+            -- snapshot of exactly which items went out in that CSV
+            -- (items.ebay_batch_id points back here), so /ebay import-results
+            -- and /ebay batches can look up a specific batch's contents
+            -- instead of only ever operating on "whatever's pending now".
+            CREATE TABLE IF NOT EXISTS ebay_batches (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                csv_filename TEXT NOT NULL,
+                exported_by  INTEGER,
+                item_count   INTEGER NOT NULL,
+                created_at   TEXT NOT NULL
             );
 
             -- One row per eBay category ID that's ever been picked during
@@ -530,6 +547,75 @@ def get_ebay_listing_data(item_id: int):
         data = dict(row)
         data["item_specifics"] = json.loads(data["item_specifics"]) if data["item_specifics"] else {}
         return data
+
+
+def get_unbatched_pending_items():
+    """
+    Items currently in pending_ebay_upload that haven't been through an
+    /ebay export-batch run yet (ebay_batch_id IS NULL) - exactly what the
+    live, not-yet-exported ebay_csv.py CSV contains, since "Add to eBay
+    Batch" (item_flow.py) moves an item to pending_ebay_upload the moment
+    it's added, before any export happens. Used by /ebay export-batch to
+    snapshot a new ebay_batches row.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM items WHERE status = ? AND ebay_batch_id IS NULL ORDER BY pallet_id, item_number",
+            (STATUS_PENDING_EBAY_UPLOAD,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def create_ebay_batch(csv_filename: str, exported_by: int, item_ids: list) -> int:
+    """Records a new ebay_batches snapshot and stamps ebay_batch_id onto
+    every item included in it. Returns the new batch's id."""
+    with get_conn() as conn:
+        cursor = conn.execute(
+            "INSERT INTO ebay_batches (csv_filename, exported_by, item_count, created_at) VALUES (?, ?, ?, ?)",
+            (csv_filename, exported_by, len(item_ids), _now()),
+        )
+        batch_id = cursor.lastrowid
+        conn.executemany(
+            "UPDATE items SET ebay_batch_id = ? WHERE id = ?",
+            [(batch_id, item_id) for item_id in item_ids],
+        )
+        return batch_id
+
+
+def get_ebay_batch(batch_id: int):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM ebay_batches WHERE id = ?", (batch_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_ebay_batch_items(batch_id: int):
+    """Items from this batch still waiting on a result (status still
+    pending_ebay_upload) - what /ebay import-results has left to match
+    against. Items already confirmed (moved to listed) or otherwise moved
+    on don't show up here anymore, same as any other status-based query in
+    this bot."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM items WHERE ebay_batch_id = ? AND status = ? ORDER BY pallet_id, item_number",
+            (batch_id, STATUS_PENDING_EBAY_UPLOAD),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_ebay_batches(limit: int = 15):
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM ebay_batches ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_ebay_item_id(item_id: int, ebay_item_id: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE ebay_listing_data SET ebay_item_id = ?, updated_at = ? WHERE item_id = ?",
+            (ebay_item_id, _now(), item_id),
+        )
 
 
 def record_ebay_category_use(category_id: str):
