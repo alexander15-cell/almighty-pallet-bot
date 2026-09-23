@@ -45,6 +45,12 @@ def build_finance_embed(pallet: dict, fin: dict) -> discord.Embed:
         value=f"{fin['items_priced']} (avg ${fin['avg_sale_price']:.2f})" if fin["items_priced"] else "0",
         inline=True,
     )
+    if fin["items_pending_sale"]:
+        embed.add_field(
+            name="Pending Sale Value",
+            value=f"${fin['pending_sale_value']:.2f} ({fin['items_pending_sale']} listed)",
+            inline=True,
+        )
 
     # Refunds/expenses only show once at least one has been recorded, so a
     # pallet that never uses /finance refund or /finance expense keeps the

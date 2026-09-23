@@ -198,18 +198,18 @@ CHANNEL_INFO = {
         "once you've listed it manually somewhere else entirely."
     ),
     "pending-ebay-upload": (
-        "**Listing Management role** - view only, nothing to click here. Items land here after "
-        "**Add to eBay Batch** on an Awaiting Listing card. They're sitting in the CSV batch "
-        "waiting for someone to run `/ebay export-batch` and upload it in eBay Seller Hub. Once "
-        "eBay actually shows them live, an admin runs `/ebay confirm-listed` to move them into "
-        "#listed - there's no live API to detect that automatically."
+        "**Listing Management role** works here. Items land here after **Add to eBay Batch** on "
+        "an Awaiting Listing card, sitting in the CSV batch waiting for someone to run "
+        "`/ebay export-batch` and upload it in eBay Seller Hub. Once eBay actually shows one live, "
+        "tap **Confirm Listed** on its card (or run `/ebay confirm-listed` to confirm a whole "
+        "pallet at once) to move it into #listed - there's no live API to detect that automatically."
     ),
     "pending-fb-marketplace-upload": (
-        "**Listing Management role** - view only, nothing to click here. Items land here after "
-        "**Add to FB Marketplace Batch** on an Awaiting Listing card. They're sitting in the CSV "
-        "batch waiting for someone to run `/fb-marketplace export-batch` and upload it to "
-        "Facebook's bulk listing tool. Once it's actually live, an admin runs "
-        "`/fb-marketplace confirm-listed` to move them into #listed - there's no API to detect "
+        "**Listing Management role** works here. Items land here after **Add to FB Marketplace "
+        "Batch** on an Awaiting Listing card, sitting in the CSV batch waiting for someone to run "
+        "`/fb-marketplace export-batch` and upload it to Facebook's bulk listing tool. Once it's "
+        "actually live, tap **Confirm Listed** on its card (or run `/fb-marketplace confirm-listed` "
+        "to confirm a whole pallet at once) to move it into #listed - there's no API to detect "
         "that automatically."
     ),
     "listed": (

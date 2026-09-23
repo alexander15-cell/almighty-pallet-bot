@@ -883,6 +883,14 @@ def get_pallet_financials(pallet_id: int):
         are based on
       - status_counts: item counts by pipeline stage, for the "where's
         everything sitting" part of the live card
+      - pending_sale_value / items_pending_sale: sum of ebay_listing_data.price
+        (the listing price captured for every approved item regardless of
+        which platform it eventually sells on - see save_ebay_listing_data's
+        docstring) across items currently STATUS_LISTED - i.e. actually up
+        for sale right now, nobody's bought it yet. Expected revenue still
+        "in the pipeline", not yet realized (that's revenue_so_far, from
+        actual recorded sale_price) - the two are deliberately separate
+        numbers, never added together.
     This is what both /finance summary and the auto-updating pinned message
     in #pallet-discussion are built from - one function, one source of truth.
     """
@@ -912,6 +920,12 @@ def get_pallet_financials(pallet_id: int):
             "SELECT status, COUNT(*) AS n FROM items WHERE pallet_id = ? GROUP BY status",
             (pallet_id,),
         ).fetchall()
+        pending_row = conn.execute(
+            """SELECT COUNT(*) AS n, COALESCE(SUM(eld.price), 0) AS total
+               FROM items i JOIN ebay_listing_data eld ON eld.item_id = i.id
+               WHERE i.pallet_id = ? AND i.status = ?""",
+            (pallet_id, STATUS_LISTED),
+        ).fetchone()
 
     items_received = pallet.get("items_received_override")
     if items_received is None:
@@ -948,6 +962,8 @@ def get_pallet_financials(pallet_id: int):
         "cost_recovery_pct": (net_revenue / cost * 100) if cost else None,
         "broke_even": (cost is not None and net_revenue >= cost),
         "status_counts": {r["status"]: r["n"] for r in counts},
+        "items_pending_sale": pending_row["n"],
+        "pending_sale_value": pending_row["total"] or 0.0,
     }
 
 

@@ -838,6 +838,12 @@ class Finance(commands.Cog):
             value=f"{fin['items_priced']} (avg ${fin['avg_sale_price']:.2f})" if fin["items_priced"] else "0",
             inline=True,
         )
+        if fin["items_pending_sale"]:
+            embed.add_field(
+                name="Pending Sale Value",
+                value=f"${fin['pending_sale_value']:.2f} ({fin['items_pending_sale']} listed)",
+                inline=True,
+            )
 
         if fin["cost"] is not None:
             margin_pct = (fin["profit_so_far"] / fin["revenue_so_far"] * 100) if fin["revenue_so_far"] else None

@@ -100,7 +100,11 @@ def _pipeline_embed() -> discord.Embed:
     )
     embed.add_field(
         name="5️⃣ #pending-ebay-upload / #pending-fb-marketplace-upload → #listed (shared)",
-        value="Batch items wait here until confirmed live, then move to #listed alongside everything else.",
+        value=(
+            "Batch items wait here until confirmed live. Tap **Confirm Listed** right on the "
+            "card once you see it live on eBay/Facebook, then it moves to #listed alongside "
+            "everything else - no need to go find that pallet's own channel."
+        ),
         inline=False,
     )
     embed.add_field(
@@ -138,14 +142,14 @@ def _ebay_commands_embed() -> discord.Embed:
     embed.add_field(name="retry-item <item_number> ...", value="Fix and re-queue an item whose batch upload needs a correction.", inline=False)
     embed.add_field(name="batches / batch <id>", value="List recent batches, or show one batch's still-pending items.", inline=False)
     embed.add_field(name="import-results <batch_id> <csv>", value="Reconcile a batch against a results CSV from Seller Hub.", inline=False)
-    embed.add_field(name="confirm-listed [item_number]", value="Manually confirm an item is live on eBay.", inline=False)
+    embed.add_field(name="confirm-listed [item_number]", value="Manually confirm an item is live on eBay (or tap **Confirm Listed** right on its card in #pending-ebay-upload).", inline=False)
     return embed
 
 
 def _fb_marketplace_commands_embed() -> discord.Embed:
     embed = discord.Embed(title="💬 Commands - FB Marketplace (`/fb-marketplace ...`)", color=COLOR)
     embed.add_field(name="export-batch", value="Download the accumulated FB Marketplace CSV batch and start a fresh one.", inline=False)
-    embed.add_field(name="confirm-listed [item_number]", value="Manually confirm an item is live on FB Marketplace.", inline=False)
+    embed.add_field(name="confirm-listed [item_number]", value="Manually confirm an item is live on FB Marketplace (or tap **Confirm Listed** right on its card in #pending-fb-marketplace-upload).", inline=False)
     return embed
 
 

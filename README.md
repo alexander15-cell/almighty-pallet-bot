@@ -78,22 +78,29 @@ Every item's card always shows which pallet it belongs to.
   option is only ever sorted first or applied automatically - never a
   checkmark you have to re-tap.)
 - **Awaiting Listing** (shared) is where Listing Management actually lists
-  the item, via whichever of three buttons fits:
-  - **Add to eBay Batch** - appends the item (using the eBay data captured
-    above) as a row to a local CSV matching eBay's newer AI-prefill bulk
-    listing template (SKU/photos/title/category/aspects - see "eBay CSV
-    format" below), no API call. Moves the item to **#pending-ebay-upload**
-    until an admin runs `/ebay export-batch` to grab the file, upload it via
-    Seller Hub's Reports tab, and (once eBay actually shows it live)
-    `/ebay confirm-listed` to move it into #listed.
+  the item, via whichever of four buttons fits:
+  - **Add to eBay Batch** - appends the item (using the listing data
+    captured above) as a row to a local CSV matching eBay's newer
+    AI-prefill bulk listing template (SKU/photos/title/category/aspects -
+    see "eBay CSV format" below), no API call. Moves the item to
+    **#pending-ebay-upload**, where it sits until an admin runs
+    `/ebay export-batch` to grab the file and upload it via Seller Hub's
+    Reports tab - once eBay actually shows it live, tap **Confirm Listed**
+    right on that card (or run `/ebay confirm-listed`) to move it into
+    #listed.
+  - **Add to FB Marketplace Batch** - same idea, using Facebook's own bulk
+    listing CSV template (Title/Price/Description/Photo URL - see "FB
+    Marketplace CSV format" below). Moves the item to
+    **#pending-fb-marketplace-upload**; confirm the same way once it's live
+    (**Confirm Listed** on the card, or `/fb-marketplace confirm-listed`).
   - **List on eBay (API)** - the direct eBay API path. Only shows up once
     `EBAY_ENABLED` is true (see "Running without the eBay API" below);
     currently a stub pending eBay developer API approval.
-  - **Mark Listed (Other)** - unchanged manual path for FB Marketplace,
-    website, or anywhere else - moves straight to #listed. For these,
-    **Finance Management** can also run `/finance set-shipping-info` once a
-    buyer's address is known, feeding `/pirate-ship export-batch` (see
-    below) - eBay sales never need this, since Pirate Ship pulls those
+  - **Mark Listed (Other)** - manual path for anywhere else entirely (a
+    website, in person, etc.) - moves straight to #listed. For any non-eBay
+    sale, **Finance Management** can also run `/finance set-shipping-info`
+    once a buyer's address is known, feeding `/pirate-ship export-batch`
+    (see below) - eBay sales never need this, since Pirate Ship pulls those
     directly via its own native eBay integration.
 - **Listed** (shared) items get a "Mark as Sold" button - a single click,
   no form, no price prompt. Operational speed was the whole point of
@@ -140,12 +147,15 @@ and type a number:
 
 Every pallet's **#pallet-discussion** channel gets a pinned card, posted as
 the very first message, that shows: cost, items received, cost-per-item,
-revenue so far, items priced, profit/loss vs. cost, a cost-recovery
-progress bar, and an item count per pipeline stage. This card **edits
-itself in place** every time something relevant changes - a new item is
-logged, an item moves stage, a price is set or corrected, or the received
-count is overridden. You never have to run a command to see current status;
-just look at the pinned message.
+revenue so far, items priced, a **pending sale value** (the sum of listing
+prices for everything currently `#listed` - i.e. up for sale but not yet
+sold, expected revenue still "in the pipeline", separate from revenue
+already realized), profit/loss vs. cost, a cost-recovery progress bar, and
+an item count per pipeline stage. This card **edits itself in place** every
+time something relevant changes - a new item is logged, an item moves
+stage, a price is set or corrected, or the received count is overridden.
+You never have to run a command to see current status; just look at the
+pinned message.
 
 ## QuickBooks Online integration (optional)
 
@@ -572,11 +582,13 @@ UI after a restart (a Discord client caching quirk, not a bug here).
      configured and enabled (see "Running without the eBay API" above).
    - **Mark Listed (Other)** - for anywhere else entirely, listed manually.
 8. Items added to a batch: a Pallet Admin runs `/ebay export-batch` or
-   `/fb-marketplace export-batch` whenever ready, uploads the attached CSV
-   on that platform, then once it actually shows those listings live, runs
-   `/ebay confirm-listed` or `/fb-marketplace confirm-listed` to move them
-   from `#pending-ebay-upload`/`#pending-fb-marketplace-upload` into
-   `#listed`.
+   `/fb-marketplace export-batch` whenever ready (from anywhere - these
+   aren't pallet-specific, they export the whole shared batch at once),
+   uploads the attached CSV on that platform, then once it actually shows
+   those listings live, taps **Confirm Listed** right on that item's card
+   in `#pending-ebay-upload`/`#pending-fb-marketplace-upload` (or runs
+   `/ebay confirm-listed`/`/fb-marketplace confirm-listed` to confirm every
+   pending item in one pallet at once) to move it into `#listed`.
 9. However it got there, `#listed` items get a **Mark as Sold** button - one
    click, no price prompt.
 10. **Finance Management** runs `/finance record-sale` (in that pallet's
@@ -675,21 +687,24 @@ UI after a restart (a Discord client caching quirk, not a bug here).
 - `/ebay batches` - lists recent batches with how many items in each are
   still waiting on a result. `/ebay batch <batch_id>` shows one batch's
   still-pending items.
-- `/ebay confirm-listed [item_number]` - run inside a pallet's category.
-  The fully-manual fallback to `/ebay import-results`: confirms that item
-  (or, with no `item_number`, every item in that pallet still waiting)
-  actually went live on eBay, moving it from `#pending-ebay-upload` to
-  `#listed`, for anyone who'd rather just check Seller Hub directly than
-  download/upload a results CSV.
+- `/ebay confirm-listed [item_number]` - run inside a pallet's category
+  (needed for the bulk mode: confirms every pending item in that pallet at
+  once, since item numbers aren't unique across pallets). The fully-manual
+  fallback to `/ebay import-results`: confirms that item actually went live
+  on eBay, moving it from `#pending-ebay-upload` to `#listed`. For a single
+  item, tapping **Confirm Listed** right on its card in
+  `#pending-ebay-upload` does the same thing without needing pallet
+  context - no reason to leave the shared channel for one item.
 - `/fb-marketplace export-batch` - downloads the accumulated FB Marketplace
   CSV batch as a Discord attachment and archives + clears it so the next
   **Add to FB Marketplace Batch** click starts a fresh file - see "FB
   Marketplace CSV format" above.
 - `/fb-marketplace confirm-listed [item_number]` - run inside a pallet's
-  category. The only way to move an item out of
-  `#pending-fb-marketplace-upload`: confirms that item (or, with no
-  `item_number`, every item in that pallet still waiting) actually went
-  live on Facebook, moving it to `#listed`. There's no results-CSV
+  category (same bulk-mode reasoning as `/ebay confirm-listed` above).
+  Confirms an item (or, with no `item_number`, every item in that pallet
+  still waiting) actually went live on Facebook, moving it to `#listed` -
+  or tap **Confirm Listed** on its card in `#pending-fb-marketplace-upload`
+  for a single item without leaving the shared channel. There's no results-CSV
   reconciliation equivalent to `/ebay import-results` here - Facebook
   doesn't give one back.
 - `/pirate-ship export-batch` - exports every sold item on a non-eBay
@@ -797,9 +812,10 @@ network calls), the credit-card charge → pallet allocation workflow and
 awaiting-pallet-charge claiming (cogs/finance.py, cogs/pallet_setup.py),
 `pirate_ship_import.py`'s flexible CSV column-scanning, the new financial
 reporting queries (cost-by-type breakdown, month-to-date spend/revenue,
-pallet in-progress/sold-out counts, the auto-flag early warnings), the FB
-Marketplace batch/confirm-listed workflow (cogs/item_flow.py,
-cogs/fb_marketplace.py), `discord_resilience.py`'s exception coverage
+pallet in-progress/sold-out counts, the auto-flag early warnings, pending
+sale value), the FB Marketplace batch/confirm-listed workflow
+(cogs/item_flow.py, cogs/fb_marketplace.py) and its per-card **Confirm
+Listed** buttons (both eBay and FB Marketplace), `discord_resilience.py`'s exception coverage
 (including the exact DNS-failure class that exposed the bug it fixes), and
 a regression guard that fails if a `discord.ui.SelectOption` in
 `cogs/item_flow.py` is ever

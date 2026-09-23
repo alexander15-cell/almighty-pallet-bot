@@ -701,6 +701,90 @@ class QueueReviewView(discord.ui.View):
         await cog.reject_to_data_entry(interaction, self.item_id)
 
 
+class ConfirmEbayListedButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pallet_bot:confirm_ebay_listed:(?P<item_id>\d+)"):
+    """
+    Lets Listing Management confirm an item actually went live on eBay
+    directly from its card in the shared #pending-ebay-upload channel - a
+    DynamicItem (discord.py 2.4+, same pattern as cogs/finance.py's
+    AllocateChargeButton) rather than a plain view button so it keeps
+    working across bot restarts, keyed only by item_id in its custom_id.
+
+    Added because /ebay confirm-listed requires running inside that
+    specific pallet's own channel (item numbers aren't unique across
+    pallets, so the command needs that context to know which item #3 you
+    mean) - awkward when standing in a shared channel full of cards from
+    many different pallets at once and just wanting to confirm the one in
+    front of you. The slash command still works too, for bulk (confirm
+    every pending item in one pallet at once) - this button is the
+    one-at-a-time, "I'm already looking at this card" shortcut.
+    """
+
+    def __init__(self, item_id: int):
+        super().__init__(discord.ui.Button(
+            label="Confirm Listed", style=discord.ButtonStyle.green, emoji="✅",
+            custom_id=f"pallet_bot:confirm_ebay_listed:{item_id}",
+        ))
+        self.item_id = item_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: dict):
+        return cls(int(match["item_id"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
+        if not await cog._require_role(interaction, config.ROLE_LISTING_MGMT):
+            return
+        item = db.get_item(self.item_id)
+        if not item or item["status"] != db.STATUS_PENDING_EBAY_UPLOAD:
+            await interaction.response.send_message(
+                "This item isn't waiting on an eBay batch upload anymore.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        moved = await cog.confirm_ebay_pending_item(item, actor_id=interaction.user.id)
+        await finance_utils.refresh_finance_message(interaction.client, item["pallet_id"])
+        await interaction.followup.send(
+            "✅ Confirmed live on eBay. Moved to Listed." if moved
+            else "Couldn't confirm (status changed under us) - try again.",
+            ephemeral=True,
+        )
+
+
+class ConfirmFbMarketplaceListedButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pallet_bot:confirm_fb_listed:(?P<item_id>\d+)"):
+    """FB Marketplace counterpart to ConfirmEbayListedButton above - same
+    reasoning, same shape."""
+
+    def __init__(self, item_id: int):
+        super().__init__(discord.ui.Button(
+            label="Confirm Listed", style=discord.ButtonStyle.green, emoji="✅",
+            custom_id=f"pallet_bot:confirm_fb_listed:{item_id}",
+        ))
+        self.item_id = item_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: dict):
+        return cls(int(match["item_id"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
+        if not await cog._require_role(interaction, config.ROLE_LISTING_MGMT):
+            return
+        item = db.get_item(self.item_id)
+        if not item or item["status"] != db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD:
+            await interaction.response.send_message(
+                "This item isn't waiting on an FB Marketplace batch upload anymore.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        moved = await cog.confirm_fb_marketplace_pending_item(item, actor_id=interaction.user.id)
+        await finance_utils.refresh_finance_message(interaction.client, item["pallet_id"])
+        await interaction.followup.send(
+            "✅ Confirmed live on FB Marketplace. Moved to Listed." if moved
+            else "Couldn't confirm (status changed under us) - try again.",
+            ephemeral=True,
+        )
+
+
 class AwaitingListingView(discord.ui.View):
     """
     Four ways an approved item actually gets listed:
@@ -776,6 +860,7 @@ class ItemFlow(commands.Cog):
 
     async def cog_load(self):
         self.stale_check_loop.start()
+        self.bot.add_dynamic_items(ConfirmEbayListedButton, ConfirmFbMarketplaceListedButton)
 
     def cog_unload(self):
         self.stale_check_loop.cancel()
@@ -1190,11 +1275,13 @@ class ItemFlow(commands.Cog):
 
         pallet_id = item["pallet_id"]
         channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "pending-ebay-upload"))
+        pending_view = discord.ui.View(timeout=None)
+        pending_view.add_item(ConfirmEbayListedButton(item_id))
         msg = await send_item_card(
-            channel, item,
+            channel, item, view=pending_view,
             extra_text="🛒 Added to the eBay CSV batch - waiting for someone to run "
-                       "/ebay export-batch, upload it in Seller Hub, then confirm with "
-                       "/ebay confirm-listed.",
+                       "/ebay export-batch, upload it in Seller Hub, then tap **Confirm Listed** "
+                       "below once it's live.",
         )
         db.update_status(item_id, db.STATUS_PENDING_EBAY_UPLOAD, actor_id=interaction.user.id, new_message_id=msg.id)
         try:
@@ -1235,11 +1322,13 @@ class ItemFlow(commands.Cog):
 
         pallet_id = item["pallet_id"]
         channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "pending-fb-marketplace-upload"))
+        pending_view = discord.ui.View(timeout=None)
+        pending_view.add_item(ConfirmFbMarketplaceListedButton(item_id))
         msg = await send_item_card(
-            channel, item,
+            channel, item, view=pending_view,
             extra_text="📘 Added to the FB Marketplace CSV batch - waiting for someone to run "
-                       "/fb-marketplace export-batch, upload it to Facebook, then confirm with "
-                       "/fb-marketplace confirm-listed.",
+                       "/fb-marketplace export-batch, upload it to Facebook, then tap **Confirm "
+                       "Listed** below once it's live.",
         )
         db.update_status(
             item_id, db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD, actor_id=interaction.user.id, new_message_id=msg.id
