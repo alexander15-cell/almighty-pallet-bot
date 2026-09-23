@@ -3,22 +3,22 @@ Admin-only management commands: deleting a single item, archiving a finished
 pallet (removes its Discord channels but keeps all data), listing pallets,
 a full database wipe, and local backups (see backup.py).
 
-Every command here requires the "Pallet Admin" role. /db-wipe additionally
-requires the caller to hold real Discord Administrator permission on the
-server, as a second, harder-to-grant safety layer on top of the bot's own
-role system, since wiping the database is irreversible.
+Every command here requires the "Pallet Admin" role. /admin db-wipe
+additionally requires the caller to hold real Discord Administrator
+permission on the server, as a second, harder-to-grant safety layer on top
+of the bot's own role system, since wiping the database is irreversible.
 
-/backup-now and /backups only ever create or list backups - restoring one
-is deliberately CLI-only (`python backup.py restore ...`, run with the bot
-stopped), not a Discord command, since it's the one operation here that can
-put stale data back in place of current data.
+/admin backup-now and /admin backups only ever create or list backups -
+restoring one is deliberately CLI-only (`python backup.py restore ...`, run
+with the bot stopped), not a Discord command, since it's the one operation
+here that can put stale data back in place of current data.
 
-/bind-role, /unbind-role, /role-bindings - optional role-ID bindings (see
-runtime_settings.py). Every permission check normally matches a role by
-NAME (e.g. "Pallet Admin"), which breaks if that role gets renamed in
-Discord; binding it to its actual role ID here makes that check survive a
-rename. Purely optional and editable at runtime - an unbound role just
-keeps matching by name like today.
+/admin bind-role, /admin unbind-role, /admin role-bindings - optional
+role-ID bindings (see runtime_settings.py). Every permission check normally
+matches a role by NAME (e.g. "Pallet Admin"), which breaks if that role gets
+renamed in Discord; binding it to its actual role ID here makes that check
+survive a rename. Purely optional and editable at runtime - an unbound role
+just keeps matching by name like today.
 """
 import asyncio
 import logging
@@ -94,7 +94,7 @@ class ConfirmWipeModal(discord.ui.Modal, title="⚠️ Confirm Full Database Wip
     async def on_submit(self, interaction: discord.Interaction):
         if self.confirmation.value.strip() != config.DB_WIPE_CONFIRMATION_PHRASE:
             await interaction.response.send_message(
-                "Text didn't match exactly. Nothing was deleted. Run `/db-wipe` again if you're sure.",
+                "Text didn't match exactly. Nothing was deleted. Run `/admin db-wipe` again if you're sure.",
                 ephemeral=True,
             )
             return
@@ -161,6 +161,7 @@ class AdminTools(commands.Cog):
 
     item_group = app_commands.Group(name="item", description="Admin item management")
     pallet_group = app_commands.Group(name="pallet", description="Admin pallet management")
+    admin_group = app_commands.Group(name="admin", description="Admin utilities: backups, role bindings, database wipe")
 
     @tasks.loop(hours=config.BACKUP_INTERVAL_HOURS)
     async def backup_loop(self):
@@ -315,7 +316,7 @@ class AdminTools(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="db-wipe", description="⚠️ DANGER: permanently erase ALL pallet/item data and delete every pallet channel.")
+    @admin_group.command(name="db-wipe", description="⚠️ DANGER: permanently erase ALL pallet/item data and delete every pallet channel.")
     @app_commands.checks.has_permissions(administrator=True)
     async def db_wipe(self, interaction: discord.Interaction):
         if not await _require_admin(interaction):
@@ -338,7 +339,7 @@ class AdminTools(commands.Cog):
         else:
             raise error
 
-    @app_commands.command(name="backup-now", description="Create a verified local backup of the database, photos, and CSV archives right now.")
+    @admin_group.command(name="backup-now", description="Create a verified local backup of the database, photos, and CSV archives right now.")
     async def backup_now(self, interaction: discord.Interaction):
         if not await _require_admin(interaction):
             return
@@ -351,7 +352,7 @@ class AdminTools(commands.Cog):
             return
         await interaction.followup.send(f"✅ Backup created and verified: `{path.name}`", ephemeral=True)
 
-    @app_commands.command(name="backups", description="List recent local backups.")
+    @admin_group.command(name="backups", description="List recent local backups.")
     async def backups(self, interaction: discord.Interaction):
         if not await _require_admin(interaction):
             return
@@ -377,7 +378,7 @@ class AdminTools(commands.Cog):
         embed.set_footer(text=f"Showing {min(len(files), 15)} of {len(files)}. Kept up to {config.BACKUP_KEEP_COUNT} snapshots / {config.BACKUP_MAX_AGE_DAYS} days.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="bind-role", description="Bind one of this bot's roles to a specific Discord role, so a future rename doesn't break it.")
+    @admin_group.command(name="bind-role", description="Bind one of this bot's roles to a specific Discord role, so a future rename doesn't break it.")
     @app_commands.describe(role_name="Which of this bot's roles to bind", role="The actual Discord role to bind it to")
     @app_commands.choices(role_name=_ROLE_NAME_CHOICES)
     async def bind_role(self, interaction: discord.Interaction, role_name: app_commands.Choice[str], role: discord.Role):
@@ -391,7 +392,7 @@ class AdminTools(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="unbind-role", description="Remove a role-ID binding, reverting to matching that role by name.")
+    @admin_group.command(name="unbind-role", description="Remove a role-ID binding, reverting to matching that role by name.")
     @app_commands.describe(role_name="Which of this bot's roles to unbind")
     @app_commands.choices(role_name=_ROLE_NAME_CHOICES)
     async def unbind_role(self, interaction: discord.Interaction, role_name: app_commands.Choice[str]):
@@ -404,7 +405,7 @@ class AdminTools(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="role-bindings", description="List which of this bot's roles are bound to a specific Discord role ID.")
+    @admin_group.command(name="role-bindings", description="List which of this bot's roles are bound to a specific Discord role ID.")
     async def role_bindings(self, interaction: discord.Interaction):
         if not await _require_admin(interaction):
             return

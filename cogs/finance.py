@@ -1,10 +1,10 @@
 """
 Purchase Management and Finance Management commands.
 
-/setprice - Purchase Management, Finance Management, or Pallet Admin can set
-            a pallet's total cost. Usable more than once (later calls just
-            overwrite it), so Purchase can also use it to correct a mistake
-            without needing Finance's help for that specific case.
+/finance setprice - Purchase Management, Finance Management, or Pallet Admin
+            can set a pallet's total cost. Usable more than once (later calls
+            just overwrite it), so Purchase can also use it to correct a
+            mistake without needing Finance's help for that specific case.
 
 /finance record-sale       - Finance Management or Admin. Records (or
                               corrects) an item's actual sale price and
@@ -188,7 +188,7 @@ class Finance(commands.Cog):
 
     finance_group = app_commands.Group(name="finance", description="Finance Management commands")
 
-    @app_commands.command(name="setprice", description="Set this pallet's total cost. Run inside that pallet's category.")
+    @finance_group.command(name="setprice", description="Set this pallet's total cost. Run inside that pallet's category.")
     @app_commands.describe(cost="Total amount paid for the pallet")
     async def setprice(self, interaction: discord.Interaction, cost: float):
         if not await _require_any_role(interaction, [config.ROLE_PURCHASE_MGMT, config.ROLE_FINANCE_MGMT]):

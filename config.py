@@ -85,7 +85,7 @@ PER_PALLET_CHANNELS = [
     "data-entry",
 ]
 
-# Created ONCE for the whole server (via /setup-shared-channels), shared by
+# Created ONCE for the whole server (via /setup shared-channels), shared by
 # every pallet. An item's embed always shows which pallet it belongs to.
 SHARED_STAGE_CHANNELS = [
     "automated-review",
@@ -98,10 +98,16 @@ SHARED_STAGE_CHANNELS = [
 ]
 SHARED_PIPELINE_CATEGORY_NAME = "Shared Pallet Pipeline"
 
+# A read-only orientation channel explaining how this bot works, posted by
+# /setup info-channel (see information_content.py) - created in the same
+# shared category as the pipeline stage channels, but visible to @everyone
+# regardless of role, since it's meant for anyone new to read before asking.
+INFORMATION_CHANNEL_NAME = "information"
+
 # Full pipeline order, per-pallet + shared combined, in the order an item
 # actually moves through them. Used wherever code needs "all stages" (the
 # NewPalletModal only creates PER_PALLET_CHANNELS itself - shared ones must
-# already exist via /setup-shared-channels).
+# already exist via /setup shared-channels).
 STAGE_CHANNELS = ["data-entry"] + SHARED_STAGE_CHANNELS
 
 # ---- Role names. Create these roles in your server ahead of time. ----

@@ -25,7 +25,7 @@ def build_finance_embed(pallet: dict, fin: dict) -> discord.Embed:
     if fin["cost"] is not None:
         embed.add_field(name="Pallet Cost", value=f"${fin['cost']:.2f}", inline=True)
     else:
-        embed.add_field(name="Pallet Cost", value="Not set - use /setprice", inline=True)
+        embed.add_field(name="Pallet Cost", value="Not set - use /finance setprice", inline=True)
 
     received_label = "Items Received"
     received_value = str(fin["items_received"])
@@ -62,7 +62,7 @@ def build_finance_embed(pallet: dict, fin: dict) -> discord.Embed:
             inline=True,
         )
     else:
-        embed.add_field(name="Profit / Loss", value="Set a cost with /setprice to see this", inline=True)
+        embed.add_field(name="Profit / Loss", value="Set a cost with /finance setprice to see this", inline=True)
 
     if fin["cost_recovery_pct"] is not None:
         bar_filled = min(int(fin["cost_recovery_pct"] // 10), 10)

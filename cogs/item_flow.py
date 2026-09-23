@@ -856,7 +856,7 @@ class ItemFlow(commands.Cog):
         if automated_review_channel is None:
             await message.channel.send(
                 "⚠️ The shared Automated Review channel isn't set up yet - ask a Pallet Admin "
-                "to run `/setup-shared-channels`. This item was logged but won't move further "
+                "to run `/setup shared-channels`. This item was logged but won't move further "
                 "until that's done.",
             )
             return

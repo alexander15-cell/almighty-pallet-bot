@@ -1,7 +1,7 @@
 """
 Handles two things:
 
-1. /setup-shared-channels (admin, run ONCE ever): creates the shared pipeline
+1. /setup shared-channels (admin, run ONCE ever): creates the shared pipeline
    category and its 6 channels (automated-review, queue-review, etc.), used
    by every pallet. Each channel gets its topic set and an explanatory
    message pinned, so anyone new can open a channel and understand it
@@ -14,7 +14,7 @@ Handles two things:
    count from scaling with the number of pallets.
 
 No cost/price fields live in the pallet-creation modal - Purchase Management
-sets cost afterward with /setprice (see cogs/finance.py).
+sets cost afterward with /finance setprice (see cogs/finance.py).
 """
 import discord
 from discord import app_commands
@@ -23,6 +23,7 @@ from discord.ext import commands
 import config
 import database as db
 import finance_utils
+import information_content
 
 
 def role_overwrites(guild: discord.Guild, allowed_role_names: list[str]) -> dict:
@@ -67,7 +68,7 @@ class NewPalletView(discord.ui.View):
         if not db.is_shared_channels_setup():
             await interaction.response.send_message(
                 "The shared pipeline channels haven't been set up yet. Ask a Pallet Admin "
-                "to run `/setup-shared-channels` once, first.",
+                "to run `/setup shared-channels` once, first.",
                 ephemeral=True,
             )
             return
@@ -150,8 +151,10 @@ class PalletSetup(commands.Cog):
         # Register the persistent view so the button keeps working across restarts
         self.bot.add_view(NewPalletView())
 
-    @app_commands.command(
-        name="setup-hub",
+    setup_group = app_commands.Group(name="setup", description="One-time server setup commands")
+
+    @setup_group.command(
+        name="hub",
         description="Post the 'Start New Pallet' button in this channel (run once, in #new-pallet-tracking).",
     )
     @app_commands.checks.has_permissions(administrator=True)
@@ -171,8 +174,8 @@ class PalletSetup(commands.Cog):
         await interaction.channel.send(embed=embed, view=NewPalletView())
         await interaction.response.send_message("Hub message posted.", ephemeral=True)
 
-    @app_commands.command(
-        name="setup-shared-channels",
+    @setup_group.command(
+        name="shared-channels",
         description="One-time setup: creates the shared pipeline channels used by every pallet.",
     )
     @app_commands.checks.has_permissions(administrator=True)
@@ -218,6 +221,53 @@ class PalletSetup(commands.Cog):
             + ", ".join(f"#{c}" for c in created),
             ephemeral=True,
         )
+
+    @setup_group.command(
+        name="info-channel",
+        description="Post (or refresh) a guide to how this bot works in #information.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def setup_info_channel(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild = interaction.guild
+
+        category = discord.utils.get(guild.categories, name=config.SHARED_PIPELINE_CATEGORY_NAME)
+        if category is None:
+            category = await guild.create_category(name=config.SHARED_PIPELINE_CATEGORY_NAME)
+
+        channel = discord.utils.get(category.channels, name=config.INFORMATION_CHANNEL_NAME)
+        if channel is None:
+            # Visible to everyone regardless of role (it's meant to be read
+            # before asking), but read-only - only Pallet Admin can post,
+            # so the guide can't be buried under chat.
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+            }
+            admin_role = discord.utils.get(guild.roles, name=config.ROLE_ADMIN)
+            if admin_role:
+                overwrites[admin_role] = discord.PermissionOverwrite(
+                    view_channel=True, send_messages=True, manage_messages=True
+                )
+            channel = await guild.create_text_channel(
+                name=config.INFORMATION_CHANNEL_NAME, category=category, overwrites=overwrites,
+                topic="How Almighty Pallet Bot works and how to use it.",
+            )
+        else:
+            # Re-running this command refreshes the guide rather than piling
+            # up duplicates - clear this bot's own previous messages first
+            # (anything anyone else posted is left alone, though the channel
+            # is read-only so that should be rare).
+            async for msg in channel.history(limit=200):
+                if msg.author == interaction.client.user:
+                    try:
+                        await msg.delete()
+                    except discord.HTTPException:
+                        pass
+
+        for embed in information_content.build_embeds():
+            await channel.send(embed=embed)
+
+        await interaction.followup.send(f"✅ Posted the bot guide in {channel.mention}.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

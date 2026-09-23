@@ -15,12 +15,12 @@ Item status values (stored as plain strings, see STATUS_* constants):
     data_entry -> automated_review -> queue_review -> awaiting_listing
         -> listed -> sold -> shipped
     (an item can also be sent back to data_entry from queue_review if rejected,
-    or removed entirely via /item-delete, which sets status to "deleted"
+    or removed entirely via /item delete, which sets status to "deleted"
     rather than actually removing the row - so the audit trail survives)
 
 Note: pallet cost and item sale price ARE tracked here again (Purchase
-Management sets cost via /setprice, Finance Management records sale prices
-via /finance record-sale) - this is a deliberate reversal of an earlier
+Management sets cost via /finance setprice, Finance Management records sale
+prices via /finance record-sale) - this is a deliberate reversal of an earlier
 decision to keep pricing out of Discord entirely. The difference this time:
 recording a sale price is fully decoupled from the operational "Mark as
 Sold" button, so warehouse-side clicking stays instant - only Finance
@@ -43,7 +43,7 @@ STATUS_LISTED = "listed"
 STATUS_SOLD = "sold"
 STATUS_SHIPPED = "shipped"
 STATUS_REJECTED = "rejected"  # sent back to data entry for redo
-STATUS_DELETED = "deleted"    # soft-deleted via /item-delete - row kept for audit trail
+STATUS_DELETED = "deleted"    # soft-deleted via /item delete - row kept for audit trail
 
 
 def _now() -> str:
@@ -142,7 +142,7 @@ def init_db():
             );
 
             -- One row per stage in config.SHARED_STAGE_CHANNELS. Created once
-            -- via /setup-shared-channels and used by every pallet, instead of
+            -- via /setup shared-channels and used by every pallet, instead of
             -- each pallet getting its own copy of these channels (keeps total
             -- channel count from scaling with the number of pallets).
             CREATE TABLE IF NOT EXISTS shared_channels (
@@ -502,7 +502,7 @@ def resubmit_item(item_id: int, raw_description: str, photo_urls: list, submitte
 
 def soft_delete_item(item_id: int, actor_id: int):
     """
-    Used by /item-delete. Keeps the row (and its full item_events history)
+    Used by /item delete. Keeps the row (and its full item_events history)
     but marks it deleted, so admin cleanup never silently erases audit trail.
     Does not touch Discord - the caller is responsible for deleting the
     actual message, since that requires knowing which channel it's in.

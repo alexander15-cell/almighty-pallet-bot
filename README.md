@@ -102,7 +102,7 @@ Two new roles handle cost/profit tracking **completely separately** from the
 Data Entry → Sold pipeline, so nobody doing warehouse work ever has to stop
 and type a number:
 
-- **Purchase Management** sets a pallet's total cost with `/setprice`.
+- **Purchase Management** sets a pallet's total cost with `/finance setprice`.
 - **Finance Management** does everything Purchase can, plus:
   - `/finance record-sale` - records (or corrects) an item's actual sale
     price + platform, whenever the price is actually known. Not tied to the
@@ -239,13 +239,29 @@ Once it's running and logged in, run these slash commands **once, in this
 order**:
 
 ```
-/setup-shared-channels    (in any channel - creates the shared pipeline category/channels)
-/setup-hub                (in #new-pallet-tracking - posts the Start New Pallet button)
+/setup shared-channels    (in any channel - creates the shared pipeline category/channels)
+/setup hub                (in #new-pallet-tracking - posts the Start New Pallet button)
+/setup info-channel       (in any channel - creates #information with a guide to the bot)
 ```
 
-`/setup-shared-channels` must be run before anyone clicks **Start New
+`/setup shared-channels` must be run before anyone clicks **Start New
 Pallet** - the button will refuse and tell you to run it first if you
-forget.
+forget. `/setup info-channel` is optional but recommended - see
+"The #information channel" below.
+
+### The #information channel
+
+`/setup info-channel` creates (or reuses) a read-only **#information**
+channel - visible to everyone regardless of role, but only a Pallet Admin
+can post in it - and posts a multi-part guide (`information_content.py`)
+covering what the bot does, the pipeline stage by stage, what each role can
+do, and every slash command grouped by category (`/ebay`, `/finance`,
+`/pirate-ship`, pallet/item management, `/admin`/`/setup`). Point anyone new
+at it before they ask "how does this work?" in chat.
+
+Safe to re-run any time - it clears its own previous guide messages first
+(anything anyone else posted is left alone) and reposts fresh, so running it
+again after a feature change keeps the guide accurate.
 
 ### Running without AI review
 
@@ -390,11 +406,11 @@ UI after a restart (a Discord client caching quirk, not a bug here).
 
 ## 3. How to use it day to day
 
-1. A Pallet Admin runs `/setup-shared-channels` once, ever (skip if already done).
+1. A Pallet Admin runs `/setup shared-channels` once, ever (skip if already done).
 2. Anyone clicks **Start New Pallet** in `#new-pallet-tracking`, enters a
    name (e.g. `Pallet-2026-014`) and optional notes. This creates
    `#pallet-discussion` (with the pinned live status card) and `#data-entry`.
-3. **Purchase Management** runs `/setprice` inside the new pallet's category
+3. **Purchase Management** runs `/finance setprice` inside the new pallet's category
    to record what was paid.
 4. **Data Entry** posts one message per item in that pallet's `#data-entry`:
    attach photo(s), type a short note in the same message, send. The card
@@ -460,7 +476,7 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   pallet's own category is gone.
 - `/pallet list [include_archived]` - shows every pallet with item counts by
   stage and active/archived status.
-- `/db-wipe` - **irreversible.** Requires both the Pallet Admin role AND real
+- `/admin db-wipe` - **irreversible.** Requires both the Pallet Admin role AND real
   Discord Administrator permission on the server (two independent locks).
   Opens a form requiring you to type `DELETE EVERYTHING` exactly. On
   confirmation: deletes every pallet's category/channels, purges messages
@@ -524,10 +540,10 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   else Automated Review's AI estimate; still left blank for items that
   predate both. eBay sales are never included - Pirate Ship pulls those
   directly via its own native eBay integration.
-- `/backup-now` - creates and verifies a local backup immediately (see
-  "Backups" below); `/backups` lists recent ones with size and age.
-- `/bind-role <role_name> <role>` / `/unbind-role <role_name>` /
-  `/role-bindings` - optional role-ID bindings (see "Role bindings" below),
+- `/admin backup-now` - creates and verifies a local backup immediately (see
+  "Backups" below); `/admin backups` lists recent ones with size and age.
+- `/admin bind-role <role_name> <role>` / `/admin unbind-role <role_name>` /
+  `/admin role-bindings` - optional role-ID bindings (see "Role bindings" below),
   editable live from Discord, no restart needed.
 - `/pirate-ship purge-buyer-data [days] [confirm]` - previews (default) or,
   with `confirm:True`, clears recipient name/address from shipped items
@@ -541,13 +557,13 @@ UI after a restart (a Discord client caching quirk, not a bug here).
 
 By default every permission check matches a role by **name** (e.g. a role
 literally called "Pallet Admin") - simple, no setup needed, but it breaks
-if that role ever gets renamed in Discord. `/bind-role <role_name> <role>`
+if that role ever gets renamed in Discord. `/admin bind-role <role_name> <role>`
 binds one of this bot's six roles (Data Entry, Queue Review, Listing
 Management, Purchase Management, Finance Management, Pallet Admin) to a
 specific Discord role's ID instead, so a rename no longer matters. This is
 entirely optional, takes effect immediately (no restart), and is stored in
-`SETTINGS_PATH` (default `data/settings.json`) - `/unbind-role` reverts to
-matching by name, and `/role-bindings` shows the current state. If a bound
+`SETTINGS_PATH` (default `data/settings.json`) - `/admin unbind-role` reverts to
+matching by name, and `/admin role-bindings` shows the current state. If a bound
 role is later deleted, checks for it automatically fall back to matching
 by name again rather than breaking outright.
 
@@ -620,7 +636,7 @@ Tables:
   archive status, and the pinned finance message ID
 - **channel_map** - per-pallet channel IDs (discussion, data-entry only)
 - **shared_channels** - the one-row-per-stage mapping for the shared
-  pipeline channels, set once by `/setup-shared-channels`
+  pipeline channels, set once by `/setup shared-channels`
 - **items** - one row per physical item: status, AI-generated text (including
   its suggested eBay category name and rough price estimate), sale
   price/platform, non-eBay shipping recipient/address, local + R2 public
@@ -668,7 +684,7 @@ this scale.
 - **Double-click protection** - each stage-advancing action checks the
   item's current status first, so near-simultaneous clicks get a clear
   "already moved on" message instead of duplicating anything.
-- **`/setup-shared-channels` is a one-time setup step.** If you ever need to
+- **`/setup shared-channels` is a one-time setup step.** If you ever need to
   move or recreate the shared channels, you'd need to update the
   `shared_channels` table manually (there's no command for this yet, since
   it should rarely be needed). If you're adding this after already running
