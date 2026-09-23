@@ -43,6 +43,7 @@ import discord_resilience
 import ebay_api
 import ebay_csv
 import ebay_taxonomy
+import fb_marketplace_csv
 import finance_utils
 import r2_storage
 import runtime_settings
@@ -702,19 +703,22 @@ class QueueReviewView(discord.ui.View):
 
 class AwaitingListingView(discord.ui.View):
     """
-    Three ways an approved item actually gets listed:
+    Four ways an approved item actually gets listed:
       - Add to eBay Batch: appends it to the CSV batch for eBay's Seller Hub
         bulk-upload tool (no API call) and moves it to pending-ebay-upload.
+      - Add to FB Marketplace Batch: same idea, for Facebook's own CSV bulk
+        listing tool - moves it to pending-fb-marketplace-upload.
       - List on eBay (API): the live direct-API path, only shown at all once
         config.EBAY_ENABLED is True (real eBay dev credentials are set).
-      - Mark Listed (Other): unchanged manual path for FB Marketplace/website/
-        anything else - moves straight to Listed.
+      - Mark Listed (Other): manual path for anywhere else entirely (a
+        website, in person, etc.) - moves straight to Listed.
     """
 
     def __init__(self, item_id: int):
         super().__init__(timeout=None)
         self.item_id = item_id
         self.add_to_batch.custom_id = f"pallet_bot:ebay_batch:{item_id}"
+        self.add_to_fb_batch.custom_id = f"pallet_bot:fb_marketplace_batch:{item_id}"
         self.list_via_api.custom_id = f"pallet_bot:ebay_api_list:{item_id}"
         self.mark_listed_other.custom_id = f"pallet_bot:mark_listed:{item_id}"
         if not config.EBAY_ENABLED:
@@ -724,6 +728,11 @@ class AwaitingListingView(discord.ui.View):
     async def add_to_batch(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
         await cog.add_to_ebay_batch(interaction, self.item_id)
+
+    @discord.ui.button(label="Add to FB Marketplace Batch", style=discord.ButtonStyle.blurple, emoji="📘")
+    async def add_to_fb_batch(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
+        await cog.add_to_fb_marketplace_batch(interaction, self.item_id)
 
     @discord.ui.button(label="List on eBay (API)", style=discord.ButtonStyle.gray, emoji="🔌")
     async def list_via_api(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -880,7 +889,7 @@ class ItemFlow(commands.Cog):
             try:
                 old_msg = await old_card_channel.fetch_message(resubmit_item["current_message_id"])
                 await old_msg.delete()
-            except (discord.NotFound, discord.HTTPException):
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
                 pass
         else:
             with db.get_conn() as conn:
@@ -1136,7 +1145,7 @@ class ItemFlow(commands.Cog):
             try:
                 old_msg = await old_channel.fetch_message(item["current_message_id"])
                 await old_msg.delete()
-            except (discord.NotFound, discord.HTTPException):
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
                 pass
 
         condition_label = config.EBAY_CONDITION_LABELS.get(condition_id, condition_id)
@@ -1188,9 +1197,59 @@ class ItemFlow(commands.Cog):
                        "/ebay confirm-listed.",
         )
         db.update_status(item_id, db.STATUS_PENDING_EBAY_UPLOAD, actor_id=interaction.user.id, new_message_id=msg.id)
-        await interaction.message.delete()
+        try:
+            await interaction.message.delete()
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+            pass
         await interaction.response.send_message(
             f"Added to the eBay batch CSV. Moved to <#{channel.id}> pending upload confirmation.",
+            ephemeral=True,
+        )
+        await finance_utils.refresh_finance_message(self.bot, pallet_id)
+
+    async def add_to_fb_marketplace_batch(self, interaction: discord.Interaction, item_id: int):
+        """'Add to FB Marketplace Batch' - the CSV path for Facebook's bulk
+        listing tool, mirroring add_to_ebay_batch above. Reuses the same
+        title/price captured for every approved item during Queue Review
+        (see database.save_ebay_listing_data's docstring - that data isn't
+        eBay-specific despite the table name)."""
+        if not await self._require_role(interaction, config.ROLE_LISTING_MGMT):
+            return
+        item = db.get_item(item_id)
+        if item["status"] != db.STATUS_AWAITING_LISTING:
+            await interaction.response.send_message(
+                f"This item was already moved on (current status: {item['status']}).", ephemeral=True
+            )
+            return
+        listing = db.get_ebay_listing_data(item_id)
+        if not listing:
+            await interaction.response.send_message(
+                "No listing data was captured for this item during Queue Review "
+                "(it may predate this feature). Use **Mark Listed (Other)** instead, or "
+                "have Queue Review re-approve it with the listing details filled in.",
+                ephemeral=True,
+            )
+            return
+
+        fb_marketplace_csv.append_item_to_batch(item, listing)
+
+        pallet_id = item["pallet_id"]
+        channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "pending-fb-marketplace-upload"))
+        msg = await send_item_card(
+            channel, item,
+            extra_text="📘 Added to the FB Marketplace CSV batch - waiting for someone to run "
+                       "/fb-marketplace export-batch, upload it to Facebook, then confirm with "
+                       "/fb-marketplace confirm-listed.",
+        )
+        db.update_status(
+            item_id, db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD, actor_id=interaction.user.id, new_message_id=msg.id
+        )
+        try:
+            await interaction.message.delete()
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+            pass
+        await interaction.response.send_message(
+            f"Added to the FB Marketplace batch CSV. Moved to <#{channel.id}> pending upload confirmation.",
             ephemeral=True,
         )
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
@@ -1274,7 +1333,7 @@ class ItemFlow(commands.Cog):
             try:
                 old_msg = await old_channel.fetch_message(item["current_message_id"])
                 await old_msg.delete()
-            except (discord.NotFound, discord.HTTPException):
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
                 pass
 
         listed_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
@@ -1282,6 +1341,36 @@ class ItemFlow(commands.Cog):
         extra = f"✅ Confirmed live on eBay from batch upload (item ID: {ebay_item_id})." if ebay_item_id \
             else "✅ Confirmed live on eBay from batch upload."
         msg = await send_item_card(listed_channel, item, view=view, extra_text=extra)
+        db.update_status(item["id"], db.STATUS_LISTED, actor_id=actor_id, new_message_id=msg.id)
+        return True
+
+    async def confirm_fb_marketplace_pending_item(self, item: dict, actor_id: int) -> bool:
+        """
+        Used by /fb-marketplace confirm-listed once an item from a CSV batch
+        is confirmed to have actually gone live on Facebook Marketplace (by
+        hand - Facebook doesn't give back a results file the way eBay's
+        Seller Hub does, so there's no automated-reconciliation counterpart
+        to /ebay import-results here). Moves it from
+        pending_fb_marketplace_upload straight to Listed. Returns False
+        (does nothing) if the item isn't actually pending anymore.
+        """
+        if item["status"] != db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD:
+            return False
+
+        pallet_id = item["pallet_id"]
+        old_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "pending-fb-marketplace-upload"))
+        if old_channel and item.get("current_message_id"):
+            try:
+                old_msg = await old_channel.fetch_message(item["current_message_id"])
+                await old_msg.delete()
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                pass
+
+        listed_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
+        view = ListedView(item["id"])
+        msg = await send_item_card(
+            listed_channel, item, view=view, extra_text="✅ Confirmed live on FB Marketplace from batch upload."
+        )
         db.update_status(item["id"], db.STATUS_LISTED, actor_id=actor_id, new_message_id=msg.id)
         return True
 
@@ -1362,7 +1451,7 @@ class ItemFlow(commands.Cog):
             footer_text = (all_embeds[0].footer.text or "") if all_embeds[0].footer else ""
             all_embeds[0].set_footer(text=footer_text + " — Shipped ✅")
             await interaction.message.edit(embeds=all_embeds, view=None)
-        except (discord.HTTPException, IndexError):
+        except (*discord_resilience.TRANSIENT_DISCORD_ERRORS, IndexError):
             pass
         await interaction.response.send_message("Marked shipped.", ephemeral=True)
         await finance_utils.refresh_finance_message(self.bot, item["pallet_id"])

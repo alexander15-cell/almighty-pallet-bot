@@ -19,9 +19,9 @@ Restore only ever writes into a NEW, empty destination directory - never
 into a live data directory - so a bad restore can't clobber a working
 installation. Stop the bot first; the restored directory has the same
 layout as config's data paths (pallet_tracker.db, photos/,
-ebay_batch_archive/, pirate_ship_exports/), so pointing DATABASE_PATH/
-PHOTO_DIR/etc at it (or renaming it to replace your data/ directory) is
-enough to bring a restored copy back online.
+ebay_batch_archive/, fb_marketplace_batch_archive/, pirate_ship_exports/),
+so pointing DATABASE_PATH/PHOTO_DIR/etc at it (or renaming it to replace
+your data/ directory) is enough to bring a restored copy back online.
 """
 import argparse
 import hashlib
@@ -41,6 +41,7 @@ import config
 _ARCHIVE_DIRS = {
     "photos": lambda: Path(config.PHOTO_DIR),
     "ebay_batch_archive": lambda: Path(config.EBAY_BATCH_ARCHIVE_DIR),
+    "fb_marketplace_batch_archive": lambda: Path(config.FB_MARKETPLACE_BATCH_ARCHIVE_DIR),
     "pirate_ship_exports": lambda: Path(config.PIRATE_SHIP_EXPORT_ARCHIVE_DIR),
 }
 _DB_ARCHIVE_NAME = "pallet_tracker.db"
@@ -206,8 +207,8 @@ def _cli():
         print(
             f"Restored into {result}. Stop the bot first if it's running. This directory has the "
             "same layout as your data/ folder (pallet_tracker.db, photos/, ebay_batch_archive/, "
-            "pirate_ship_exports/) - point DATABASE_PATH/PHOTO_DIR/etc at it, or move its contents "
-            "into your data/ directory, then restart the bot."
+            "fb_marketplace_batch_archive/, pirate_ship_exports/) - point DATABASE_PATH/PHOTO_DIR/etc "
+            "at it, or move its contents into your data/ directory, then restart the bot."
         )
 
 

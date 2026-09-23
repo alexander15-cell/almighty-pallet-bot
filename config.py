@@ -92,6 +92,7 @@ SHARED_STAGE_CHANNELS = [
     "queue-review",
     "awaiting-listing",
     "pending-ebay-upload",
+    "pending-fb-marketplace-upload",
     "listed",
     "sold",
     "10-day-alerts",
@@ -147,6 +148,7 @@ CHANNEL_ROLE_PERMISSIONS = {
     "queue-review": [ROLE_QUEUE_REVIEW],
     "awaiting-listing": [ROLE_LISTING_MGMT],
     "pending-ebay-upload": [ROLE_LISTING_MGMT],
+    "pending-fb-marketplace-upload": [ROLE_LISTING_MGMT],
     "listed": [ROLE_LISTING_MGMT],
     "sold": [ROLE_LISTING_MGMT],
     "10-day-alerts": [ROLE_LISTING_MGMT, ROLE_FINANCE_MGMT],
@@ -191,9 +193,9 @@ CHANNEL_INFO = {
     "awaiting-listing": (
         "**Listing Management role** works here. These items were approved in Queue Review "
         "(with eBay title/category/condition/price already captured). Click **Add to eBay "
-        "Batch** to append it to the CSV batch for eBay's bulk upload tool (or **List on eBay "
-        "(API)** if the direct API is enabled), or **Mark Listed (Other)** once you've listed "
-        "it manually elsewhere (FB Marketplace, website, etc.)."
+        "Batch** or **Add to FB Marketplace Batch** to append it to that platform's CSV batch "
+        "(or **List on eBay (API)** if the direct API is enabled), or **Mark Listed (Other)** "
+        "once you've listed it manually somewhere else entirely."
     ),
     "pending-ebay-upload": (
         "**Listing Management role** - view only, nothing to click here. Items land here after "
@@ -201,6 +203,14 @@ CHANNEL_INFO = {
         "waiting for someone to run `/ebay export-batch` and upload it in eBay Seller Hub. Once "
         "eBay actually shows them live, an admin runs `/ebay confirm-listed` to move them into "
         "#listed - there's no live API to detect that automatically."
+    ),
+    "pending-fb-marketplace-upload": (
+        "**Listing Management role** - view only, nothing to click here. Items land here after "
+        "**Add to FB Marketplace Batch** on an Awaiting Listing card. They're sitting in the CSV "
+        "batch waiting for someone to run `/fb-marketplace export-batch` and upload it to "
+        "Facebook's bulk listing tool. Once it's actually live, an admin runs "
+        "`/fb-marketplace confirm-listed` to move them into #listed - there's no API to detect "
+        "that automatically."
     ),
     "listed": (
         "**Listing Management role** works here. These items are currently live for "
@@ -275,7 +285,8 @@ ANTHROPIC_MODEL = "claude-sonnet-5"
 # currently have items in them. Must match the STATUS_* constants in database.py.
 STAGE_ORDER_FOR_STATUS = [
     "data_entry", "automated_review", "queue_review", "awaiting_listing",
-    "pending_ebay_upload", "listed", "sold", "shipped", "rejected", "deleted",
+    "pending_ebay_upload", "pending_fb_marketplace_upload", "listed", "sold", "shipped",
+    "rejected", "deleted",
 ]
 
 # ---- eBay (optional direct API path - see ebay_api.py) ----
@@ -337,6 +348,20 @@ EBAY_AUCTION_DURATIONS = [
 # like a ship-from location or a shipping service code apply here any more.
 EBAY_BATCH_CSV_PATH = os.getenv("EBAY_BATCH_CSV_PATH", "data/ebay_batch.csv")
 EBAY_BATCH_ARCHIVE_DIR = os.getenv("EBAY_BATCH_ARCHIVE_DIR", "data/ebay_batch_archive")
+
+# ---- Facebook Marketplace CSV batch (see fb_marketplace_csv.py) ----
+# Same accumulate-then-export shape as the eBay batch above: one row per item
+# added via "Add to FB Marketplace Batch" until an admin runs
+# /fb-marketplace export-batch, which hands it over as a Discord attachment
+# and archives + clears it so the next batch starts clean. Matches Facebook's
+# own bulk-listing CSV template (Title/Price/Description are the columns
+# Facebook's help docs list as required; Photo URL is added here too using
+# the same R2-hosted public photo links the eBay batch uses - a listing with
+# no photo isn't very sellable - but wasn't in Facebook's own required-column
+# list, so double check its header name against Facebook's real downloaded
+# template and rename it here if theirs differs).
+FB_MARKETPLACE_BATCH_CSV_PATH = os.getenv("FB_MARKETPLACE_BATCH_CSV_PATH", "data/fb_marketplace_batch.csv")
+FB_MARKETPLACE_BATCH_ARCHIVE_DIR = os.getenv("FB_MARKETPLACE_BATCH_ARCHIVE_DIR", "data/fb_marketplace_batch_archive")
 
 # Optional convenience values used ONLY by /ebay fill-recommendations (see
 # ebay_recommendations.py) to help fill in eBay's own RETURNED recommendations

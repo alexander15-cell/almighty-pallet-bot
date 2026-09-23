@@ -39,6 +39,7 @@ STATUS_AUTOMATED_REVIEW = "automated_review"
 STATUS_QUEUE_REVIEW = "queue_review"
 STATUS_AWAITING_LISTING = "awaiting_listing"
 STATUS_PENDING_EBAY_UPLOAD = "pending_ebay_upload"  # added to the eBay CSV batch, not yet confirmed live
+STATUS_PENDING_FB_MARKETPLACE_UPLOAD = "pending_fb_marketplace_upload"  # added to the FB Marketplace CSV batch, not yet confirmed live
 STATUS_LISTED = "listed"
 STATUS_SOLD = "sold"
 STATUS_SHIPPED = "shipped"
@@ -609,7 +610,8 @@ def get_item_by_pallet_and_number(pallet_id: int, item_number: int):
 
 
 def get_items_by_status_for_pallet(pallet_id: int, status: str):
-    """Used by /ebay confirm-listed's bulk (whole-pallet) mode."""
+    """Used by /ebay confirm-listed and /fb-marketplace confirm-listed's
+    bulk (whole-pallet) mode."""
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM items WHERE pallet_id = ? AND status = ? ORDER BY item_number",
@@ -695,6 +697,23 @@ def get_unbatched_pending_items():
         rows = conn.execute(
             "SELECT * FROM items WHERE status = ? AND ebay_batch_id IS NULL ORDER BY pallet_id, item_number",
             (STATUS_PENDING_EBAY_UPLOAD,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_items_pending_fb_marketplace_upload():
+    """
+    Items currently sitting in pending_fb_marketplace_upload, waiting on
+    someone to run /fb-marketplace export-batch and upload the CSV to
+    Facebook. Unlike the eBay path, there's no numbered-batch/results-
+    reconciliation tracking here (not asked for) - just the live list of
+    what's in the not-yet-exported CSV, mirroring exactly what
+    fb_marketplace_csv.py's accumulating file already contains.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM items WHERE status = ? ORDER BY pallet_id, item_number",
+            (STATUS_PENDING_FB_MARKETPLACE_UPLOAD,),
         ).fetchall()
         return [dict(r) for r in rows]
 

@@ -29,6 +29,7 @@ COGS = [
     "cogs.admin_tools",
     "cogs.finance",
     "cogs.ebay",
+    "cogs.fb_marketplace",
     "cogs.pirate_ship",
 ]
 

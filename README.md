@@ -207,18 +207,17 @@ not built without an explicit spec).
   this to a server that already ran that command before this feature
   existed - it only creates whatever's still missing.
 
-## Important limitation: no Vendoo API, and eBay has two paths
+## Important limitation: no Vendoo API, and eBay/FB Marketplace both use CSV batches
 
-Vendoo does not offer a public developer API, so this bot **cannot** push a
-listing into Vendoo automatically - use **Mark Listed (Other)** for those
-(and FB Marketplace, website, or anywhere else) after listing manually.
-
-eBay is different: this bot ships with a CSV batch fallback (**Add to eBay
-Batch**, matching eBay's newer AI-prefill bulk listing template) that works
-today with no API access at all, plus a direct-API path (**List on eBay
-(API)**) that's wired in but stubbed out (see `ebay_api.py`) until the
-eBay developer API application is approved - see "Running without the
-eBay API" below.
+Neither eBay nor Facebook Marketplace offer a listing-creation API this bot
+can call directly (Vendoo doesn't offer one at all) - **Add to eBay Batch**
+and **Add to FB Marketplace Batch** both work by accumulating a CSV and
+handing it to each platform's own bulk-upload tool instead. Both are the
+primary path today. eBay additionally has a direct-API path (**List on eBay
+(API)**) that's wired in but stubbed out (see `ebay_api.py`) until the eBay
+developer API application is approved - see "Running without the eBay API"
+below. **Mark Listed (Other)** is the manual fallback for anywhere else
+entirely (a website, in person, etc.) after listing by hand.
 
 ---
 
@@ -451,6 +450,38 @@ re-saving them) - the data itself is unaffected, but a cell without its
 dropdown UI anymore just needs a value typed directly if you want to
 change it. Macros are preserved.
 
+### FB Marketplace CSV format
+
+The FB Marketplace batch CSV (`fb_marketplace_csv.py`) matches Facebook's
+own "Use a spreadsheet for multiple listings on Facebook Marketplace" bulk
+tool - a much simpler one-step upload than eBay's (no processing/
+recommendations round trip): **Add to FB Marketplace Batch** accumulates
+rows, `/fb-marketplace export-batch` hands you the file, you upload it
+directly through Facebook's bulk listing tool, and it's live.
+
+Columns: `Title` and `Price` reuse the exact same data captured for every
+approved item during Queue Review's listing form (`ebay_listing_data`
+isn't actually eBay-specific despite the table name - every approved item
+gets a title/price captured there regardless of which platform it
+eventually sells on), `Description` falls back from the AI-generated
+description to the raw Data Entry note, and `Photo URL` (the first
+R2-hosted photo URL, if any) is included even though it's not one of the
+three columns Facebook's own docs list as required, since a listing with
+no photo isn't realistically sellable. **Facebook's docs are explicit that
+changing/removing the Title/Price/Description headers breaks the upload**
+- if you check the file against a real template downloaded from Facebook
+and the `Photo URL` header doesn't match what Facebook expects (or it
+supports more than one photo per row and you want to use that), that's the
+one column safe to rename/extend in `fb_marketplace_csv.py`. Facebook
+auto-predicts each listing's category from Title/Description, so there's
+no category column here at all - review its guesses once the upload's
+live, from the listings screen.
+
+Since Facebook doesn't hand back a results file the way eBay's Seller Hub
+does, there's no `/fb-marketplace import-results` equivalent - once the
+CSV is actually live, run `/fb-marketplace confirm-listed` by hand to move
+those items out of `#pending-fb-marketplace-upload` into `#listed`.
+
 ### Running without R2
 
 Leave `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
@@ -525,18 +556,21 @@ UI after a restart (a Discord client caching quirk, not a bug here).
    (title/category/condition/format/price are required; specifics can be
    left blank).
 7. Approved items land in the shared `#awaiting-listing`. **Listing
-   Management** picks one of three buttons:
+   Management** picks one of four buttons:
    - **Add to eBay Batch** - appends the item to the local eBay CSV batch, no
      API call. Moves it to `#pending-ebay-upload` to wait for someone to
      actually upload that CSV.
+   - **Add to FB Marketplace Batch** - same idea, for Facebook's own CSV
+     bulk-listing tool. Moves it to `#pending-fb-marketplace-upload`.
    - **List on eBay (API)** - only shown if the eBay developer API is
      configured and enabled (see "Running without the eBay API" above).
-   - **Mark Listed (Other)** - for FB Marketplace, website, or anywhere else
-     listed manually.
-8. Items added to the eBay batch: a Pallet Admin runs `/ebay export-batch`
-   whenever ready, uploads the attached CSV in eBay Seller Hub, then once
-   eBay actually shows those listings live, runs `/ebay confirm-listed` to
-   move them from `#pending-ebay-upload` into `#listed`.
+   - **Mark Listed (Other)** - for anywhere else entirely, listed manually.
+8. Items added to a batch: a Pallet Admin runs `/ebay export-batch` or
+   `/fb-marketplace export-batch` whenever ready, uploads the attached CSV
+   on that platform, then once it actually shows those listings live, runs
+   `/ebay confirm-listed` or `/fb-marketplace confirm-listed` to move them
+   from `#pending-ebay-upload`/`#pending-fb-marketplace-upload` into
+   `#listed`.
 9. However it got there, `#listed` items get a **Mark as Sold** button - one
    click, no price prompt.
 10. **Finance Management** runs `/finance record-sale` (in that pallet's
@@ -636,6 +670,17 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   actually went live on eBay, moving it from `#pending-ebay-upload` to
   `#listed`, for anyone who'd rather just check Seller Hub directly than
   download/upload a results CSV.
+- `/fb-marketplace export-batch` - downloads the accumulated FB Marketplace
+  CSV batch as a Discord attachment and archives + clears it so the next
+  **Add to FB Marketplace Batch** click starts a fresh file - see "FB
+  Marketplace CSV format" above.
+- `/fb-marketplace confirm-listed [item_number]` - run inside a pallet's
+  category. The only way to move an item out of
+  `#pending-fb-marketplace-upload`: confirms that item (or, with no
+  `item_number`, every item in that pallet still waiting) actually went
+  live on Facebook, moving it to `#listed`. There's no results-CSV
+  reconciliation equivalent to `/ebay import-results` here - Facebook
+  doesn't give one back.
 - `/pirate-ship export-batch` - exports every sold item on a non-eBay
   platform ("Other"/FB Marketplace/website, recorded via `/finance
   record-sale`) that hasn't been exported yet, as a CSV for Pirate Ship's
@@ -722,17 +767,21 @@ An early, incremental suite (not exhaustive) covering: core `database.py`
 behavior (pallets/items, financials including refunds/expenses/reversals,
 structured shipping addresses, buyer-data retention, the eBay batch
 lifecycle), `ai_review.py`'s fallback shape and timeout path, `ebay_csv.py`/
-`pirate_ship_csv.py`'s row-building (including the legacy-address fallback
-and buyer-data redaction), `ebay_results.py`'s flexible results-CSV
-parsing, `runtime_settings.py`'s role-ID bindings, `quickbooks.py`'s OAuth
-token exchange/refresh (rotation included) and API request shaping (all
-against a fake `aiohttp.ClientSession`, no real network calls), the
-credit-card charge → pallet allocation workflow and awaiting-pallet-charge
-claiming (cogs/finance.py, cogs/pallet_setup.py), `pirate_ship_import.py`'s
-flexible CSV column-scanning, and the new financial reporting queries
-(cost-by-type breakdown, month-to-date spend/revenue, pallet
-in-progress/sold-out counts, the auto-flag early warnings), and a regression guard
-that fails if a `discord.ui.SelectOption` in `cogs/item_flow.py` is ever
+`fb_marketplace_csv.py`/`pirate_ship_csv.py`'s row-building (including the
+legacy-address fallback and buyer-data redaction), `ebay_results.py`'s
+flexible results-CSV parsing, `runtime_settings.py`'s role-ID bindings,
+`quickbooks.py`'s OAuth token exchange/refresh (rotation included) and API
+request shaping (all against a fake `aiohttp.ClientSession`, no real
+network calls), the credit-card charge → pallet allocation workflow and
+awaiting-pallet-charge claiming (cogs/finance.py, cogs/pallet_setup.py),
+`pirate_ship_import.py`'s flexible CSV column-scanning, the new financial
+reporting queries (cost-by-type breakdown, month-to-date spend/revenue,
+pallet in-progress/sold-out counts, the auto-flag early warnings), the FB
+Marketplace batch/confirm-listed workflow (cogs/item_flow.py,
+cogs/fb_marketplace.py), `discord_resilience.py`'s exception coverage
+(including the exact DNS-failure class that exposed the bug it fixes), and
+a regression guard that fails if a `discord.ui.SelectOption` in
+`cogs/item_flow.py` is ever
 marked `default=True` again - that reintroduces a real bug where Discord's
 mobile client won't register a tap on an already-checked option. Every
 test uses a throwaway temp database/file
@@ -787,8 +836,10 @@ Tables:
 
 The eBay CSV batch itself is **not** in the database - it's a plain CSV file
 at `data/ebay_batch.csv` (see `ebay_csv.py`), archived to
-`data/ebay_batch_archive/` on each `/ebay export-batch`. Pirate Ship exports
-work similarly but with nothing accumulating between runs - each
+`data/ebay_batch_archive/` on each `/ebay export-batch`. The FB Marketplace
+batch works the same way, at `data/fb_marketplace_batch.csv` / `data/
+fb_marketplace_batch_archive/` (see `fb_marketplace_csv.py`). Pirate Ship
+exports work similarly but with nothing accumulating between runs - each
 `/pirate-ship export-batch` queries the database directly and writes
 straight to `data/pirate_ship_exports/` (see `pirate_ship_csv.py`).
 
@@ -898,3 +949,18 @@ this scale.
   Nothing in `quickbooks.py` (or anywhere else) can initiate a payment,
   transfer, or card action (freeze, limit change, etc) - a deliberate
   safety boundary, not an oversight to revisit.
+- **FB Marketplace's CSV columns beyond Title/Price/Description aren't
+  confirmed against a real downloaded template.** Facebook's own help docs
+  list those three as required; `Photo URL` was added here as a reasonable
+  best guess (only the first photo, since Facebook's exact multi-photo
+  convention isn't confirmed either) since a listing with no photo isn't
+  realistically sellable. If Facebook's bulk uploader rejects or ignores
+  that column, or a real template shows a different header, fix the header
+  name (and/or the single-photo assumption) in `fb_marketplace_csv.py` -
+  never touch the `Title`/`Price`/`Description` headers, Facebook's docs
+  are explicit that changing those breaks the upload entirely.
+- **No results-file reconciliation for FB Marketplace, unlike
+  `/ebay import-results`.** Facebook's bulk tool doesn't hand back a
+  processed results file the way eBay's Seller Hub does, so
+  `/fb-marketplace confirm-listed` (checking Facebook by hand) is the only
+  way to move an item out of `#pending-fb-marketplace-upload`.

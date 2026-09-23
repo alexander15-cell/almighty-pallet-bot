@@ -22,6 +22,7 @@ def build_embeds() -> list:
         _pipeline_embed(),
         _roles_embed(),
         _ebay_commands_embed(),
+        _fb_marketplace_commands_embed(),
         _finance_commands_embed(),
         _shipping_commands_embed(),
         _pallet_item_commands_embed(),
@@ -91,15 +92,15 @@ def _pipeline_embed() -> discord.Embed:
     embed.add_field(
         name="4️⃣ #awaiting-listing (shared)",
         value=(
-            "Listing Management actually lists it: **Add to eBay Batch** (CSV, no API - see "
-            "the eBay commands below), **List on eBay (API)** (once configured), or "
-            "**Mark Listed (Other)** for FB Marketplace/website/anywhere else."
+            "Listing Management actually lists it: **Add to eBay Batch** or **Add to FB "
+            "Marketplace Batch** (CSV, no API - see the commands below), **List on eBay "
+            "(API)** (once configured), or **Mark Listed (Other)** for anywhere else entirely."
         ),
         inline=False,
     )
     embed.add_field(
-        name="5️⃣ #pending-ebay-upload → #listed (shared)",
-        value="eBay batch items wait here until confirmed live, then move to #listed alongside everything else.",
+        name="5️⃣ #pending-ebay-upload / #pending-fb-marketplace-upload → #listed (shared)",
+        value="Batch items wait here until confirmed live, then move to #listed alongside everything else.",
         inline=False,
     )
     embed.add_field(
@@ -122,7 +123,7 @@ def _roles_embed() -> discord.Embed:
     )
     embed.add_field(name="Data Entry", value="Posts new items in #data-entry.", inline=True)
     embed.add_field(name="Queue Review", value="Approves/edits/rejects items in #queue-review.", inline=True)
-    embed.add_field(name="Listing Management", value="Lists approved items in #awaiting-listing; runs `/ebay` and `/pirate-ship` commands.", inline=True)
+    embed.add_field(name="Listing Management", value="Lists approved items in #awaiting-listing; runs `/ebay`, `/fb-marketplace`, and `/pirate-ship` commands.", inline=True)
     embed.add_field(name="Purchase Management", value="Sets a pallet's total cost with `/finance setprice`.", inline=True)
     embed.add_field(name="Finance Management", value="Records sales, refunds, expenses, shipping info - everything under `/finance`.", inline=True)
     embed.add_field(name="Pallet Admin", value="Full access everywhere, plus `/admin`, `/item`, `/pallet`, and `/setup` commands.", inline=True)
@@ -138,6 +139,13 @@ def _ebay_commands_embed() -> discord.Embed:
     embed.add_field(name="batches / batch <id>", value="List recent batches, or show one batch's still-pending items.", inline=False)
     embed.add_field(name="import-results <batch_id> <csv>", value="Reconcile a batch against a results CSV from Seller Hub.", inline=False)
     embed.add_field(name="confirm-listed [item_number]", value="Manually confirm an item is live on eBay.", inline=False)
+    return embed
+
+
+def _fb_marketplace_commands_embed() -> discord.Embed:
+    embed = discord.Embed(title="💬 Commands - FB Marketplace (`/fb-marketplace ...`)", color=COLOR)
+    embed.add_field(name="export-batch", value="Download the accumulated FB Marketplace CSV batch and start a fresh one.", inline=False)
+    embed.add_field(name="confirm-listed [item_number]", value="Manually confirm an item is live on FB Marketplace.", inline=False)
     return embed
 
 
