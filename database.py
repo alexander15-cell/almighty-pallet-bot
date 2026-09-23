@@ -29,7 +29,7 @@ Management, working at their own pace, ever has to type a number.
 import sqlite3
 import json
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import config
@@ -714,6 +714,50 @@ def mark_pirate_ship_exported(item_ids: list):
             "UPDATE items SET pirate_ship_exported = 1 WHERE id = ?",
             [(item_id,) for item_id in item_ids],
         )
+
+
+def get_buyer_data_purge_candidates(days: int):
+    """
+    Shipped items whose buyer data (recipient_name/shipping_address/the
+    structured address fields) is still present and whose shipped_at is
+    older than `days` days ago - what /pirate-ship purge-buyer-data
+    previews and, on confirm, clears. Only non-eBay sales ever have this
+    data in the first place (see set_shipping_info), so eBay sales never
+    show up here.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT * FROM items
+               WHERE status = ? AND shipped_at IS NOT NULL AND shipped_at < ?
+               AND (recipient_name IS NOT NULL OR shipping_address IS NOT NULL OR address_line1 IS NOT NULL)
+               ORDER BY pallet_id, item_number""",
+            (STATUS_SHIPPED, cutoff),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def purge_buyer_data(item_ids: list, actor_id: int = None):
+    """
+    Clears recipient_name/shipping_address and every structured address
+    field on the given items - inventory identity, sale price/platform,
+    and the audit trail itself (this purge is logged as its own event) are
+    never touched. Irreversible once run; the caller should always show a
+    preview and require an explicit confirm before calling this.
+    """
+    with get_conn() as conn:
+        for item_id in item_ids:
+            conn.execute(
+                """UPDATE items SET recipient_name = NULL, shipping_address = NULL,
+                   address_line1 = NULL, address_line2 = NULL, city = NULL, state = NULL,
+                   postal_code = NULL, country = NULL, updated_at = ? WHERE id = ?""",
+                (_now(), item_id),
+            )
+            conn.execute(
+                "INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp) "
+                "VALUES (?, NULL, (SELECT status FROM items WHERE id = ?), ?, ?, ?)",
+                (item_id, item_id, actor_id, "Buyer shipping data purged (retention policy)", _now()),
+            )
 
 
 def set_finance_message(pallet_id: int, message_id: int):

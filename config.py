@@ -212,6 +212,14 @@ PHOTO_DIR = os.getenv("PHOTO_DIR", "data/photos")
 # ---- Single-instance lock (see instance_lock.py) ----
 INSTANCE_LOCK_PATH = os.getenv("INSTANCE_LOCK_PATH", "data/.bot.lock")
 
+# ---- Buyer data retention (see /pirate-ship purge-buyer-data) ----
+# How many days after an item ships before its buyer's name/address is
+# eligible for removal. Only recipient_name/shipping_address/structured
+# address fields are cleared - inventory identity, sale price, and audit
+# actors are never touched. Purging is always an explicit admin action
+# (preview by default, confirm:True to actually run it), never automatic.
+BUYER_DATA_RETENTION_DAYS = int(os.getenv("BUYER_DATA_RETENTION_DAYS", "90"))
+
 # ---- AI review model (only used by the "anthropic" backend) ----
 ANTHROPIC_MODEL = "claude-sonnet-5"
 

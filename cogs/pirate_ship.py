@@ -11,6 +11,14 @@ Pirate Ship can't see on its own.
                              a Discord attachment, then marks them exported
                              so a re-run doesn't duplicate them. Requires the
                              Pallet Admin role, same as admin_tools.py.
+/pirate-ship purge-buyer-data - previews (default) or, with confirm:True,
+                             clears recipient name/address from shipped
+                             items past config.BUYER_DATA_RETENTION_DAYS,
+                             and redacts matching rows in already-exported
+                             CSV archives. Inventory identity and financial
+                             records are never touched. Requires Pallet
+                             Admin; always previews before it changes
+                             anything.
 """
 import discord
 from discord import app_commands
@@ -77,6 +85,57 @@ class PirateShip(commands.Cog):
             "batch/spreadsheet order import - weight and package dimensions aren't tracked here, "
             f"so fill those in before creating labels.{warning}",
             file=discord.File(path, filename=path.name),
+            ephemeral=True,
+        )
+
+    @pirate_ship_group.command(
+        name="purge-buyer-data",
+        description="Preview, or (confirm:True) clear, buyer names/addresses past the retention window.",
+    )
+    @app_commands.describe(
+        days=f"Days after shipment before buyer data is eligible (default {config.BUYER_DATA_RETENTION_DAYS})",
+        confirm="Set True to actually clear the data - default is preview-only",
+    )
+    async def purge_buyer_data(self, interaction: discord.Interaction, days: int = None, confirm: bool = False):
+        if not await _require_admin(interaction):
+            return
+
+        days = config.BUYER_DATA_RETENTION_DAYS if days is None else days
+        if days < 0:
+            await interaction.response.send_message("Days can't be negative.", ephemeral=True)
+            return
+
+        candidates = db.get_buyer_data_purge_candidates(days)
+        if not candidates:
+            await interaction.response.send_message(
+                f"No shipped items have buyer data eligible for removal (shipped more than {days} day(s) ago).",
+                ephemeral=True,
+            )
+            return
+
+        numbers = ", ".join(f"#{item['item_number']}" for item in candidates[:25])
+        if len(candidates) > 25:
+            numbers += f", and {len(candidates) - 25} more"
+
+        if not confirm:
+            await interaction.response.send_message(
+                f"**Preview only** - {len(candidates)} item(s) shipped more than {days} day(s) ago still "
+                f"have buyer data on file: {numbers}.\nInventory identity, sale price, and audit history "
+                f"are never touched - only recipient name/address. Run again with `confirm:True` to "
+                f"actually clear it (also redacts matching rows in already-exported Pirate Ship CSVs).",
+                ephemeral=True,
+            )
+            return
+
+        db.purge_buyer_data([item["id"] for item in candidates], actor_id=interaction.user.id)
+        order_numbers = {pirate_ship_csv.order_number(item) for item in candidates}
+        redacted_rows = pirate_ship_csv.redact_archived_buyer_data(order_numbers)
+
+        await interaction.response.send_message(
+            f"🗑️ Cleared buyer data for {len(candidates)} item(s): {numbers}.\n"
+            f"Also redacted {redacted_rows} matching row(s) in already-exported Pirate Ship CSV "
+            f"archives. Files/Discord attachments downloaded before this point may still contain "
+            f"the old data - those need separate manual removal.",
             ephemeral=True,
         )
 

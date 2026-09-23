@@ -70,6 +70,13 @@ def _legacy_split_address(shipping_address: str) -> dict:
     }
 
 
+def order_number(item: dict) -> str:
+    """The stable per-item key used as this CSV's Order Number column -
+    factored out so redact_archived_buyer_data() can match rows against it
+    without duplicating the format string."""
+    return f"pallet-{item['pallet_id']}-item-{item['item_number']}"
+
+
 def build_export_rows(items: list) -> list:
     """Builds one CSV row per item - pure function so it's easy to test
     without touching the filesystem."""
@@ -77,7 +84,7 @@ def build_export_rows(items: list) -> list:
     for item in items:
         row = {field: "" for field in FIELDS}
         row.update({
-            "Order Number": f"pallet-{item['pallet_id']}-item-{item['item_number']}",
+            "Order Number": order_number(item),
             "Recipient Name": item.get("recipient_name") or "",
             "Item Description": item.get("ai_title") or item.get("ai_description") or item.get("raw_description") or "",
             "Value (USD)": f"{item['sale_price']:.2f}" if item.get("sale_price") is not None else "",
@@ -96,6 +103,48 @@ def build_export_rows(items: list) -> list:
             row.update(_legacy_split_address(item.get("shipping_address")))
         rows.append(row)
     return rows
+
+
+BUYER_FIELDS_TO_REDACT = ("Recipient Name", "Address Line 1", "Address Line 2", "City", "State", "Zip", "Country")
+
+
+def redact_archived_buyer_data(order_numbers) -> int:
+    """
+    Blanks the buyer-identifying columns (everything except Order Number,
+    Item Description, Value, and the weight/dimension columns nothing here
+    ever fills in) for any row in any already-exported CSV under
+    ARCHIVE_DIR whose Order Number matches one of `order_numbers` (see
+    order_number() above). Used by /pirate-ship purge-buyer-data so a
+    retention purge also reaches CSVs that were already downloaded, not
+    just the live database rows. Returns how many rows were redacted; files
+    with no matching rows are left untouched.
+    """
+    order_numbers = set(order_numbers)
+    if not order_numbers or not ARCHIVE_DIR.exists():
+        return 0
+
+    redacted_count = 0
+    for csv_path in ARCHIVE_DIR.glob("*.csv"):
+        with csv_path.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames
+            rows = list(reader)
+        if not fieldnames:
+            continue
+        changed = False
+        for row in rows:
+            if row.get("Order Number") in order_numbers:
+                for field in BUYER_FIELDS_TO_REDACT:
+                    if row.get(field):
+                        row[field] = ""
+                changed = True
+                redacted_count += 1
+        if changed:
+            with csv_path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+    return redacted_count
 
 
 def export_pending(items: list) -> Path:

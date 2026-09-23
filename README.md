@@ -420,6 +420,13 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   native eBay integration.
 - `/backup-now` - creates and verifies a local backup immediately (see
   "Backups" below); `/backups` lists recent ones with size and age.
+- `/pirate-ship purge-buyer-data [days] [confirm]` - previews (default) or,
+  with `confirm:True`, clears recipient name/address from shipped items
+  past `BUYER_DATA_RETENTION_DAYS` (default 90) days, and redacts matching
+  rows in already-exported Pirate Ship CSV archives. Inventory identity,
+  sale price, and audit history are never touched - only buyer contact
+  info. CSVs/Discord attachments downloaded before a purge still have the
+  old data; that needs separate manual cleanup.
 
 ## Backups
 
