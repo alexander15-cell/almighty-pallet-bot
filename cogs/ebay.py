@@ -9,6 +9,12 @@ used while there's no live eBay API integration:
                        which items went out in it (see database.
                        create_ebay_batch) - items.ebay_batch_id points back
                        to it.
+/ebay fill-recommendations - upload eBay's own returned recommendations
+                       file (see ebay_recommendations.py) and get back the
+                       same file with price/quantity/condition/format
+                       filled in from what Queue Review already captured,
+                       so nobody has to retype it by hand before the final
+                       re-upload.
 /ebay batches        - lists recent batches with how many items in each are
                        still waiting on a result.
 /ebay batch          - shows one batch's still-pending items.
@@ -35,6 +41,7 @@ actual message/status moving is delegated to the ItemFlow cog (via
 get_cog, same cross-cog pattern QueueReviewView/AwaitingListingView use) so
 that logic stays in one place alongside the rest of the pipeline.
 """
+import asyncio
 import re
 
 import discord
@@ -44,6 +51,7 @@ from discord.ext import commands
 import config
 import database as db
 import ebay_csv
+import ebay_recommendations
 import ebay_results
 import ebay_taxonomy
 import finance_utils
@@ -150,6 +158,61 @@ class Ebay(commands.Cog):
             file=discord.File(path, filename=path.name),
             ephemeral=True,
         )
+
+    @ebay_group.command(
+        name="fill-recommendations",
+        description="Upload eBay's returned recommendations file - fills in price/condition/format from Queue Review.",
+    )
+    @app_commands.describe(recommendations_file="The .xlsm file Seller Hub gave back after processing your batch upload")
+    async def fill_recommendations(self, interaction: discord.Interaction, recommendations_file: discord.Attachment):
+        if not await _require_admin(interaction):
+            return
+        if not recommendations_file.filename.lower().endswith((".xlsm", ".xlsx")):
+            await interaction.response.send_message(
+                "That doesn't look like an Excel file (.xlsm/.xlsx) - upload the file eBay gave you back "
+                "after processing your batch, not the one you uploaded to it.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        raw_bytes = await recommendations_file.read()
+
+        try:
+            filled_path, summary = await asyncio.to_thread(ebay_recommendations.fill_recommendations_file, raw_bytes)
+        except ebay_recommendations.RecommendationsFileError as e:
+            await interaction.followup.send(f"⚠️ Couldn't process that file: {e}", ephemeral=True)
+            return
+
+        try:
+            lines = [
+                f"✅ Filled in {summary.filled_count} item(s) across {summary.sheet_count} category sheet(s) "
+                f"with price/quantity/condition/format from Queue Review - never overwrote anything already there.",
+            ]
+            if summary.unmatched_skus:
+                shown = ", ".join(summary.unmatched_skus[:10])
+                lines.append(
+                    f"⚠️ {len(summary.unmatched_skus)} row(s) had a SKU this bot doesn't recognize "
+                    f"(not one of this bot's items, or already deleted): {shown}"
+                )
+            if not config.EBAY_ITEM_LOCATION:
+                lines.append("ℹ️ `EBAY_ITEM_LOCATION` isn't set in `.env` - Location was left blank, fill it in by hand.")
+            if not config.EBAY_SHIPPING_SERVICE:
+                lines.append(
+                    "ℹ️ `EBAY_SHIPPING_SERVICE` isn't set in `.env` - Shipping service was left blank, fill it in by hand."
+                )
+            lines.append(
+                "Review before re-uploading to Seller Hub - dropdown pick-lists in the file may not survive "
+                "re-saving through this tool, but the underlying data is unaffected; just type a value directly "
+                "if a cell looks off."
+            )
+            await interaction.followup.send(
+                "\n".join(lines),
+                file=discord.File(filled_path, filename=recommendations_file.filename),
+                ephemeral=True,
+            )
+        finally:
+            filled_path.unlink(missing_ok=True)
 
     @ebay_group.command(name="batches", description="List recent eBay CSV batches and how many items in each are still pending.")
     async def batches(self, interaction: discord.Interaction):

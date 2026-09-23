@@ -305,6 +305,16 @@ EBAY_AUCTION_DURATIONS = [
 EBAY_BATCH_CSV_PATH = os.getenv("EBAY_BATCH_CSV_PATH", "data/ebay_batch.csv")
 EBAY_BATCH_ARCHIVE_DIR = os.getenv("EBAY_BATCH_ARCHIVE_DIR", "data/ebay_batch_archive")
 
+# Optional convenience values used ONLY by /ebay fill-recommendations (see
+# ebay_recommendations.py) to help fill in eBay's own RETURNED recommendations
+# file (the one Seller Hub gives back after processing an export-batch
+# upload) - never required, never block anything, unlike this bot's old
+# classic-template export which used to hard-require a location/shipping
+# service before every export. Leave blank to just leave those columns for
+# you to fill in by hand instead.
+EBAY_ITEM_LOCATION = os.getenv("EBAY_ITEM_LOCATION", "").strip()
+EBAY_SHIPPING_SERVICE = os.getenv("EBAY_SHIPPING_SERVICE", "").strip()
+
 # ---- Pirate Ship CSV export (see pirate_ship_csv.py) ----
 # Only for "Other"-platform sales (FB Marketplace, website, etc.) that were
 # sold outside eBay - eBay sales don't need this, since Pirate Ship pulls

@@ -333,13 +333,19 @@ template - eBay's own template file is called
    individually optional per eBay's own template instructions - there's no
    equivalent of the old "every row rejected without X" failures, so
    nothing here blocks `/ebay export-batch` from running.
-2. eBay processes the file and returns a downloadable version with its own
-   AI-suggested category, condition, price, shipping, and more for each
-   item - this may take a few minutes; check the upload's status in Seller
-   Hub.
-3. Download that file, review/correct eBay's suggestions, and re-upload the
-   **same file** via the Reports tab to actually create the listings or
-   drafts.
+2. eBay processes the file and returns a downloadable **recommendations**
+   file with its own AI-suggested category, title, description, and item
+   aspects for each item - this may take a few minutes; check the upload's
+   status in Seller Hub. In practice, eBay's own AI leaves price, condition,
+   quantity, and format blank for each item - that's what `/ebay
+   fill-recommendations` is for (see below).
+3. Run `/ebay fill-recommendations`, attaching that downloaded file - this
+   bot fills in price/quantity/condition/format/duration for every item it
+   recognizes, straight from what Queue Review already captured, and hands
+   you back the completed file.
+4. Review the result (eBay's suggestions AND this bot's fills), then
+   re-upload that **same file** via the Reports tab to actually create the
+   listings or drafts.
 
 The file itself has an unusual, fixed shape eBay's own template requires
 ("do not change any formatting in the file") - two `#INFO` metadata rows
@@ -351,11 +357,28 @@ Queue Review resolved via `ebay_taxonomy.py`, which can only help eBay's
 own suggestion), and `Aspects` (item specifics as pipe-separated
 `Key=Value` pairs, e.g. `Brand=DeWalt|Voltage=20V`).
 
-Because eBay itself suggests price/condition/shipping/weight downstream in
-step 2, none of that data needs to be (or is) in this CSV - but Queue
-Review still captures price/condition/weight/dimensions during approval
-regardless (see above), since it's useful data either way and weight/
-dimensions specifically feed the Pirate Ship CSV export (see below).
+None of price/condition/shipping/weight needs to be (or is) in this upload
+CSV - but Queue Review still captures price/condition/weight/dimensions
+during approval regardless (see above), since it's useful data either way,
+weight/dimensions specifically feed the Pirate Ship CSV export (see below),
+and - critically - it's exactly what `/ebay fill-recommendations` uses to
+fill in eBay's returned recommendations file automatically.
+
+**`/ebay fill-recommendations`** (`ebay_recommendations.py`) takes eBay's
+downloaded recommendations file (a `.xlsm`, a different, classic-style
+per-item template eBay uses internally for this - `Template=eBay-
+listings-template_EBAY_US`, one sheet per matched category named
+`Cat-<CategoryName>...`) and, for every row whose `Custom Label (SKU)`
+matches one of this bot's items, fills in Start price/Quantity/Condition
+ID/Format/Duration from `ebay_listing_data` - never overwriting a cell
+that already has something in it, whether that's eBay's own suggestion or
+something already typed in by hand. `EBAY_ITEM_LOCATION`/
+`EBAY_SHIPPING_SERVICE` (optional, see "Installation") fill Location/
+Shipping service 1 option too, if set. Known limitation: saving through
+this tool drops Excel's dropdown pick-lists (openpyxl doesn't support
+re-saving them) - the data itself is unaffected, but a cell without its
+dropdown UI anymore just needs a value typed directly if you want to
+change it. Macros are preserved.
 
 ### Running without R2
 
@@ -491,6 +514,12 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   in it. Every column in this newer prefill-template CSV is optional per
   eBay's own template, so nothing blocks this from running - see "eBay CSV
   format" above.
+- `/ebay fill-recommendations <recommendations_file>` - attach the file
+  eBay's Seller Hub gave back after processing your export-batch upload;
+  this bot fills in Start price/Quantity/Condition ID/Format/Duration for
+  every item it recognizes, straight from Queue Review data, and hands
+  back the completed file to review and re-upload - see "eBay CSV format"
+  above.
 - `/ebay category-search <query>` - looks up real eBay leaf category IDs by
   keyword against eBay's own official taxonomy (`ebay_taxonomy.py`, ~18,000
   categories) - mainly for finding an ID to pass to `/ebay retry-item`'s

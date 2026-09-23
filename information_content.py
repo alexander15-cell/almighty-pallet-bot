@@ -129,7 +129,7 @@ def _roles_embed() -> discord.Embed:
 def _ebay_commands_embed() -> discord.Embed:
     embed = discord.Embed(title="💬 Commands - eBay (`/ebay ...`)", color=COLOR)
     embed.add_field(name="export-batch", value="Download the accumulated eBay CSV batch and start a fresh one.", inline=False)
-    embed.add_field(name="fill-recommendations", value="Upload eBay's returned recommendations file - this bot fills in price/condition/quantity/format from what Queue Review already captured.", inline=False)
+    embed.add_field(name="fill-recommendations", value="Upload eBay's returned recommendations file - fills in price/quantity/condition/format from Queue Review data.", inline=False)
     embed.add_field(name="category-search <query>", value="Look up a real eBay category ID by keyword.", inline=False)
     embed.add_field(name="retry-item <item_number> ...", value="Fix and re-queue an item whose batch upload needs a correction.", inline=False)
     embed.add_field(name="batches / batch <id>", value="List recent batches, or show one batch's still-pending items.", inline=False)
