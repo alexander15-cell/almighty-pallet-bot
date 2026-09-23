@@ -109,24 +109,6 @@ def _parse_dimensions(text: str) -> tuple:
     return length_in, width_in, height_in
 
 
-def _missing_export_requirements() -> list:
-    """
-    Settings eBay's bulk upload requires on every single row, with no safe
-    default to guess - export-batch refuses to run at all while any of
-    these are unset, rather than producing a CSV that's guaranteed to fail
-    on every row. Returns a list of (setting_name, why) pairs, empty if
-    everything's configured.
-    """
-    missing = []
-    if not config.EBAY_ITEM_LOCATION:
-        missing.append(("EBAY_ITEM_LOCATION", "your ship-from city/state or ZIP, e.g. `Columbus, OH`"))
-    if not config.EBAY_SHIPPING_SERVICE:
-        missing.append(("EBAY_SHIPPING_SERVICE", "an eBay shipping service code, e.g. `USPSPriority`"))
-    if not config.EBAY_SHIPPING_PACKAGE_TYPE:
-        missing.append(("EBAY_SHIPPING_PACKAGE_TYPE", "an eBay shipping package code, e.g. `PackageThickEnvelope`"))
-    return missing
-
-
 class Ebay(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -138,38 +120,7 @@ class Ebay(commands.Cog):
         if not await _require_admin(interaction):
             return
 
-        missing = _missing_export_requirements()
-        if missing:
-            lines = "\n".join(f"- `{name}` - {why}" for name, why in missing)
-            await interaction.response.send_message(
-                f"⚠️ Can't export yet - eBay rejects **every** row in a batch without these, and they're "
-                f"not set in `.env`:\n{lines}\n\nSet them, restart the bot, then try exporting again.",
-                ephemeral=True,
-            )
-            return
-
         pending_items = db.get_unbatched_pending_items()
-
-        # Weight/dimensions are required fields on EbayListingModal going
-        # forward, but items approved before that change exist have
-        # ebay_listing_data.weight_lb = NULL - catch those here rather than
-        # exporting a CSV where those specific rows are guaranteed to fail
-        # Calculated shipping.
-        missing_weight = []
-        for item in pending_items:
-            listing = db.get_ebay_listing_data(item["id"])
-            if not listing or listing.get("weight_lb") is None:
-                missing_weight.append(item["item_number"])
-        if missing_weight:
-            numbers = ", ".join(f"#{n}" for n in missing_weight)
-            await interaction.response.send_message(
-                f"⚠️ Can't export yet - {len(missing_weight)} item(s) have no weight/dimensions saved "
-                f"(approved before that became required): {numbers}. Fix each with "
-                f"`/ebay retry-item item_number:<n> weight_lb:<lb> dimensions:<LxWxH in>` "
-                f"(run inside that pallet's category), then try exporting again.",
-                ephemeral=True,
-            )
-            return
 
         path = ebay_csv.export_and_archive()
         if path is None:
@@ -182,18 +133,20 @@ class Ebay(commands.Cog):
 
         pending_channel_id = db.get_shared_channel_id("pending-ebay-upload")
         pending_channel_mention = f"<#{pending_channel_id}>" if pending_channel_id else "#pending-ebay-upload"
-        pic_url_note = (
-            "PicURL is filled in from R2-hosted photo URLs where available."
+        photo_url_note = (
+            "Item Photo URL is filled in from R2-hosted photo URLs where available."
             if config.R2_ENABLED else
-            "PicURL is blank (R2 photo hosting isn't configured), so add photos in Seller Hub "
-            "or fill PicURL in yourself before uploading."
+            "Item Photo URL is blank (R2 photo hosting isn't configured), so add photos yourself "
+            "before or after uploading."
         )
         await interaction.response.send_message(
-            f"📄 eBay batch **#{batch_id}** CSV attached ({len(pending_items)} item(s)). Upload it in Seller "
-            f"Hub's bulk upload / File Exchange tool - {pic_url_note} The live batch has been cleared - the "
-            "next **Add to eBay Batch** click starts a new one. Once eBay processes it, either run "
-            f"`/ebay import-results batch_id:{batch_id}` with the results CSV Seller Hub gives you, or "
-            f"`/ebay confirm-listed` by hand after checking Seller Hub, to move these out of {pending_channel_mention}.",
+            f"📄 eBay batch **#{batch_id}** CSV attached ({len(pending_items)} item(s)). This is eBay's AI-prefill "
+            f"bulk template - upload it via the Reports tab in Seller Hub, wait for eBay to process it and suggest "
+            f"the rest of each listing's details, then download, review, and re-upload that file to actually "
+            f"create the listings. {photo_url_note} The live batch has been cleared - the next **Add to eBay "
+            f"Batch** click starts a new one. Once eBay processes it, either run `/ebay import-results "
+            f"batch_id:{batch_id}` with the results CSV Seller Hub gives you, or `/ebay confirm-listed` by hand "
+            f"after checking Seller Hub, to move these out of {pending_channel_mention}.",
             file=discord.File(path, filename=path.name),
             ephemeral=True,
         )
@@ -470,9 +423,8 @@ class Ebay(commands.Cog):
         ebay_csv.append_item_to_batch(item, listing)
         correction_note = f" ({'; '.join(corrections)})" if corrections else ""
         await interaction.response.send_message(
-            f"🔁 Re-queued item #{item_number} into the current (live) eBay CSV batch{correction_note}, "
-            f"picking up any config changes since its last export (e.g. `EBAY_ITEM_LOCATION`) - it'll "
-            f"go out in the next `/ebay export-batch`.",
+            f"🔁 Re-queued item #{item_number} into the current (live) eBay CSV batch{correction_note} - "
+            f"it'll go out in the next `/ebay export-batch`.",
             ephemeral=True,
         )
 

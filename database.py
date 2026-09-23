@@ -215,8 +215,8 @@ def init_db():
                 auction_duration TEXT,                -- eBay *Duration value (e.g. 'Days_7') - only set when listing_format = 'Auction'
                 item_specifics  TEXT,
                 ebay_item_id    TEXT,                 -- the real eBay listing ID, set once /ebay import-results (or confirm-listed) confirms this item went live
-                weight_lb       REAL,                 -- shipping weight, feeds eBay's Calculated shipping AND the Pirate Ship CSV export (every approved item gets this captured here regardless of eventual sale platform)
-                length_in       REAL,                 -- packaged dimensions, same dual purpose as weight_lb
+                weight_lb       REAL,                 -- shipping weight, feeds the Pirate Ship CSV export (every approved item gets this captured here regardless of eventual sale platform) - eBay's own CSV upload doesn't carry shipping data at all
+                length_in       REAL,                 -- packaged dimensions, same purpose as weight_lb
                 width_in        REAL,
                 height_in       REAL,
                 set_by          INTEGER,
@@ -549,12 +549,12 @@ def save_ebay_listing_data(item_id: int, ebay_title: str, category_id: str, cond
 
     weight_lb/length_in/width_in/height_in are required for every item
     going forward (EbayListingModal makes them mandatory fields) - they
-    feed eBay's Calculated shipping AND the Pirate Ship CSV export, since
-    every approved item gets this captured here regardless of which
-    platform it eventually sells on. Still nullable in the schema so
-    already-approved items from before this existed don't break; those get
-    caught and reported at export time instead (see ebay.py's
-    _missing_export_requirements-style per-item check).
+    feed the Pirate Ship CSV export, since every approved item gets this
+    captured here regardless of which platform it eventually sells on.
+    eBay's own CSV upload (ebay_csv.py, eBay's newer AI-prefill bulk
+    template) doesn't carry shipping/weight data at all, so this is purely
+    for Pirate Ship and general record-keeping now. Still nullable in the
+    schema so already-approved items from before this existed don't break.
     """
     with get_conn() as conn:
         now = _now()

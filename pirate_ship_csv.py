@@ -21,15 +21,15 @@ is agreed on. Items shipped before the structured form existed only have
 the old freeform shipping_address blob; _legacy_split_address() best-effort
 splits that for those rows only.
 
-Weight/dimensions reuse the same data eBay's Calculated shipping uses (see
-ebay_csv.py) - database.get_unexported_other_platform_sales() resolves each
-item's best-available weight_lb/length_in/width_in/height_in (human-
-confirmed via Queue Review's EbayListingModal when the item went through
-that flow, else the AI's automated-review estimate) as
+Weight/dimensions reuse the same data captured on Queue Review's
+EbayListingModal (ebay_listing_data.weight_lb/length_in/width_in/
+height_in - eBay's own CSV upload doesn't carry this data at all any more,
+see ebay_csv.py) - database.get_unexported_other_platform_sales() resolves
+each item's best-available value (human-confirmed via that modal when the
+item went through that flow, else the AI's automated-review estimate) as
 pirate_ship_weight_lb/length_in/width_in/height_in. Still left blank when
 neither source ever captured a value (e.g. very old items from before this
-feature existed) for whoever processes the batch to fill in by hand - same
-"leave it blank, fill in by hand" precedent as ebay_csv.py's PicURL.
+feature existed) for whoever processes the batch to fill in by hand.
 """
 import csv
 from datetime import datetime, timezone

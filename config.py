@@ -288,41 +288,16 @@ EBAY_AUCTION_DURATIONS = [
 # genuine listable leaf category straight from eBay's own data - there's
 # nothing to hand-configure or keep correcting here anymore.
 
-# ---- eBay CSV batch (Seller Hub bulk upload / File Exchange fallback) ----
+# ---- eBay CSV batch (eBay's AI-prefill bulk listing tool - see ebay_csv.py) ----
 # Accumulates one row per item added via "Add to eBay Batch" until an admin
 # runs /ebay export-batch, which hands it over as a Discord attachment and
-# archives + clears it so the next batch starts clean.
+# archives + clears it so the next batch starts clean. This is eBay's newer
+# "Prefill Listing" template (SKU/photos/title/category/aspects only - eBay
+# itself suggests price/condition/shipping/etc. after processing the file),
+# not the older classic File Exchange format - no per-row required settings
+# like a ship-from location or a shipping service code apply here any more.
 EBAY_BATCH_CSV_PATH = os.getenv("EBAY_BATCH_CSV_PATH", "data/ebay_batch.csv")
 EBAY_BATCH_ARCHIVE_DIR = os.getenv("EBAY_BATCH_ARCHIVE_DIR", "data/ebay_batch_archive")
-
-# eBay's bulk upload REQUIRES an item location on every single row (a city/
-# state or postal code - whatever your seller account was set up with) -
-# without it, eBay rejects every row with "No <Item.Location> exists".
-# There's no reasonable default to guess here (it's your business's real
-# ship-from location), so /ebay export-batch refuses to export until this
-# is set, rather than producing a CSV that's guaranteed to fail on every row.
-EBAY_ITEM_LOCATION = os.getenv("EBAY_ITEM_LOCATION", "").strip()
-
-# eBay's bulk upload also REQUIRES at least one shipping service on every
-# row (confirmed against a real upload: "Please add at least one valid
-# shipping service option to your listing"). Uses eBay's Calculated
-# (weight-based) shipping type, not one flat cost for every item - each
-# item's own weight/dimensions (captured as required fields on
-# EbayListingModal, see item_flow.py) drive the actual per-listing charge,
-# so a small light item and a big heavy one aren't priced the same.
-# EBAY_SHIPPING_SERVICE must still be one of eBay's own ShippingService
-# codes (e.g. "USPSPriority", "USPSGround", "UPSGround") - it says WHICH
-# carrier service to calculate with, not a price - and
-# EBAY_SHIPPING_PACKAGE_TYPE must be one of eBay's ShippingPackage codes
-# (e.g. "PackageThickEnvelope", "IrregularPackage" - what's right depends
-# on what you're actually shipping). Neither has a safe default to guess
-# any more than EBAY_ITEM_LOCATION did - verify both via eBay's own listing
-# flow (start a listing by hand, choose Calculated shipping, see what it's
-# called) rather than trusting this comment's examples blindly. All three
-# are required before /ebay export-batch will export anything.
-EBAY_SHIPPING_TYPE = os.getenv("EBAY_SHIPPING_TYPE", "Calculated").strip()
-EBAY_SHIPPING_SERVICE = os.getenv("EBAY_SHIPPING_SERVICE", "").strip()
-EBAY_SHIPPING_PACKAGE_TYPE = os.getenv("EBAY_SHIPPING_PACKAGE_TYPE", "").strip()
 
 # ---- Pirate Ship CSV export (see pirate_ship_csv.py) ----
 # Only for "Other"-platform sales (FB Marketplace, website, etc.) that were

@@ -470,12 +470,14 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
     modal cap.
 
     Weight/dimensions are mandatory (not optional like specifics) because
-    eBay's Calculated shipping (see ebay_csv.py) needs them on every row -
-    without real values here, every listing in a batch would fail exactly
-    like the missing Item.Location/shipping-service bugs already fixed.
-    They feed the Pirate Ship CSV export too, since every approved item
-    reaches this same modal regardless of which platform it eventually
-    sells on.
+    the Pirate Ship CSV export (pirate_ship_csv.py) needs them for accurate
+    shipping labels, and every approved item reaches this same modal
+    regardless of which platform it eventually sells on. eBay's own CSV
+    upload (ebay_csv.py) doesn't carry weight/condition/price/shipping data
+    at all any more - it uses eBay's newer AI-prefill bulk template, which
+    only wants SKU/photos/title/category/aspects; eBay suggests the rest
+    itself once the file's processed. Still worth capturing here: it's
+    useful business data regardless, and feeds Pirate Ship either way.
 
     If there's no existing eBay listing data yet, price/weight/dimensions
     pre-fill from Automated Review's own rough estimates (items.

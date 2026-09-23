@@ -131,9 +131,9 @@ def _build_system_prompt() -> str:
 # estimated_weight_lb/estimated_*_in (step 8 above) are visual guesses from
 # the photo, same "never authoritative" status as suggested_price - the
 # eBay listing modal pre-fills these fields but always requires a human to
-# confirm or correct them before Approve, since eBay's Calculated shipping
-# charges the buyer based on whatever weight/dimensions end up on the
-# listing - a wildly wrong AI guess here has a real dollar cost, not just a
+# confirm or correct them before Approve, since the Pirate Ship CSV export
+# (pirate_ship_csv.py) uses this weight/dimensions to buy real shipping
+# labels - a wildly wrong AI guess here has a real dollar cost, not just a
 # cosmetic one.
 
 
