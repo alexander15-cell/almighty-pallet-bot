@@ -41,6 +41,7 @@ import database as db
 import ai_review
 import ebay_api
 import ebay_csv
+import ebay_taxonomy
 import finance_utils
 import r2_storage
 import runtime_settings
@@ -160,117 +161,112 @@ class EbayConditionSelectView(discord.ui.View):
     async def _on_select(self, interaction: discord.Interaction):
         condition_id = self.select.values[0]
         item = db.get_item(self.item_id)
-        suggested_name = item.get("ai_suggested_category")
-        suggested_category_id = config.EBAY_CATEGORIES.get(suggested_name)
-        if suggested_category_id:
+        suggested_query = item.get("ai_suggested_category")
+        matches = ebay_taxonomy.search(suggested_query, limit=1) if suggested_query else []
+        if matches:
+            category_id, category_path = matches[0]
             await interaction.response.edit_message(
                 content=(
-                    f"eBay category: **{suggested_name}** (AI suggested). "
-                    "Tap \"Change category\" below to pick a different one, or continue to format."
+                    f"eBay category: **{category_path}** (AI suggested \"{suggested_query}\", "
+                    "matched against eBay's real category list). Tap \"Change category\" below "
+                    "to pick a different one, or continue to format."
                 ),
                 view=EbayFormatSelectView(
-                    self.item_id, condition_id, suggested_category_id, show_change_category=True,
+                    self.item_id, condition_id, category_id, show_change_category=True,
                 ),
             )
         else:
             await interaction.response.edit_message(
                 content="Now select this item's eBay category...",
-                view=EbayCategorySelectView(self.item_id, condition_id),
+                view=EbayCategoryPickView(self.item_id, condition_id),
             )
 
 
-class EbayCategorySelectView(discord.ui.View):
+def _category_option_label(full_path: str, prefix: str = "") -> str:
     """
-    Category picker: shown as step 2 when Automated Review didn't suggest a
-    usable category, or when the reviewer taps "Change category" after an
-    AI suggestion was auto-applied. Built from config.EBAY_CATEGORIES,
-    sorted first by whether the category has ever been CONFIRMED live on
-    eBay (database.get_ebay_category_confirmed_counts - the only "this
-    category actually works" signal available without eBay API access),
-    then by how often it's been picked at all (get_ebay_category_counts),
-    then unused/new categories alphabetically. A confirmed category's label
-    gets a "✅ " prefix so it's visually obvious which ones are proven, not
-    just picked before. Discord select menus cap out at 25 options; if
-    EBAY_CATEGORIES ever grows past that, only the top-ranked 25 show here
-    (logged to console) until pagination gets added. Also drops any entry
-    whose id duplicates an already-included one (keeping the highest-ranked
-    name), since Discord rejects the whole select outright if two options
-    share a value - this once took down every item approval at once (see
-    EBAY_CATEGORIES' "(DUPLICATE ID" comment).
+    Discord's SelectOption.label caps at 100 chars, and eBay's own full
+    breadcrumb paths (L1 > L2 > ... > leaf) can run well past that (~28% of
+    them do) - truncating the raw string from the end would risk cutting
+    off the actual leaf category name (the part a reviewer actually needs
+    to read) while keeping less useful top-level context. Puts the leaf
+    name first instead, so it's never the part that gets cut, with as much
+    ancestor context as still fits after it. `prefix` (e.g. "✅ " for a
+    confirmed-working category) goes directly on the leaf name, not
+    smashed into the truncated ancestor text where it'd be easy to miss.
+    """
+    parts = full_path.split(" > ")
+    leaf = prefix + parts[-1]
+    ancestors = " > ".join(parts[:-1])
+    if not ancestors:
+        return leaf[:100]
+    label = f"{leaf} ({ancestors})"
+    if len(label) <= 100:
+        return label
+    room = 100 - len(leaf) - 4  # " (" + ")" + the "…" itself
+    if room > 10:
+        return f"{leaf} ({ancestors[:room].rstrip()}…)"
+    return leaf[:100]
+
+
+class EbayCategoryPickView(discord.ui.View):
+    """
+    Manual category picker (step 2), shown when Automated Review didn't
+    suggest a usable category, or the reviewer taps "Change category". eBay
+    has ~18,000 real leaf categories (see ebay_taxonomy.py, built from
+    eBay's own official category export) - far more than Discord's
+    25-option select cap, so there's no single static dropdown that could
+    ever cover every category this bot might need. Instead: a quick-pick
+    dropdown of categories this team has actually used before (sorted
+    CONFIRMED-live-on-eBay first via database.get_ebay_category_confirmed_counts,
+    then by raw pick count - the same signal this used before eBay's real
+    taxonomy data existed, still useful for "which of our proven categories
+    fits again"), plus a "🔍 Search categories" button that searches the
+    full official taxonomy by keyword for anything not already in the
+    quick-pick list - covering every real eBay category, not a hand-curated
+    subset capped at 25.
 
     Nothing here is pre-checked (`default`) - see EbayConditionSelectView's
     docstring for why that breaks re-tapping the already-highlighted
-    option on Discord's mobile client. Picking a category moves to the
-    format select (step 3).
+    option on Discord's mobile client. Picking a category (quick-pick or
+    search result) moves to the format select (step 3).
     """
 
-    MAX_OPTIONS = 25
+    MAX_QUICK_PICK = 24  # leaves room for the search button as a 25th component in the worst case
 
     def __init__(self, item_id: int, condition_id: str):
         super().__init__(timeout=300)
         self.item_id = item_id
         self.condition_id = condition_id
 
-        def _is_fallback_only(name: str) -> bool:
-            return "(top-level)" in name or "(parent/fallback)" in name or "(NOT A LEAF" in name or "(DUPLICATE ID" in name
-
         counts = db.get_ebay_category_counts()
         confirmed_counts = db.get_ebay_category_confirmed_counts()
-        ranked = sorted(
-            config.EBAY_CATEGORIES.items(),
-            key=lambda name_and_id: (
-                _is_fallback_only(name_and_id[0]),
-                -confirmed_counts.get(name_and_id[1], 0),
-                -counts.get(name_and_id[1], 0),
-                name_and_id[0].lower(),
-            ),
+        ranked_ids = sorted(
+            counts.keys() | confirmed_counts.keys(),
+            key=lambda category_id: (-confirmed_counts.get(category_id, 0), -counts.get(category_id, 0)),
         )
 
-        # Discord flatly rejects a select menu with two options sharing the
-        # same value ("The specified option value is already used") - a
-        # crash, not a cosmetic glitch, and it takes down EVERY item
-        # approval, not just the categories involved (see EBAY_CATEGORIES'
-        # own "(DUPLICATE ID" comment for how this actually happened once).
-        # Keep only the first (highest-ranked) name for each id as a hard
-        # safety net against that ever recurring, whatever config.py says.
-        seen_ids = set()
-        deduped = []
-        dropped = []
-        for name, category_id in ranked:
-            if category_id in seen_ids:
-                dropped.append(name)
+        options = []
+        for category_id in ranked_ids:
+            path = ebay_taxonomy.get_path(category_id)
+            if not path:
+                # An id this team used before that no longer resolves (a
+                # stale one from before a taxonomy refresh, or a manually
+                # entered ID via /ebay retry-item) - skip rather than show
+                # a blank/unreadable option.
                 continue
-            seen_ids.add(category_id)
-            deduped.append((name, category_id))
-        if dropped:
-            print(
-                f"[item_flow] config.EBAY_CATEGORIES has duplicate IDs - dropped "
-                f"{dropped!r} from the category picker (each id can only appear once "
-                f"in a Discord select). Give these their own real leaf category IDs."
-            )
-        ranked = deduped
+            prefix = "✅ " if confirmed_counts.get(category_id) else ""
+            options.append(discord.SelectOption(label=_category_option_label(path, prefix=prefix), value=category_id))
+            if len(options) >= self.MAX_QUICK_PICK:
+                break
 
-        truncated = len(ranked) > self.MAX_OPTIONS
-        if truncated:
-            print(
-                f"[item_flow] config.EBAY_CATEGORIES has {len(config.EBAY_CATEGORIES)} entries, "
-                f"over Discord's {self.MAX_OPTIONS}-option select limit - only the "
-                f"{self.MAX_OPTIONS} most-used are shown. Needs pagination."
-            )
-            ranked = ranked[:self.MAX_OPTIONS]
+        if options:
+            self.select = discord.ui.Select(placeholder="Or pick a previously-used category...", options=options)
+            self.select.callback = self._on_select
+            self.add_item(self.select)
 
-        self.select = discord.ui.Select(
-            placeholder="Select this item's eBay category..." + (" (list truncated)" if truncated else ""),
-            options=[
-                discord.SelectOption(
-                    label=(f"✅ {name}" if confirmed_counts.get(category_id) else name)[:100],
-                    value=category_id,
-                )
-                for name, category_id in ranked
-            ],
-        )
-        self.select.callback = self._on_select
-        self.add_item(self.select)
+        search_button = discord.ui.Button(label="🔍 Search categories", style=discord.ButtonStyle.secondary)
+        search_button.callback = self._on_search
+        self.add_item(search_button)
 
     async def _on_select(self, interaction: discord.Interaction):
         category_id = self.select.values[0]
@@ -278,6 +274,82 @@ class EbayCategorySelectView(discord.ui.View):
             content="Fixed price or auction?",
             view=EbayFormatSelectView(self.item_id, self.condition_id, category_id),
         )
+
+    async def _on_search(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(EbayCategorySearchModal(self.item_id, self.condition_id))
+
+
+class EbayCategorySearchModal(discord.ui.Modal, title="Search eBay Categories"):
+    """
+    Reached via EbayCategoryPickView's "🔍 Search categories" button (or
+    EbayCategorySearchResultsView's "Search again"). Looks the reviewer's
+    keywords up against eBay's full official taxonomy (ebay_taxonomy.py)
+    and shows up to 25 ranked matches to pick from - no static dropdown
+    could ever list all ~18,000 real categories, so search replaces
+    browsing for anything not already in the quick-pick list.
+    """
+
+    def __init__(self, item_id: int, condition_id: str):
+        super().__init__()
+        self.item_id = item_id
+        self.condition_id = condition_id
+        self.query = discord.ui.TextInput(
+            label="Keywords (e.g. \"cordless drill\")",
+            placeholder="A few words describing the item type",
+            max_length=100,
+        )
+        self.add_item(self.query)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        query = self.query.value.strip()
+        matches = ebay_taxonomy.search(query, limit=25)
+        if not matches:
+            await interaction.response.edit_message(
+                content=f"No eBay categories matched \"{query}\" - try different or fewer keywords.",
+                view=EbayCategoryPickView(self.item_id, self.condition_id),
+            )
+            return
+        await interaction.response.edit_message(
+            content=f"Categories matching \"{query}\" - pick one, or search again:",
+            view=EbayCategorySearchResultsView(self.item_id, self.condition_id, matches),
+        )
+
+
+class EbayCategorySearchResultsView(discord.ui.View):
+    """Up to 25 ranked eBay category search results (from
+    EbayCategorySearchModal) as a select, plus a "Search again" button for
+    when none of them fit. matches' category IDs are always unique (each
+    comes from a distinct row in ebay_taxonomy.py's index), so unlike the
+    old static EBAY_CATEGORIES dict this can't produce duplicate option
+    values."""
+
+    def __init__(self, item_id: int, condition_id: str, matches: list):
+        super().__init__(timeout=300)
+        self.item_id = item_id
+        self.condition_id = condition_id
+        self.select = discord.ui.Select(
+            placeholder="Pick a category...",
+            options=[
+                discord.SelectOption(label=_category_option_label(full_path), value=category_id)
+                for category_id, full_path in matches
+            ],
+        )
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+        search_again = discord.ui.Button(label="🔍 Search again", style=discord.ButtonStyle.secondary)
+        search_again.callback = self._on_search_again
+        self.add_item(search_again)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        category_id = self.select.values[0]
+        await interaction.response.edit_message(
+            content="Fixed price or auction?",
+            view=EbayFormatSelectView(self.item_id, self.condition_id, category_id),
+        )
+
+    async def _on_search_again(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(EbayCategorySearchModal(self.item_id, self.condition_id))
 
 
 class EbayFormatSelectView(discord.ui.View):
@@ -291,7 +363,7 @@ class EbayFormatSelectView(discord.ui.View):
 
     When reached right after an AI-suggested category was auto-applied
     (see EbayConditionSelectView._on_select), show_change_category adds a
-    button that goes back to the manual EbayCategorySelectView in case the
+    button that goes back to the manual EbayCategoryPickView in case the
     reviewer disagrees with the AI's pick.
     """
 
@@ -329,7 +401,7 @@ class EbayFormatSelectView(discord.ui.View):
     async def _on_change_category(self, interaction: discord.Interaction):
         await interaction.response.edit_message(
             content="Now select this item's eBay category...",
-            view=EbayCategorySelectView(self.item_id, self.condition_id),
+            view=EbayCategoryPickView(self.item_id, self.condition_id),
         )
 
 

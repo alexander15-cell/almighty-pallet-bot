@@ -278,96 +278,15 @@ EBAY_AUCTION_DURATIONS = [
 ]
 
 # ---- eBay category picker ----
-# name -> eBay leaf category ID. Shown as a Discord select menu when
-# approving an item in Queue Review, sorted by how often each has actually
-# been picked (see database.get_ebay_category_counts) so your most-used
-# categories stay on top - entries whose name is tagged "(top-level)",
-# "(parent/fallback)", or "(NOT A LEAF" (not individually listable on eBay -
-# either intentionally, as a last-resort fallback, or confirmed broken and
-# awaiting a real ID) sort after everything else at equal usage, so they
-# don't crowd out real leaf categories. Discord select menus cap out at 25
-# options - if this grows past that, only the 25 top-ranked show (logged to
-# console) until pagination gets added.
-#
-# IMPORTANT: these IDs were supplied by hand, not verified against eBay's
-# real taxonomy (this bot has no eBay API access to check them) - two of
-# them ("Electrical Supplies (general)" / 259482 and "Hand Tools" / 3244)
-# already failed a real upload with eBay error 87 ("category selected is
-# not a leaf category") and are flagged below. Any other entry could have
-# the same problem and just hasn't been used yet - if a batch export fails
-# with error 87 for a category not already flagged here, add the same
-# "(NOT A LEAF - ...)" tag to its name once confirmed, so it stops being
-# suggested/picked until corrected. Look up a category's real ID via
-# eBay's own "Sell similar" flow on an existing listing in that category,
-# or eBay's category search when creating a listing by hand.
-#
-# Two pairs below were also found sharing the SAME id by hand-entry mistake
-# ("Chandeliers & Ceiling Light Fixtures"/"Recessed Lighting" both had
-# 117503; "Wall Sconces / Wall Lighting Fixtures"/"Bathroom Vanity Lighting"
-# both had 116880) - each pair is really two different eBay categories that
-# need two different real IDs, not one shared one. This isn't just a listing
-# mix-up: Discord's select menu REJECTS a duplicate option value outright
-# ("The specified option value is already used"), so this silently crashed
-# EVERY item approval the instant EbayCategorySelectView tried to build its
-# dropdown - the entire Queue Review pipeline was down, not just these four
-# categories. Tagged "(DUPLICATE ID - ...)" below (same
-# excluded-from-AI-suggestion/sorted-to-bottom treatment as "(NOT A LEAF"),
-# AND item_flow.py's EbayCategorySelectView now also defensively drops any
-# remaining duplicate-value option before building the select so a future
-# copy-paste mistake like this can't take the whole flow down again. Look up
-# each of these four names' own real leaf category ID via eBay's own
-# category search before re-enabling them.
-EBAY_CATEGORIES = {
-    # --- Lighting / electrical (Home Depot pallet) ---
-    "Ceiling Fans": "176937",
-    "Chandeliers & Ceiling Light Fixtures (DUPLICATE ID - needs its own real leaf category ID)": "117503",
-    "Recessed Lighting (DUPLICATE ID - needs its own real leaf category ID)": "117503",
-    "Wall Sconces / Wall Lighting Fixtures (DUPLICATE ID - needs its own real leaf category ID)": "116880",
-    "Bathroom Vanity Lighting (DUPLICATE ID - needs its own real leaf category ID)": "116880",
-    "LED Strip / Tape Lights": "116022",
-    "Smart LED Light Strips": "185071",
-    "Smoke & CO Detectors": "41970",
-    "Circuit Breakers & Fuse Boxes": "259485",
-    "Extension Cords": "259493",
-    "Electrical Supplies (general) (NOT A LEAF - eBay error 87, needs correct ID)": "259482",
-    "Lamps, Lighting & Ceiling Fans (parent/fallback)": "20697",
-
-    # --- EV chargers ---
-    "EV Charging Cables & Adapters": "123422",
-    "EV Charging Stations / Service Equipment": "177704",
-    "EV Charging Components": "262101",
-
-    # --- General liquidation categories ---
-    "Hand Tools (NOT A LEAF - eBay error 87, needs correct ID)": "3244",
-    "Small Kitchen Appliances": "20667",
-    "Cell Phone Accessories": "9394",
-
-    # --- Top-level parents (NOT directly listable — use only as
-    #     last-resort fallback / for grouping the manual dropdown) ---
-    "Tools & Home Improvement (top-level)": "631",
-    "Consumer Electronics (top-level)": "293",
-    "Home & Garden (top-level)": "11700",
-    "Toys & Hobbies (top-level)": "220",
-    "Sporting Goods (top-level)": "888",
-    "Clothing, Shoes & Accessories (top-level)": "11450",
-    "Business & Industrial (top-level)": "12576",
-    "Health & Beauty (top-level)": "26395",
-    "Baby (top-level)": "2984",
-    "Video Games & Consoles (top-level)": "1249",
-}
-
-# Subset of EBAY_CATEGORIES actually offered to Automated Review as a
-# suggestion (ai_review.py) - excludes the top-level/parent fallback,
-# confirmed-not-a-leaf, and duplicate-ID entries above, since none of those
-# are real listable leaf categories and should never be what the AI proposes
-# as "the" category for an item, only something a human picks manually as a
-# last resort (or after correcting a flagged entry's ID).
-EBAY_CATEGORIES_FOR_AI_SUGGESTION = {
-    name: category_id
-    for name, category_id in EBAY_CATEGORIES.items()
-    if "(top-level)" not in name and "(parent/fallback)" not in name
-    and "(NOT A LEAF" not in name and "(DUPLICATE ID" not in name
-}
+# eBay category selection no longer uses a hand-typed list here at all - see
+# ebay_taxonomy.py, which searches eBay's own official ~18,000-leaf category
+# export (ebay_categories.json) by keyword. That file replaced a small
+# hand-maintained EBAY_CATEGORIES dict that had repeatedly caused real
+# upload failures (non-leaf IDs, and once two categories accidentally
+# sharing the same ID, which crashed the entire Queue Review approval flow
+# outright). Every ID ebay_taxonomy.py can return is real, verified, and a
+# genuine listable leaf category straight from eBay's own data - there's
+# nothing to hand-configure or keep correcting here anymore.
 
 # ---- eBay CSV batch (Seller Hub bulk upload / File Exchange fallback) ----
 # Accumulates one row per item added via "Add to eBay Batch" until an admin

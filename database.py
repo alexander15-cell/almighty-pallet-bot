@@ -161,7 +161,7 @@ def init_db():
                 ai_title            TEXT,
                 ai_description      TEXT,
                 ai_flags            TEXT,
-                ai_suggested_category TEXT,          -- eBay category NAME (from config.EBAY_CATEGORIES) Automated Review guessed, pre-selects the Queue Review dropdown
+                ai_suggested_category TEXT,          -- short free-text product-type guess (e.g. "cordless drill") - resolved against eBay's real taxonomy via ebay_taxonomy.search() to pre-select the Queue Review category step
                 ai_suggested_price  REAL,             -- rough AI price guess (general knowledge, not real market data) - pre-fills the Queue Review price field, always human-editable
                 ai_suggested_weight_lb  REAL,         -- rough AI shipping-weight guess (visual estimate, not a real measurement) - pre-fills the Queue Review weight field
                 ai_suggested_length_in  REAL,         -- rough AI packaged-dimension guesses (visual estimate) - pre-fill the Queue Review dimensions field
@@ -238,18 +238,19 @@ def init_db():
             );
 
             -- One row per eBay category ID that's ever been picked during
-            -- Queue Review approval. Lets the category select menu in
-            -- item_flow.py sort config.EBAY_CATEGORIES by actual usage
-            -- (most-picked first) instead of a fixed order. confirmed_count
-            -- (unlike use_count, bumped as soon as a category is picked
-            -- during Queue Review) only increments once an item in that
-            -- category is actually confirmed live on eBay - see
-            -- record_ebay_category_confirmed - so a category that's been
-            -- picked but never successfully gone live (or, worse, already
-            -- failed with a real eBay error) doesn't look just as trusted
-            -- as one that's proven to work. This is the only "is this
-            -- category actually good" signal available without eBay API
-            -- access to verify categories directly.
+            -- Queue Review approval. Lets EbayCategoryPickView's quick-pick
+            -- dropdown (item_flow.py) sort previously-used categories by
+            -- actual usage (most-picked first) instead of a fixed order.
+            -- confirmed_count (unlike use_count, bumped as soon as a
+            -- category is picked during Queue Review) only increments once
+            -- an item in that category is actually confirmed live on eBay -
+            -- see record_ebay_category_confirmed - so a category that's
+            -- been picked but never successfully gone live doesn't look
+            -- just as trusted as one that's proven to actually sell.
+            -- ebay_taxonomy.py (eBay's own official category data) already
+            -- guarantees every ID is a real, listable leaf category, so
+            -- this table is purely about which ones this team has actually
+            -- had success with, not about ID validity anymore.
             CREATE TABLE IF NOT EXISTS ebay_category_usage (
                 category_id     TEXT PRIMARY KEY,
                 use_count       INTEGER NOT NULL DEFAULT 0,
@@ -1073,12 +1074,14 @@ def save_ai_review(item_id: int, title: str, description: str, flags: str,
     """
     suggested_category/suggested_price/suggested_weight_lb/suggested_*_in
     are Automated Review's own guesses (see ai_review.SYSTEM_PROMPT) -
-    suggested_category is an eBay category NAME from config.EBAY_CATEGORIES
-    (not an ID; item_flow.py's category select maps it to an ID at Queue
-    Review time), suggested_price is a rough estimate from the model's
-    general knowledge, not real market data, and the weight/dimensions are
-    a rough visual estimate, not an actual measurement. All of these are
-    just pre-fills for Queue Review's approval flow - never authoritative,
+    suggested_category is a short free-text product-type phrase (e.g.
+    "cordless drill"), not an eBay category name or ID; item_flow.py
+    resolves it against eBay's real taxonomy (ebay_taxonomy.search()) to
+    pre-select a real leaf category at Queue Review time. suggested_price
+    is a rough estimate from the model's general knowledge, not real market
+    data, and the weight/dimensions are a rough visual estimate, not an
+    actual measurement. All of these are just pre-fills for Queue Review's
+    approval flow - never authoritative,
     always human-editable/overridable before Approve.
     """
     with get_conn() as conn:

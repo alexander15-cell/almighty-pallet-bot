@@ -59,12 +59,14 @@ import config
 # config.AI_ENABLED before invoking the AI step at all.
 _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY) if config.ANTHROPIC_API_KEY else None
 
-# {category_list} is filled in at request time (see _build_system_prompt) from
-# config.EBAY_CATEGORIES_FOR_AI_SUGGESTION (EBAY_CATEGORIES minus its
-# top-level/parent "fallback only" entries - those aren't real listable
-# categories and shouldn't be what the model proposes), so the model only
-# ever suggests a category name we actually have an ID for - item_flow.py's
-# category select maps the name it returns back to an ID.
+# suggested_category (step 6 below) is a short free-text product-type guess,
+# not a pick from a fixed list - eBay's real taxonomy has ~18,000 leaf
+# categories (see ebay_categories.json/ebay_taxonomy.py), far too many to
+# hand the model as an enum in every request. item_flow.py resolves this
+# guess against the real taxonomy via ebay_taxonomy.search() after the
+# model responds, so the model's job is just to describe the item type
+# plainly - the keyword search (backed by eBay's own official category
+# data) does the actual matching to a real, guaranteed-listable leaf ID.
 SYSTEM_PROMPT_TEMPLATE = """You are helping a small resale business turn a quick warehouse note \
 into an accurate, honest resale listing draft. You will be shown one or more photos of a \
 single physical item plus the short note the intake person wrote.
@@ -83,10 +85,10 @@ is possible.
 "new" but photo shows visible wear; note says "complete" but a component looks missing).
 5. If the item cannot be confidently identified from the photo, say so plainly rather than \
 guessing.
-6. Suggest the single eBay category that best fits this item, from this exact list (respond \
-with the name EXACTLY as written below, or null if none of them fit reasonably well - never \
-invent a category name that isn't in this list):
-{category_list}
+6. Describe what kind of product this is in a few plain words, suited for a category search \
+(e.g. "cordless impact wrench", "ceiling fan", "kitchen faucet") - NOT eBay's own category \
+naming, just a short, specific product-type phrase. Use null only if you truly cannot tell \
+what kind of item it is at all.
 7. Suggest a realistic USD starting price, based on your general knowledge of resale values \
 for this kind of item. This is a rough estimate from general knowledge, NOT real market \
 data - it always needs a human to confirm or adjust it before the item is actually listed.
@@ -97,26 +99,23 @@ weigh/measure and correct before it's used for real shipping calculations - neve
 accurate. If you cannot make any reasonable estimate, use null instead of guessing wildly.
 
 Respond ONLY with valid JSON, no other text, in this exact shape:
-{{
+{
   "identified_item": "short string",
   "suggested_title": "string",
   "suggested_description": "string",
   "flags": ["list of strings, empty list if nothing to flag"],
   "confidence": "high" | "medium" | "low",
-  "suggested_category": "exact category name from the list above, or null",
+  "suggested_category": "short product-type phrase for a category search, or null",
   "suggested_price": number or null,
   "estimated_weight_lb": number or null,
   "estimated_length_in": number or null,
   "estimated_width_in": number or null,
   "estimated_height_in": number or null
-}}"""
+}"""
 
 
 def _build_system_prompt() -> str:
-    category_list = "\n".join(
-        f"- {name}" for name in config.EBAY_CATEGORIES_FOR_AI_SUGGESTION
-    ) or "(no categories configured)"
-    return SYSTEM_PROMPT_TEMPLATE.format(category_list=category_list)
+    return SYSTEM_PROMPT_TEMPLATE
 
 
 # suggested_price (step 7 above) is a guess from the model's general

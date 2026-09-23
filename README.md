@@ -31,7 +31,9 @@ Every item's card always shows which pallet it belongs to.
   liquidation-sale disclaimer - sold as-is, not individually tested for
   full functionality, buyer should review photos for minor cosmetic wear),
   flags anything inconsistent between the note and the photo, and suggests
-  an eBay category (from `config.EBAY_CATEGORIES`), a starting price, and a
+  an eBay category (a short product-type phrase like "cordless drill",
+  matched against eBay's real ~18,000-category taxonomy - see
+  `ebay_taxonomy.py` - rather than a fixed list), a starting price, and a
   rough shipping weight/dimensions (from a visual estimate off the photo) -
   Claude's cloud API by default, or a local Ollama model (see "Running with
   the Ollama backend" below) if you'd rather avoid per-item API cost.
@@ -46,11 +48,15 @@ Every item's card always shows which pallet it belongs to.
   the item on eBay later: a condition dropdown (`config.EBAY_CONDITIONS` -
   New / New other / New with defects / Used / For parts, with "New other"
   sorted to the top since most liquidation items land there), then either a
-  category dropdown (`config.EBAY_CATEGORIES`, sorted by how often each has
-  actually been picked) *or*, when Automated Review suggested a category, an
-  automatic skip straight past that dropdown - the AI's pick is applied and
-  shown as text, with a "Change category" button if you disagree - a format
-  dropdown (Fixed Price or Auction - decided per item, not a global switch;
+  category step *or*, when Automated Review suggested a category, an
+  automatic skip past it - the AI's guess is matched against eBay's real
+  taxonomy and applied, shown as text, with a "Change category" button if
+  you disagree. The manual category step itself is a quick-pick dropdown of
+  categories this team has actually used before (sorted by proven success,
+  see "Known limitations" below) plus a "🔍 Search categories" button
+  that searches all ~18,000 real eBay categories by keyword - not a fixed
+  dropdown, since no static list could cover everything a liquidation
+  pallet might contain. Then a format dropdown (Fixed Price or Auction - decided per item, not a global switch;
   Auction adds one more step for the listing duration: 3/5/7/10 days), then
   a short form for title, price/starting bid, shipping weight (lb) and
   packaged dimensions (L x W x H, in inches) - all pre-filled with the AI's
@@ -457,13 +463,17 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   "Installation" - eBay rejects every row without them), or if any pending
   item is missing its weight/dimensions (items approved before those became
   required fields) - use `/ebay retry-item` to fill them in.
+- `/ebay category-search <query>` - looks up real eBay leaf category IDs by
+  keyword against eBay's own official taxonomy (`ebay_taxonomy.py`, ~18,000
+  categories) - mainly for finding an ID to pass to `/ebay retry-item`'s
+  `category_id`.
 - `/ebay retry-item <item_number> [category_id] [condition_id] [specifics]
   [weight_lb] [dimensions]` - run inside a pallet's category. For an item
   whose batch upload actually failed (check the results CSV or Seller Hub)
   - re-queues it into the current live CSV so the next `/ebay export-batch`
   picks it up again, with any config fixes since its last attempt (e.g.
-  `EBAY_ITEM_LOCATION`) applied fresh. Pass `category_id` to correct the
-  category (eBay error 87, "not a leaf category"), `condition_id` to
+  `EBAY_ITEM_LOCATION`) applied fresh. Pass `category_id` (look one up via
+  `/ebay category-search`) to correct the category, `condition_id` to
   correct the condition (eBay: "condition id is invalid for the selected
   category" - not every condition is valid in every category), `specifics`
   as `Key=Value, Key2=Value2` to add/fix required item specifics (eBay:
@@ -611,8 +621,9 @@ Tables:
   auction) + duration, price (or auction starting bid), and item specifics
   (stored as JSON, since which attributes apply varies by category)
 - **ebay_category_usage** - one row per eBay category ID ever picked, with a
-  running count - lets the category select menu sort `config.EBAY_CATEGORIES`
-  by actual usage instead of a fixed order
+  running count - lets Queue Review's quick-pick category dropdown sort
+  previously-used categories by actual usage (and, more importantly,
+  proven success - see "Known limitations" below)
 - **item_events** - an append-only audit log of every status change and
   price recording, including deletions
 
@@ -661,25 +672,29 @@ this scale.
 - **`/ebay confirm-listed` is a manual step.** There's no live eBay API to
   automatically detect that an uploaded CSV batch was actually processed, so
   someone has to check Seller Hub and confirm it by hand.
-- **`config.EBAY_CATEGORIES`' IDs were entered by hand, not verified against
-  eBay's real taxonomy** - this bot has no eBay API access to check them.
-  Two entries have already failed a real upload with eBay error 87
-  ("category selected is not a leaf category") and are tagged
-  `(NOT A LEAF - ...)` in `config.py` so they're excluded from AI
-  suggestions and sorted to the bottom of the manual dropdown. Any
-  category not yet used could have the same problem; if `/ebay
-  export-batch` comes back with error 87 for one, use `/ebay retry-item
-  <item_number> category_id:<corrected id>` to fix that item and add the
-  same tag to that entry in `config.py` so it's not offered again until
-  corrected. Look up a real leaf category ID via eBay's own "Sell similar"
-  flow on an existing listing in that category. Since this bot has no
-  eBay API access to verify categories ahead of time, the category select
-  instead sorts by what's actually **confirmed working**: once an item in
-  a category is confirmed live (via `/ebay confirm-listed` or a matched
-  success row in `/ebay import-results`), that category gets a "✅ " label
-  and sorts ahead of everything else, including categories picked more
-  often but never confirmed - the team naturally converges on
-  proven-working categories over time without anyone tracking this by hand.
+- **eBay category selection uses eBay's own official taxonomy, not a
+  hand-typed list.** `ebay_categories.json` (loaded by `ebay_taxonomy.py`)
+  is generated from eBay's published category export (~18,000 real leaf
+  categories) - every ID it can return is guaranteed real and listable, so
+  there's no more equivalent of the old error-87 ("category selected is
+  not a leaf category") failures this used to need hand-fixing. Both
+  Automated Review's AI suggestion and Queue Review's manual "🔍 Search
+  categories" step search this data by keyword (`ebay_taxonomy.search()`)
+  rather than picking from a small fixed list - there are simply too many
+  real eBay categories to hand the AI a fixed enum or fit in a single
+  Discord dropdown (25-option cap). `/ebay category-search <query>` looks
+  the same data up on demand, e.g. to find an ID for `/ebay retry-item
+  <item_number> category_id:<corrected id>`. Since even a real category ID
+  can turn out to be a poor fit or underperform for this business, Queue
+  Review's quick-pick dropdown still sorts by what's actually **confirmed
+  working**: once an item in a category is confirmed live (via `/ebay
+  confirm-listed` or a matched success row in `/ebay import-results`), that
+  category gets a "✅ " label and sorts ahead of everything else, including
+  categories picked more often but never confirmed - the team naturally
+  converges on proven-working categories over time without anyone tracking
+  this by hand. To refresh `ebay_categories.json` from a newer eBay
+  taxonomy export, see the regeneration notes in `ebay_taxonomy.py`'s
+  module docstring.
 - **Automated Review's suggested price is a general-knowledge guess, not
   real market data.** The model has no access to actual eBay sold listings
   for the item - it's only ever a Queue Review pre-fill, always editable,

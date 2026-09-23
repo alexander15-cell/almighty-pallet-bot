@@ -25,6 +25,10 @@ used while there's no live eBay API integration:
                        Listed by hand, for anyone who'd rather just check
                        Seller Hub directly than download/upload a results
                        CSV.
+/ebay category-search - looks up real eBay leaf category IDs by keyword
+                       against eBay's own official taxonomy (see
+                       ebay_taxonomy.py) - mainly for finding an ID to pass
+                       to /ebay retry-item's category_id correction.
 
 All of these require the Pallet Admin role, same as admin_tools.py. The
 actual message/status moving is delegated to the ItemFlow cog (via
@@ -41,6 +45,7 @@ import config
 import database as db
 import ebay_csv
 import ebay_results
+import ebay_taxonomy
 import finance_utils
 import runtime_settings
 
@@ -357,12 +362,27 @@ class Ebay(commands.Cog):
         )
 
     @ebay_group.command(
+        name="category-search",
+        description="Search eBay's real category list by keyword - IDs for /ebay retry-item's category_id.",
+    )
+    @app_commands.describe(query="A few words describing the item type, e.g. 'cordless drill'")
+    async def category_search(self, interaction: discord.Interaction, query: str):
+        if not await _require_admin(interaction):
+            return
+        matches = ebay_taxonomy.search(query, limit=10)
+        if not matches:
+            await interaction.response.send_message(f"No eBay categories matched `{query}`.", ephemeral=True)
+            return
+        lines = "\n".join(f"`{category_id}` - {path}" for category_id, path in matches)
+        await interaction.response.send_message(f"Categories matching `{query}`:\n{lines}", ephemeral=True)
+
+    @ebay_group.command(
         name="retry-item",
         description="Re-queue a failed batch item, fixing whatever caused the failure. Run in its pallet's category.",
     )
     @app_commands.describe(
         item_number="The item's number shown on its card (e.g. 3)",
-        category_id="Optional - a corrected eBay leaf category ID (error 87, 'not a leaf category')",
+        category_id="Optional - a corrected eBay leaf category ID (see /ebay category-search)",
         condition_id="Optional - a corrected condition ID (error: 'condition id is invalid for the selected category')",
         specifics="Optional - item specifics to add/fix, as 'Key=Value, Key2=Value2' - merged into what's already saved",
         weight_lb="Optional - a corrected weight in pounds, e.g. 2.5",
