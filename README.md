@@ -194,6 +194,18 @@ backend" below.)
 
 ## 2. Running the bot
 
+The easiest way: run `start_bot.bat` (Windows - double-click it, or make a
+Desktop shortcut to it) or `./start_bot.sh` (Linux/macOS). Either one
+creates the virtual environment and installs/updates dependencies
+automatically, creates `.env` from `.env.example` and tells you to fill it
+in if it's missing, checks `DISCORD_BOT_TOKEN` is actually set before
+trying to start, and keeps the window open with the real error (instead of
+flashing shut) if the bot exits - offering to restart it right there. Run
+it again any time you want to start the bot, including after pulling
+updates.
+
+To do the same thing by hand instead:
+
 ```bash
 cd pallet-bot
 python -m venv venv
