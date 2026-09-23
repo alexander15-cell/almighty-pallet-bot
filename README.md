@@ -295,12 +295,18 @@ four values are set, restart the bot and the API button reappears - though
 `ebay_api.py` itself still needs a real integration written before it does
 anything.
 
-**`EBAY_ITEM_LOCATION` is required regardless of the above** - set it in
-`.env` to your seller account's real ship-from location (a city/state like
-`Columbus, OH`, or a ZIP code) before running `/ebay export-batch`. eBay
-rejects every row in a bulk upload without it (`No <Item.Location>
-exists`); the bot refuses to export a batch at all until this is set,
-rather than handing you a CSV that's guaranteed to fail on every row.
+**`EBAY_ITEM_LOCATION`, `EBAY_SHIPPING_SERVICE`, and `EBAY_SHIPPING_COST`
+are required regardless of the above** - eBay rejects every row in a bulk
+upload without a location (`No <Item.Location> exists`) and a shipping
+service (`Please add at least one valid shipping service option`); the bot
+refuses to export a batch at all until all three are set in `.env`, rather
+than handing you a CSV guaranteed to fail on every row. `EBAY_ITEM_LOCATION`
+is your ship-from city/state (e.g. `Columbus, OH`) or ZIP; `EBAY_SHIPPING_SERVICE`
+is a real eBay shipping service code (e.g. `USPSPriority`) - verify it via
+eBay's own listing flow rather than trusting an example blindly, same as
+category IDs. This applies one flat shipping rate/service to every item in
+a batch, since this bot doesn't track per-item weight/dimensions for
+calculated shipping.
 
 ### Running without R2
 
@@ -432,16 +438,23 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   Discord attachment, archives and clears it so the next **Add to eBay
   Batch** click starts a fresh file, and records a durable, numbered batch
   snapshot (`/ebay batches`/`/ebay batch`) of exactly which items went out
-  in it. Refuses to export at all if `EBAY_ITEM_LOCATION` isn't set (see
-  "Installation" - eBay rejects every row without it).
-- `/ebay retry-item <item_number> [category_id]` - run inside a pallet's
-  category. For an item whose batch upload actually failed (check the
-  results CSV or Seller Hub) - re-queues it into the current live CSV so
-  the next `/ebay export-batch` picks it up again, with any config fixes
-  since its last attempt (e.g. `EBAY_ITEM_LOCATION`) applied fresh. Pass
-  `category_id` to correct the category too if the failure was eBay error
-  87 ("category selected is not a leaf category") - otherwise the retry
-  would just resubmit the same bad category and fail identically.
+  in it. Refuses to export at all if `EBAY_ITEM_LOCATION`,
+  `EBAY_SHIPPING_SERVICE`, or `EBAY_SHIPPING_COST` isn't set (see
+  "Installation" - eBay rejects every row without them).
+- `/ebay retry-item <item_number> [category_id] [condition_id] [specifics]`
+  - run inside a pallet's category. For an item whose batch upload
+  actually failed (check the results CSV or Seller Hub) - re-queues it
+  into the current live CSV so the next `/ebay export-batch` picks it up
+  again, with any config fixes since its last attempt (e.g.
+  `EBAY_ITEM_LOCATION`) applied fresh. Pass `category_id` to correct the
+  category (eBay error 87, "not a leaf category"), `condition_id` to
+  correct the condition (eBay: "condition id is invalid for the selected
+  category" - not every condition is valid in every category), and/or
+  `specifics` as `Key=Value, Key2=Value2` to add/fix required item
+  specifics (eBay: "The item specific X is missing") - merged into
+  whatever specifics are already saved, not a full replacement. Skipping
+  a needed correction just resubmits the same bad data and fails
+  identically.
 - `/ebay import-results <batch_id> <results_csv>` - reconciles a batch
   against the results/report CSV Seller Hub gives you after processing an
   upload. Column names in eBay's results CSVs vary, so this matches them

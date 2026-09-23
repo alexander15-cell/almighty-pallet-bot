@@ -102,3 +102,20 @@ def test_existing_batch_file_gains_new_base_columns_on_next_append(tmp_path, mon
     assert "*Location" in fieldnames
     new_row = next(r for r in rows if r["CustomLabel"] == "pallet-1-item-2")
     assert new_row["*Location"] == "Columbus, OH"
+
+
+def test_row_includes_configured_shipping_fields(tmp_path, monkeypatch):
+    # eBay also rejects every row without a shipping service ("Please add
+    # at least one valid shipping service option to your listing") - a
+    # second real upload failure this test guards against recurring.
+    monkeypatch.setattr(ebay_csv, "BATCH_CSV_PATH", tmp_path / "batch.csv")
+    monkeypatch.setattr(config, "EBAY_SHIPPING_TYPE", "Flat")
+    monkeypatch.setattr(config, "EBAY_SHIPPING_SERVICE", "USPSPriority")
+    monkeypatch.setattr(config, "EBAY_SHIPPING_COST", "8.00")
+    ebay_csv.append_item_to_batch(_fake_item(), _fake_listing())
+
+    _, rows = ebay_csv._read_existing_rows()
+    row = rows[0]
+    assert row["ShippingType"] == "Flat"
+    assert row["ShippingService-1:Option"] == "USPSPriority"
+    assert row["ShippingService-1:Cost"] == "8.00"

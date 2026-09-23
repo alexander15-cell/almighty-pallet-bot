@@ -27,6 +27,14 @@ without it ("No <Item.Location> exists"), so cogs/ebay.py's export-batch
 command refuses to export at all until this is configured, rather than
 producing a batch that's guaranteed to fail on every row.
 
+ShippingType/ShippingService-1:Option/ShippingService-1:Cost
+(config.EBAY_SHIPPING_TYPE/EBAY_SHIPPING_SERVICE/EBAY_SHIPPING_COST) are
+the same story - eBay rejects every row without at least one shipping
+service too ("Please add at least one valid shipping service option").
+This bot doesn't track per-item weight/dimensions, so it's one flat
+service/cost applied to every item in a batch until per-item shipping
+gets built - a blunt instrument, but better than every row failing.
+
 This lives outside any single cog, same as finance_utils.py, because both
 item_flow.py (writes rows) and ebay.py (exports/archives the file) need the
 same logic.
@@ -59,6 +67,9 @@ BASE_FIELDS = [
     "*StartPrice",
     "*Quantity",
     "*Location",
+    "ShippingType",
+    "ShippingService-1:Option",
+    "ShippingService-1:Cost",
 ]
 
 
@@ -132,6 +143,9 @@ def append_item_to_batch(item: dict, listing: dict) -> None:
         "*StartPrice": f"{listing['price']:.2f}",
         "*Quantity": "1",
         "*Location": config.EBAY_ITEM_LOCATION,
+        "ShippingType": config.EBAY_SHIPPING_TYPE,
+        "ShippingService-1:Option": config.EBAY_SHIPPING_SERVICE,
+        "ShippingService-1:Cost": config.EBAY_SHIPPING_COST,
     })
     for key, value in specifics.items():
         row[f"C:{key}"] = value

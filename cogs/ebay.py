@@ -57,6 +57,49 @@ async def _require_admin(interaction: discord.Interaction) -> bool:
     return False
 
 
+def _parse_specifics(text: str) -> dict:
+    """
+    Parses "Key=Value, Key2=Value2" (as typed into /ebay retry-item's
+    specifics option) into a dict. Deliberately simple (splits on commas,
+    then the first "=" in each piece) - doesn't support a value containing
+    a literal comma, which is an acceptable limit for a quick one-off fix,
+    not a replacement for the full Queue Review specifics field.
+    """
+    result = {}
+    for piece in text.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        if "=" not in piece:
+            raise ValueError(f"{piece!r} isn't in 'Key=Value' form")
+        key, value = piece.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if not key:
+            raise ValueError(f"{piece!r} has no key before '='")
+        result[key] = value
+    if not result:
+        raise ValueError("no 'Key=Value' pairs found")
+    return result
+
+
+def _missing_export_requirements() -> list:
+    """
+    Settings eBay's bulk upload requires on every single row, with no safe
+    default to guess - export-batch refuses to run at all while any of
+    these are unset, rather than producing a CSV that's guaranteed to fail
+    on every row. Returns a list of (setting_name, why) pairs, empty if
+    everything's configured.
+    """
+    missing = []
+    if not config.EBAY_ITEM_LOCATION:
+        missing.append(("EBAY_ITEM_LOCATION", "your ship-from city/state or ZIP, e.g. `Columbus, OH`"))
+    if not config.EBAY_SHIPPING_SERVICE:
+        missing.append(("EBAY_SHIPPING_SERVICE", "an eBay shipping service code, e.g. `USPSPriority`"))
+    if not config.EBAY_SHIPPING_COST:
+        missing.append(("EBAY_SHIPPING_COST", "a flat shipping cost, e.g. `8.00`"))
+    return missing
+
+
 class Ebay(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -68,11 +111,12 @@ class Ebay(commands.Cog):
         if not await _require_admin(interaction):
             return
 
-        if not config.EBAY_ITEM_LOCATION:
+        missing = _missing_export_requirements()
+        if missing:
+            lines = "\n".join(f"- `{name}` - {why}" for name, why in missing)
             await interaction.response.send_message(
-                "⚠️ `EBAY_ITEM_LOCATION` isn't set in `.env` - eBay rejects **every** row in a batch "
-                "without it (`No <Item.Location> exists`). Set it to your ship-from city/state or ZIP "
-                "(e.g. `Columbus, OH`), restart the bot, then try exporting again.",
+                f"⚠️ Can't export yet - eBay rejects **every** row in a batch without these, and they're "
+                f"not set in `.env`:\n{lines}\n\nSet them, restart the bot, then try exporting again.",
                 ephemeral=True,
             )
             return
@@ -270,13 +314,18 @@ class Ebay(commands.Cog):
 
     @ebay_group.command(
         name="retry-item",
-        description="Re-queue a failed batch item, optionally correcting its category. Run in its pallet's category.",
+        description="Re-queue a failed batch item, correcting category/condition/specifics. Run in its pallet's category.",
     )
     @app_commands.describe(
         item_number="The item's number shown on its card (e.g. 3)",
-        category_id="Optional - a corrected eBay leaf category ID, if the failure was 'not a leaf category' (error 87)",
+        category_id="Optional - a corrected eBay leaf category ID (error 87, 'not a leaf category')",
+        condition_id="Optional - a corrected condition ID (error: 'condition id is invalid for the selected category')",
+        specifics="Optional - item specifics to add/fix, as 'Key=Value, Key2=Value2' - merged into what's already saved",
     )
-    async def retry_item(self, interaction: discord.Interaction, item_number: int, category_id: str = None):
+    async def retry_item(
+        self, interaction: discord.Interaction, item_number: int,
+        category_id: str = None, condition_id: str = None, specifics: str = None,
+    ):
         if not await _require_admin(interaction):
             return
 
@@ -306,20 +355,34 @@ class Ebay(commands.Cog):
             )
             return
 
-        category_note = ""
+        corrections = []
         if category_id:
             listing["category_id"] = category_id.strip()
+            corrections.append(f"category → `{listing['category_id']}`")
+        if condition_id:
+            listing["condition_id"] = condition_id.strip()
+            corrections.append(f"condition → `{listing['condition_id']}`")
+        if specifics:
+            try:
+                added = _parse_specifics(specifics)
+            except ValueError as e:
+                await interaction.response.send_message(f"Couldn't parse `specifics`: {e}", ephemeral=True)
+                return
+            listing["item_specifics"].update(added)
+            corrections.append(f"specifics +{', '.join(added)}")
+
+        if corrections:
             db.save_ebay_listing_data(
                 item["id"], listing["ebay_title"], listing["category_id"], listing["condition_id"],
                 listing["price"], listing["item_specifics"], listing_format=listing["listing_format"],
                 auction_duration=listing["auction_duration"], actor_id=interaction.user.id,
             )
-            category_note = f" with category corrected to `{listing['category_id']}`"
 
         db.clear_ebay_batch_id(item["id"])
         ebay_csv.append_item_to_batch(item, listing)
+        correction_note = f" ({'; '.join(corrections)})" if corrections else ""
         await interaction.response.send_message(
-            f"🔁 Re-queued item #{item_number} into the current (live) eBay CSV batch{category_note}, "
+            f"🔁 Re-queued item #{item_number} into the current (live) eBay CSV batch{correction_note}, "
             f"picking up any config changes since its last export (e.g. `EBAY_ITEM_LOCATION`) - it'll "
             f"go out in the next `/ebay export-batch`.",
             ephemeral=True,

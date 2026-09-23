@@ -366,6 +366,20 @@ EBAY_BATCH_ARCHIVE_DIR = os.getenv("EBAY_BATCH_ARCHIVE_DIR", "data/ebay_batch_ar
 # is set, rather than producing a CSV that's guaranteed to fail on every row.
 EBAY_ITEM_LOCATION = os.getenv("EBAY_ITEM_LOCATION", "").strip()
 
+# eBay's bulk upload also REQUIRES at least one shipping service on every
+# row (confirmed against a real upload: "Please add at least one valid
+# shipping service option to your listing") - this bot doesn't track
+# per-item weight/dimensions for calculated shipping, so this is one flat
+# rate/service applied to every item in a batch, a blunt instrument until
+# per-item shipping is built. EBAY_SHIPPING_SERVICE must be one of eBay's
+# own ShippingService codes (e.g. "USPSPriority", "USPSGround",
+# "UPSGround") - there's no safe default to guess here any more than there
+# was for EBAY_ITEM_LOCATION, so all three are required before /ebay
+# export-batch will export anything.
+EBAY_SHIPPING_TYPE = os.getenv("EBAY_SHIPPING_TYPE", "Flat").strip()
+EBAY_SHIPPING_SERVICE = os.getenv("EBAY_SHIPPING_SERVICE", "").strip()
+EBAY_SHIPPING_COST = os.getenv("EBAY_SHIPPING_COST", "").strip()
+
 # ---- Pirate Ship CSV export (see pirate_ship_csv.py) ----
 # Only for "Other"-platform sales (FB Marketplace, website, etc.) that were
 # sold outside eBay - eBay sales don't need this, since Pirate Ship pulls
