@@ -310,7 +310,7 @@ class Finance(commands.Cog):
             ephemeral=True,
         )
 
-    @finance_group.command(name="reverse-sale", description="Undo an item's recorded sale (duplicate entry, fell through, etc). Run inside that pallet's category.")
+    @finance_group.command(name="reverse-sale", description="Undo an item's recorded sale (duplicate entry, fell through). Run inside that pallet's category.")
     @app_commands.describe(
         item_number="The item's number shown on its card (e.g. 3)",
         reason="Why - shown in /finance history",
