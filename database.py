@@ -211,6 +211,21 @@ def init_db():
                 category_id     TEXT PRIMARY KEY,
                 use_count       INTEGER NOT NULL DEFAULT 0
             );
+
+            -- Refunds, pallet/item-level expenses, and sale reversals - kept
+            -- separate from items.sale_price so a correction never destroys
+            -- history. get_pallet_financials() sums these by type to net
+            -- against raw revenue; /finance history lists them per pallet.
+            CREATE TABLE IF NOT EXISTS finance_transactions (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                pallet_id   INTEGER NOT NULL REFERENCES pallets(id),
+                item_id     INTEGER REFERENCES items(id),  -- NULL for a pallet-level expense not tied to one item
+                type        TEXT NOT NULL,                  -- 'refund', 'expense', or 'reversal'
+                amount      REAL NOT NULL,                   -- always positive; type determines its effect on net revenue
+                note        TEXT,
+                actor_id    INTEGER,
+                created_at  TEXT NOT NULL
+            );
             """
         )
         _migrate_add_columns(conn)
@@ -572,9 +587,14 @@ def get_pallet_financials(pallet_id: int):
       - items_received: items_received_override if Finance set one,
         otherwise a live count of non-deleted items logged for this pallet
       - cost_per_item: pallet_cost / items_received
-      - revenue_so_far: sum of sale_price across every item that has one set
-        (regardless of status - Finance can record a price whenever)
-      - profit_so_far / cost_recovery_pct: only computed once a cost is set
+      - revenue_so_far: raw sum of sale_price across every item that has one
+        set (regardless of status - Finance can record a price whenever)
+      - refunds_total / expenses_total: sums from finance_transactions
+        (see record_refund/record_expense) - refunds and expenses recorded
+        against this pallet, independent of any single item's sale_price
+      - net_revenue: revenue_so_far minus refunds_total and expenses_total -
+        this, not raw revenue_so_far, is what profit_so_far/cost_recovery_pct
+        are based on
       - status_counts: item counts by pipeline stage, for the "where's
         everything sitting" part of the live card
     This is what both /finance summary and the auto-updating pinned message
@@ -591,6 +611,13 @@ def get_pallet_financials(pallet_id: int):
             "FROM items WHERE pallet_id = ? AND sale_price IS NOT NULL",
             (pallet_id,),
         ).fetchone()
+        transactions_row = conn.execute(
+            """SELECT
+                 COALESCE(SUM(CASE WHEN type = 'refund' THEN amount ELSE 0 END), 0) AS refunds,
+                 COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) AS expenses
+               FROM finance_transactions WHERE pallet_id = ?""",
+            (pallet_id,),
+        ).fetchone()
         counts = conn.execute(
             "SELECT status, COUNT(*) AS n FROM items WHERE pallet_id = ? GROUP BY status",
             (pallet_id,),
@@ -604,6 +631,9 @@ def get_pallet_financials(pallet_id: int):
     cost_per_item = (cost / items_received) if (cost and items_received) else None
     revenue = revenue_row["revenue"] or 0.0
     n_priced = revenue_row["n_priced"]
+    refunds_total = transactions_row["refunds"] or 0.0
+    expenses_total = transactions_row["expenses"] or 0.0
+    net_revenue = revenue - refunds_total - expenses_total
 
     return {
         "pallet": pallet,
@@ -613,10 +643,13 @@ def get_pallet_financials(pallet_id: int):
         "cost_per_item": cost_per_item,
         "items_priced": n_priced,
         "revenue_so_far": revenue,
+        "refunds_total": refunds_total,
+        "expenses_total": expenses_total,
+        "net_revenue": net_revenue,
         "avg_sale_price": (revenue / n_priced) if n_priced else None,
-        "profit_so_far": (revenue - cost) if cost is not None else None,
-        "cost_recovery_pct": (revenue / cost * 100) if cost else None,
-        "broke_even": (cost is not None and revenue >= cost),
+        "profit_so_far": (net_revenue - cost) if cost is not None else None,
+        "cost_recovery_pct": (net_revenue / cost * 100) if cost else None,
+        "broke_even": (cost is not None and net_revenue >= cost),
         "status_counts": {r["status"]: r["n"] for r in counts},
     }
 
@@ -657,6 +690,90 @@ def record_item_sale(item_id: int, price: float, platform: str, actor_id: int):
             "VALUES (?, NULL, (SELECT status FROM items WHERE id = ?), ?, ?, ?)",
             (item_id, item_id, actor_id, f"Sale price recorded: ${price:.2f} on {platform}", _now()),
         )
+
+
+def record_refund(item_id: int, amount: float, reason: str, actor_id: int):
+    """
+    Logs a refund against a specific item's sale - used by /finance refund.
+    Deliberately doesn't touch items.sale_price (the original sale still
+    happened; refunds net out separately in get_pallet_financials via
+    finance_transactions, the same "correction as a new entry, not an
+    overwrite" approach as reverse_sale below), so the sale history stays
+    intact even after a refund.
+    """
+    item = get_item(item_id)
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO finance_transactions (pallet_id, item_id, type, amount, note, actor_id, created_at) "
+            "VALUES (?, ?, 'refund', ?, ?, ?, ?)",
+            (item["pallet_id"], item_id, amount, reason, actor_id, _now()),
+        )
+        conn.execute(
+            "INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp) "
+            "VALUES (?, NULL, (SELECT status FROM items WHERE id = ?), ?, ?, ?)",
+            (item_id, item_id, actor_id, f"Refund recorded: ${amount:.2f} ({reason})", _now()),
+        )
+
+
+def record_expense(pallet_id: int, amount: float, reason: str, actor_id: int, item_id: int = None):
+    """
+    Logs a cost against a pallet (packaging, listing fees, etc.) - used by
+    /finance expense. item_id is optional since an expense often isn't tied
+    to any one item (e.g. a box of shipping supplies for the whole pallet).
+    """
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO finance_transactions (pallet_id, item_id, type, amount, note, actor_id, created_at) "
+            "VALUES (?, ?, 'expense', ?, ?, ?, ?)",
+            (pallet_id, item_id, amount, reason, actor_id, _now()),
+        )
+
+
+def reverse_sale(item_id: int, reason: str, actor_id: int) -> float:
+    """
+    Undoes an item's recorded sale (e.g. it turned out to be a duplicate
+    entry, or the sale fell through) - used by /finance reverse-sale.
+    Clears items.sale_price/sale_platform back to NULL so the item no
+    longer counts as "priced" or contributes to revenue_so_far, but first
+    logs a 'reversal' finance_transactions row recording what was reversed
+    (and why), so that history survives even though the live item.sale_price
+    field itself is now empty. Returns the price that was reversed, or None
+    if the item had no sale price set to begin with (the caller should treat
+    that as a no-op, not silently succeed).
+    """
+    item = get_item(item_id)
+    old_price = item.get("sale_price")
+    if old_price is None:
+        return None
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO finance_transactions (pallet_id, item_id, type, amount, note, actor_id, created_at) "
+            "VALUES (?, ?, 'reversal', ?, ?, ?, ?)",
+            (item["pallet_id"], item_id, old_price, reason, actor_id, _now()),
+        )
+        conn.execute(
+            "UPDATE items SET sale_price = NULL, sale_platform = NULL, updated_at = ? WHERE id = ?",
+            (_now(), item_id),
+        )
+        conn.execute(
+            "INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp) "
+            "VALUES (?, NULL, (SELECT status FROM items WHERE id = ?), ?, ?, ?)",
+            (item_id, item_id, actor_id, f"Sale reversed: was ${old_price:.2f} ({reason})", _now()),
+        )
+    return old_price
+
+
+def get_finance_transactions(pallet_id: int, limit: int = 20) -> list:
+    """Most recent refunds/expenses/reversals for a pallet, newest first -
+    what /finance history shows."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT ft.*, i.item_number FROM finance_transactions ft
+               LEFT JOIN items i ON i.id = ft.item_id
+               WHERE ft.pallet_id = ? ORDER BY ft.created_at DESC LIMIT ?""",
+            (pallet_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def set_shipping_info(item_id: int, recipient_name: str, address_line1: str, address_line2: str,

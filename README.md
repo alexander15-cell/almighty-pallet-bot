@@ -97,6 +97,15 @@ and type a number:
   - `/finance record-sale` - records (or corrects) an item's actual sale
     price + platform, whenever the price is actually known. Not tied to the
     Mark as Sold click at all.
+  - `/finance refund` - logs a refund against an item's sale. Doesn't touch
+    the original sale price (that sale still happened) - refunds net out
+    separately against revenue everywhere it's shown.
+  - `/finance expense` - logs a cost against a pallet (packaging, listing
+    fees, etc.), optionally tied to one item.
+  - `/finance reverse-sale` - undoes an item's recorded sale (duplicate
+    entry, a sale that fell through) - clears its sale price but keeps a
+    record of what was reversed and why.
+  - `/finance history` - lists a pallet's recent refunds/expenses/reversals.
   - `/finance set-shipping-info` - opens a two-step form for a buyer's
     recipient name and structured address (address lines, city, state,
     postal code, country) on a non-eBay sale, feeding `/pirate-ship

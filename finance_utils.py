@@ -45,10 +45,19 @@ def build_finance_embed(pallet: dict, fin: dict) -> discord.Embed:
         inline=True,
     )
 
+    # Refunds/expenses only show once at least one has been recorded, so a
+    # pallet that never uses /finance refund or /finance expense keeps the
+    # simpler card it always had.
+    if fin["refunds_total"] or fin["expenses_total"]:
+        embed.add_field(name="Refunds", value=f"-${fin['refunds_total']:.2f}", inline=True)
+        embed.add_field(name="Expenses", value=f"-${fin['expenses_total']:.2f}", inline=True)
+        embed.add_field(name="Net Revenue", value=f"${fin['net_revenue']:.2f}", inline=True)
+
     if fin["profit_so_far"] is not None:
         pl_word = "Profit" if fin["profit_so_far"] >= 0 else "Loss"
+        label = f"{pl_word} vs. Cost" + (" (net)" if (fin["refunds_total"] or fin["expenses_total"]) else "")
         embed.add_field(
-            name=f"{pl_word} vs. Cost",
+            name=label,
             value=f"${abs(fin['profit_so_far']):.2f}",
             inline=True,
         )

@@ -25,6 +25,21 @@ Purchase Management and Finance Management commands.
                               export-batch. Deliberately independent of
                               record-sale too, since the address often isn't
                               known until after the price is agreed on.
+/finance refund            - Finance Management or Admin. Logs a refund
+                              against an item's sale. Doesn't touch the
+                              original sale_price (that sale still
+                              happened) - refunds net out separately
+                              against revenue everywhere they're shown.
+/finance expense           - Finance Management or Admin. Logs a cost
+                              against a pallet (packaging, listing fees,
+                              etc.), optionally tied to one item.
+/finance reverse-sale       - Finance Management or Admin. Undoes an item's
+                              recorded sale (e.g. a duplicate entry, a sale
+                              that fell through) - clears sale_price back
+                              to empty but keeps a record of what was
+                              reversed and why.
+/finance history            - Lists a pallet's recent refunds/expenses/
+                              reversals.
 /finance summary            - posts a fresh (non-pinned) copy of the same
                               numbers shown on the pinned card, for a
                               record in chat or to check a pallet from
@@ -227,6 +242,132 @@ class Finance(commands.Cog):
             f"${price:.2f} on {platform.strip()}. Live card updated.",
             ephemeral=True,
         )
+
+    @finance_group.command(name="refund", description="Log a refund against an item's sale. Run inside that pallet's category.")
+    @app_commands.describe(
+        item_number="The item's number shown on its card (e.g. 3)",
+        amount="Amount refunded",
+        reason="Why - shown in /finance history",
+    )
+    async def refund(self, interaction: discord.Interaction, item_number: int, amount: float, reason: str):
+        if not await _require_any_role(interaction, [config.ROLE_FINANCE_MGMT]):
+            return
+        pallet = _get_pallet_or_none(interaction)
+        if not pallet:
+            await interaction.response.send_message(
+                "Run this inside one of the pallet's own channels, not somewhere else.", ephemeral=True
+            )
+            return
+        item = db.get_item_by_pallet_and_number(pallet["id"], item_number)
+        if not item:
+            await interaction.response.send_message(f"No item #{item_number} found in **{pallet['name']}**.", ephemeral=True)
+            return
+        if amount <= 0:
+            await interaction.response.send_message("Refund amount must be positive.", ephemeral=True)
+            return
+
+        db.record_refund(item["id"], amount, reason.strip(), actor_id=interaction.user.id)
+        await finance_utils.refresh_finance_message(self.bot, pallet["id"])
+        await interaction.response.send_message(
+            f"↩️ Logged a ${amount:.2f} refund for **{pallet['name']}** item #{item_number} ({reason.strip()}). "
+            f"Live card updated.",
+            ephemeral=True,
+        )
+
+    @finance_group.command(name="expense", description="Log a cost against this pallet (packaging, fees, etc). Run inside that pallet's category.")
+    @app_commands.describe(
+        amount="Amount spent",
+        reason="What it was for - shown in /finance history",
+        item_number="Optional - tie this expense to a specific item's number",
+    )
+    async def expense(self, interaction: discord.Interaction, amount: float, reason: str, item_number: int = None):
+        if not await _require_any_role(interaction, [config.ROLE_FINANCE_MGMT]):
+            return
+        pallet = _get_pallet_or_none(interaction)
+        if not pallet:
+            await interaction.response.send_message(
+                "Run this inside one of the pallet's own channels, not somewhere else.", ephemeral=True
+            )
+            return
+        if amount <= 0:
+            await interaction.response.send_message("Expense amount must be positive.", ephemeral=True)
+            return
+
+        item_id = None
+        if item_number is not None:
+            item = db.get_item_by_pallet_and_number(pallet["id"], item_number)
+            if not item:
+                await interaction.response.send_message(f"No item #{item_number} found in **{pallet['name']}**.", ephemeral=True)
+                return
+            item_id = item["id"]
+
+        db.record_expense(pallet["id"], amount, reason.strip(), actor_id=interaction.user.id, item_id=item_id)
+        await finance_utils.refresh_finance_message(self.bot, pallet["id"])
+        item_note = f" (item #{item_number})" if item_number is not None else ""
+        await interaction.response.send_message(
+            f"🧾 Logged a ${amount:.2f} expense for **{pallet['name']}**{item_note}: {reason.strip()}. Live card updated.",
+            ephemeral=True,
+        )
+
+    @finance_group.command(name="reverse-sale", description="Undo an item's recorded sale (duplicate entry, fell through, etc). Run inside that pallet's category.")
+    @app_commands.describe(
+        item_number="The item's number shown on its card (e.g. 3)",
+        reason="Why - shown in /finance history",
+    )
+    async def reverse_sale(self, interaction: discord.Interaction, item_number: int, reason: str):
+        if not await _require_any_role(interaction, [config.ROLE_FINANCE_MGMT]):
+            return
+        pallet = _get_pallet_or_none(interaction)
+        if not pallet:
+            await interaction.response.send_message(
+                "Run this inside one of the pallet's own channels, not somewhere else.", ephemeral=True
+            )
+            return
+        item = db.get_item_by_pallet_and_number(pallet["id"], item_number)
+        if not item:
+            await interaction.response.send_message(f"No item #{item_number} found in **{pallet['name']}**.", ephemeral=True)
+            return
+
+        old_price = db.reverse_sale(item["id"], reason.strip(), actor_id=interaction.user.id)
+        if old_price is None:
+            await interaction.response.send_message(
+                f"Item #{item_number} doesn't have a sale price recorded - nothing to reverse.", ephemeral=True
+            )
+            return
+        await finance_utils.refresh_finance_message(self.bot, pallet["id"])
+        await interaction.response.send_message(
+            f"⏪ Reversed **{pallet['name']}** item #{item_number}'s sale (was ${old_price:.2f}, {reason.strip()}). "
+            f"Live card updated.",
+            ephemeral=True,
+        )
+
+    @finance_group.command(name="history", description="List this pallet's recent refunds/expenses/reversals. Run inside that pallet's category.")
+    async def history(self, interaction: discord.Interaction):
+        pallet = _get_pallet_or_none(interaction)
+        if not pallet:
+            await interaction.response.send_message(
+                "Run this inside one of the pallet's own channels, not somewhere else.", ephemeral=True
+            )
+            return
+
+        transactions = db.get_finance_transactions(pallet["id"])
+        if not transactions:
+            await interaction.response.send_message(
+                f"No refunds, expenses, or reversals recorded for **{pallet['name']}** yet.", ephemeral=True
+            )
+            return
+
+        type_labels = {"refund": "↩️ Refund", "expense": "🧾 Expense", "reversal": "⏪ Reversal"}
+        lines = []
+        for tx in transactions:
+            item_note = f" (item #{tx['item_number']})" if tx.get("item_number") else ""
+            lines.append(f"{type_labels.get(tx['type'], tx['type'])} ${tx['amount']:.2f}{item_note} - {tx['note'] or 'no reason given'}")
+        embed = discord.Embed(
+            title=f"Finance History - {pallet['name']}",
+            description="\n".join(lines),
+            color=discord.Color.orange(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @finance_group.command(
         name="set-shipping-info",
