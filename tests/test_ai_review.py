@@ -47,10 +47,28 @@ def test_fallback_truncates_and_defaults_title():
 def test_system_prompt_excludes_fallback_only_categories():
     prompt = ai_review._build_system_prompt()
     for name in config.EBAY_CATEGORIES:
-        if "(top-level)" in name or "(parent/fallback)" in name or "(NOT A LEAF" in name:
+        if ("(top-level)" in name or "(parent/fallback)" in name
+                or "(NOT A LEAF" in name or "(DUPLICATE ID" in name):
             assert name not in prompt, f"fallback-only/invalid category {name!r} should never be offered to the AI"
     # at least one real category should still be listed
     assert any(name in prompt for name in config.EBAY_CATEGORIES_FOR_AI_SUGGESTION)
+
+
+def test_no_two_categories_share_the_same_id():
+    # Discord's select menu flatly rejects two options with the same value
+    # ("The specified option value is already used") - this once took down
+    # EVERY item approval at once (see EBAY_CATEGORIES' "(DUPLICATE ID"
+    # comment), not just the categories actually at fault. Any future
+    # duplicate must be caught and tagged before it reaches a live select
+    # menu again, not just defended against at runtime.
+    ids = list(config.EBAY_CATEGORIES.values())
+    duplicates = {cid for cid in ids if ids.count(cid) > 1}
+    for category_id in duplicates:
+        names = [name for name, cid in config.EBAY_CATEGORIES.items() if cid == category_id]
+        assert all("(DUPLICATE ID" in name for name in names), (
+            f"id {category_id!r} is shared by {names!r} but not all are tagged "
+            f"'(DUPLICATE ID' - untag once corrected, or tag immediately if new"
+        )
 
 
 def test_categories_confirmed_not_a_leaf_are_quarantined():

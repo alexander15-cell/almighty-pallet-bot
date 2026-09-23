@@ -300,13 +300,30 @@ EBAY_AUCTION_DURATIONS = [
 # suggested/picked until corrected. Look up a category's real ID via
 # eBay's own "Sell similar" flow on an existing listing in that category,
 # or eBay's category search when creating a listing by hand.
+#
+# Two pairs below were also found sharing the SAME id by hand-entry mistake
+# ("Chandeliers & Ceiling Light Fixtures"/"Recessed Lighting" both had
+# 117503; "Wall Sconces / Wall Lighting Fixtures"/"Bathroom Vanity Lighting"
+# both had 116880) - each pair is really two different eBay categories that
+# need two different real IDs, not one shared one. This isn't just a listing
+# mix-up: Discord's select menu REJECTS a duplicate option value outright
+# ("The specified option value is already used"), so this silently crashed
+# EVERY item approval the instant EbayCategorySelectView tried to build its
+# dropdown - the entire Queue Review pipeline was down, not just these four
+# categories. Tagged "(DUPLICATE ID - ...)" below (same
+# excluded-from-AI-suggestion/sorted-to-bottom treatment as "(NOT A LEAF"),
+# AND item_flow.py's EbayCategorySelectView now also defensively drops any
+# remaining duplicate-value option before building the select so a future
+# copy-paste mistake like this can't take the whole flow down again. Look up
+# each of these four names' own real leaf category ID via eBay's own
+# category search before re-enabling them.
 EBAY_CATEGORIES = {
     # --- Lighting / electrical (Home Depot pallet) ---
     "Ceiling Fans": "176937",
-    "Chandeliers & Ceiling Light Fixtures": "117503",
-    "Recessed Lighting": "117503",
-    "Wall Sconces / Wall Lighting Fixtures": "116880",
-    "Bathroom Vanity Lighting": "116880",
+    "Chandeliers & Ceiling Light Fixtures (DUPLICATE ID - needs its own real leaf category ID)": "117503",
+    "Recessed Lighting (DUPLICATE ID - needs its own real leaf category ID)": "117503",
+    "Wall Sconces / Wall Lighting Fixtures (DUPLICATE ID - needs its own real leaf category ID)": "116880",
+    "Bathroom Vanity Lighting (DUPLICATE ID - needs its own real leaf category ID)": "116880",
     "LED Strip / Tape Lights": "116022",
     "Smart LED Light Strips": "185071",
     "Smoke & CO Detectors": "41970",
@@ -340,15 +357,16 @@ EBAY_CATEGORIES = {
 }
 
 # Subset of EBAY_CATEGORIES actually offered to Automated Review as a
-# suggestion (ai_review.py) - excludes the top-level/parent fallback and
-# confirmed-not-a-leaf entries above, since none of those are real listable
-# leaf categories and should never be what the AI proposes as "the"
-# category for an item, only something a human picks manually as a last
-# resort (or after correcting a flagged entry's ID).
+# suggestion (ai_review.py) - excludes the top-level/parent fallback,
+# confirmed-not-a-leaf, and duplicate-ID entries above, since none of those
+# are real listable leaf categories and should never be what the AI proposes
+# as "the" category for an item, only something a human picks manually as a
+# last resort (or after correcting a flagged entry's ID).
 EBAY_CATEGORIES_FOR_AI_SUGGESTION = {
     name: category_id
     for name, category_id in EBAY_CATEGORIES.items()
-    if "(top-level)" not in name and "(parent/fallback)" not in name and "(NOT A LEAF" not in name
+    if "(top-level)" not in name and "(parent/fallback)" not in name
+    and "(NOT A LEAF" not in name and "(DUPLICATE ID" not in name
 }
 
 # ---- eBay CSV batch (Seller Hub bulk upload / File Exchange fallback) ----

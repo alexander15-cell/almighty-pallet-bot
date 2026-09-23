@@ -192,7 +192,11 @@ class EbayCategorySelectView(discord.ui.View):
     gets a "✅ " prefix so it's visually obvious which ones are proven, not
     just picked before. Discord select menus cap out at 25 options; if
     EBAY_CATEGORIES ever grows past that, only the top-ranked 25 show here
-    (logged to console) until pagination gets added.
+    (logged to console) until pagination gets added. Also drops any entry
+    whose id duplicates an already-included one (keeping the highest-ranked
+    name), since Discord rejects the whole select outright if two options
+    share a value - this once took down every item approval at once (see
+    EBAY_CATEGORIES' "(DUPLICATE ID" comment).
 
     Nothing here is pre-checked (`default`) - see EbayConditionSelectView's
     docstring for why that breaks re-tapping the already-highlighted
@@ -208,7 +212,7 @@ class EbayCategorySelectView(discord.ui.View):
         self.condition_id = condition_id
 
         def _is_fallback_only(name: str) -> bool:
-            return "(top-level)" in name or "(parent/fallback)" in name or "(NOT A LEAF" in name
+            return "(top-level)" in name or "(parent/fallback)" in name or "(NOT A LEAF" in name or "(DUPLICATE ID" in name
 
         counts = db.get_ebay_category_counts()
         confirmed_counts = db.get_ebay_category_confirmed_counts()
@@ -221,6 +225,31 @@ class EbayCategorySelectView(discord.ui.View):
                 name_and_id[0].lower(),
             ),
         )
+
+        # Discord flatly rejects a select menu with two options sharing the
+        # same value ("The specified option value is already used") - a
+        # crash, not a cosmetic glitch, and it takes down EVERY item
+        # approval, not just the categories involved (see EBAY_CATEGORIES'
+        # own "(DUPLICATE ID" comment for how this actually happened once).
+        # Keep only the first (highest-ranked) name for each id as a hard
+        # safety net against that ever recurring, whatever config.py says.
+        seen_ids = set()
+        deduped = []
+        dropped = []
+        for name, category_id in ranked:
+            if category_id in seen_ids:
+                dropped.append(name)
+                continue
+            seen_ids.add(category_id)
+            deduped.append((name, category_id))
+        if dropped:
+            print(
+                f"[item_flow] config.EBAY_CATEGORIES has duplicate IDs - dropped "
+                f"{dropped!r} from the category picker (each id can only appear once "
+                f"in a Discord select). Give these their own real leaf category IDs."
+            )
+        ranked = deduped
+
         truncated = len(ranked) > self.MAX_OPTIONS
         if truncated:
             print(

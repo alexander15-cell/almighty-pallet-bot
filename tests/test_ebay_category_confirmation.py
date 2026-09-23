@@ -40,3 +40,23 @@ def test_unconfirmed_category_label_has_no_checkmark(fresh_db, monkeypatch):
 
     view = EbayCategorySelectView(item_id=1, condition_id="1500")
     assert view.select.options[0].label == "Never Used"
+
+
+def test_duplicate_category_ids_never_reach_the_live_select(fresh_db, monkeypatch):
+    # A real crash, not a hypothetical: two config.EBAY_CATEGORIES entries
+    # once shared the same id, and Discord flatly rejects a select menu with
+    # a duplicate option value ("The specified option value is already
+    # used") - taking down EVERY item approval, not just those categories.
+    # This is the runtime safety net (independent of config.py staying
+    # clean) - only one name per duplicated id should ever reach the select.
+    monkeypatch.setitem(config.__dict__, "EBAY_CATEGORIES", {
+        "Widget A": "111",
+        "Widget B (accidental duplicate)": "111",
+        "Gadget": "222",
+    })
+
+    view = EbayCategorySelectView(item_id=1, condition_id="1500")
+    values = [option.value for option in view.select.options]
+    assert len(values) == len(set(values)), f"duplicate option values would crash Discord: {values}"
+    assert values.count("111") == 1
+    assert "222" in values
