@@ -841,7 +841,7 @@ class Finance(commands.Cog):
         if fin["items_pending_sale"]:
             embed.add_field(
                 name="Pending Sale Value",
-                value=f"${fin['pending_sale_value']:.2f} ({fin['items_pending_sale']} listed)",
+                value=f"${fin['pending_sale_value']:.2f} ({fin['items_pending_sale']} priced, not yet sold)",
                 inline=True,
             )
 

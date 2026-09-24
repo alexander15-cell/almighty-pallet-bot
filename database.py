@@ -886,11 +886,15 @@ def get_pallet_financials(pallet_id: int):
       - pending_sale_value / items_pending_sale: sum of ebay_listing_data.price
         (the listing price captured for every approved item regardless of
         which platform it eventually sells on - see save_ebay_listing_data's
-        docstring) across items currently STATUS_LISTED - i.e. actually up
-        for sale right now, nobody's bought it yet. Expected revenue still
-        "in the pipeline", not yet realized (that's revenue_so_far, from
-        actual recorded sale_price) - the two are deliberately separate
-        numbers, never added together.
+        docstring) across every item that's been priced but not yet sold -
+        awaiting_listing, pending_ebay_upload, pending_fb_marketplace_upload,
+        and listed. Deliberately broad: an item is "priced" the moment Queue
+        Review approves it, well before it's actually live anywhere, and
+        this is meant to answer "what's the value of everything I've priced
+        so far" regardless of exactly which pre-sale stage it's sitting in.
+        Expected revenue still "in the pipeline", not yet realized (that's
+        revenue_so_far, from actual recorded sale_price) - the two are
+        deliberately separate numbers, never added together.
     This is what both /finance summary and the auto-updating pinned message
     in #pallet-discussion are built from - one function, one source of truth.
     """
@@ -923,8 +927,9 @@ def get_pallet_financials(pallet_id: int):
         pending_row = conn.execute(
             """SELECT COUNT(*) AS n, COALESCE(SUM(eld.price), 0) AS total
                FROM items i JOIN ebay_listing_data eld ON eld.item_id = i.id
-               WHERE i.pallet_id = ? AND i.status = ?""",
-            (pallet_id, STATUS_LISTED),
+               WHERE i.pallet_id = ? AND i.status IN (?, ?, ?, ?)""",
+            (pallet_id, STATUS_AWAITING_LISTING, STATUS_PENDING_EBAY_UPLOAD,
+             STATUS_PENDING_FB_MARKETPLACE_UPLOAD, STATUS_LISTED),
         ).fetchone()
 
     items_received = pallet.get("items_received_override")

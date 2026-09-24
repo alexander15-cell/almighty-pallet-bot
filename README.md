@@ -148,9 +148,11 @@ and type a number:
 Every pallet's **#pallet-discussion** channel gets a pinned card, posted as
 the very first message, that shows: cost, items received, cost-per-item,
 revenue so far, items priced, a **pending sale value** (the sum of listing
-prices for everything currently `#listed` - i.e. up for sale but not yet
-sold, expected revenue still "in the pipeline", separate from revenue
-already realized), profit/loss vs. cost, a cost-recovery progress bar, and
+prices for everything priced but not yet sold - awaiting listing, added to
+an eBay or FB Marketplace batch, or already `#listed`, so an item counts the
+moment Queue Review approves it, not just once it's actually live somewhere
+- expected revenue still "in the pipeline", separate from revenue already
+realized), profit/loss vs. cost, a cost-recovery progress bar, and
 an item count per pipeline stage. This card **edits itself in place** every
 time something relevant changes - a new item is logged, an item moves
 stage, a price is set or corrected, or the received count is overridden.
