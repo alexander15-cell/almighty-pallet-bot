@@ -140,6 +140,11 @@ and type a number:
     to differ from what's been logged in Data Entry (e.g. junk that was
     never entered).
   - `/finance summary` - posts a fresh, non-pinned copy of the same numbers.
+  - `/finance refresh-card` - force-refreshes the pinned card itself in
+    place, right now, without needing an item to move first (the pinned
+    card normally only re-renders when something status-changing happens
+    on that pallet - useful right after a bot update, or just to confirm
+    the numbers are current).
   - `/finance pallet-summary [pallet_name]` / `/finance overview` - see
     "QuickBooks Online integration" below (useful with or without
     QuickBooks connected - the cost-by-type breakdown and pallet-progress

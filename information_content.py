@@ -163,6 +163,7 @@ def _finance_commands_embed() -> discord.Embed:
     embed.add_field(name="history", value="List a pallet's recent refunds/expenses/reversals.", inline=False)
     embed.add_field(name="override-count / clear-count-override", value="Manually correct the \"items received\" figure, or revert to automatic.", inline=False)
     embed.add_field(name="summary", value="Post a fresh copy of a pallet's financial/status card.", inline=False)
+    embed.add_field(name="refresh-card", value="Force-refresh the pinned card in place right now, without waiting for an item to move.", inline=False)
     embed.add_field(name="pallet-summary [pallet_name]", value="Full cost breakdown by type (purchase/credit card/shipping/etc), revenue, and margin for a pallet.", inline=False)
     embed.add_field(name="overview", value="Business-wide snapshot: QuickBooks balance, month-to-date spend/revenue, pallets in progress vs sold out.", inline=False)
     embed.add_field(name="connect-quickbooks", value="Admin: link QuickBooks Online for automatic credit-card charge tracking. See #credit-card-charges.", inline=False)

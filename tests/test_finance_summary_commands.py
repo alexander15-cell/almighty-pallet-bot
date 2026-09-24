@@ -119,6 +119,28 @@ def test_pallet_summary_shows_cost_not_set_when_nothing_entered(fresh_db, cog):
     assert _field(embed, "Profit/Margin") == "Cost not set yet"
 
 
+# --------------------------------------------------------------- refresh-card
+
+
+def test_refresh_card_sends_confirmation(fresh_db, cog):
+    pallet_id = fresh_db.create_pallet("Refresh Pallet", category_id=7, created_by=1)
+    cog.bot = _FakeBot()
+
+    interaction = _FakeInteraction(channel=_FakeChannel(category_id=7))
+    asyncio.run(Finance.refresh_card.callback(cog, interaction))
+
+    assert "Refresh Pallet" in interaction.response.content
+    assert "refreshed" in interaction.response.content
+
+
+def test_refresh_card_no_context(fresh_db, cog):
+    cog.bot = _FakeBot()
+    interaction = _FakeInteraction(channel=_FakeChannel(category_id=None))
+    asyncio.run(Finance.refresh_card.callback(cog, interaction))
+
+    assert "Run this inside" in interaction.response.content
+
+
 # ------------------------------------------------------------------- overview
 
 

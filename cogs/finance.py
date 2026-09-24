@@ -782,6 +782,24 @@ class Finance(commands.Cog):
             ephemeral=True,
         )
 
+    @finance_group.command(
+        name="refresh-card",
+        description="Force-refresh this pallet's pinned status card now, without waiting for an item to move.",
+    )
+    async def refresh_card(self, interaction: discord.Interaction):
+        pallet = _get_pallet_or_none(interaction)
+        if not pallet:
+            await interaction.response.send_message(
+                "Run this inside one of the pallet's own channels, not somewhere else.", ephemeral=True
+            )
+            return
+
+        await finance_utils.refresh_finance_message(self.bot, pallet["id"])
+        await interaction.response.send_message(
+            f"🔄 **{pallet['name']}**'s pinned status card in #pallet-discussion refreshed with current numbers.",
+            ephemeral=True,
+        )
+
     @finance_group.command(name="summary", description="Post a fresh copy of this pallet's financial/status numbers. Run inside that pallet's category.")
     async def summary(self, interaction: discord.Interaction):
         pallet = _get_pallet_or_none(interaction)
