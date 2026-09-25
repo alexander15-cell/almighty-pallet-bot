@@ -973,9 +973,10 @@ class ItemFlow(commands.Cog):
             # resubmission, so leaving it around would just be a duplicate.
             try:
                 old_msg = await old_card_channel.fetch_message(resubmit_item["current_message_id"])
-                await old_msg.delete()
             except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-                pass
+                old_msg = None
+            if old_msg:
+                await self._clear_old_card(old_msg, item_ids[0], "resubmit after rejection")
         else:
             with db.get_conn() as conn:
                 for item_id, saved_paths in saved_paths_by_item.items():
@@ -1229,9 +1230,10 @@ class ItemFlow(commands.Cog):
         if old_channel and item.get("current_message_id"):
             try:
                 old_msg = await old_channel.fetch_message(item["current_message_id"])
-                await old_msg.delete()
             except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-                pass
+                old_msg = None
+            if old_msg:
+                await self._clear_old_card(old_msg, item_id, "approve out of Queue Review")
 
         condition_label = config.EBAY_CONDITION_LABELS.get(condition_id, condition_id)
         format_note = (
@@ -1284,10 +1286,7 @@ class ItemFlow(commands.Cog):
                        "below once it's live.",
         )
         db.update_status(item_id, db.STATUS_PENDING_EBAY_UPLOAD, actor_id=interaction.user.id, new_message_id=msg.id)
-        try:
-            await interaction.message.delete()
-        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-            pass
+        await self._clear_old_card(interaction.message, item_id, "add to eBay batch")
         await interaction.response.send_message(
             f"Added to the eBay batch CSV. Moved to <#{channel.id}> pending upload confirmation.",
             ephemeral=True,
@@ -1333,10 +1332,7 @@ class ItemFlow(commands.Cog):
         db.update_status(
             item_id, db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD, actor_id=interaction.user.id, new_message_id=msg.id
         )
-        try:
-            await interaction.message.delete()
-        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-            pass
+        await self._clear_old_card(interaction.message, item_id, "add to FB Marketplace batch")
         await interaction.response.send_message(
             f"Added to the FB Marketplace batch CSV. Moved to <#{channel.id}> pending upload confirmation.",
             ephemeral=True,
@@ -1384,10 +1380,7 @@ class ItemFlow(commands.Cog):
             extra_text=f"✅ Listed live on eBay (item ID: {result.get('ebay_item_id', '?')}).",
         )
         db.update_status(item_id, db.STATUS_LISTED, actor_id=interaction.user.id, new_message_id=msg.id)
-        try:
-            await interaction.message.delete()
-        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-            pass
+        await self._clear_old_card(interaction.message, item_id, "list on eBay (API)")
         await interaction.followup.send(f"Listed live on eBay. See <#{channel.id}>.", ephemeral=True)
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
 
@@ -1421,9 +1414,10 @@ class ItemFlow(commands.Cog):
         if old_channel and item.get("current_message_id"):
             try:
                 old_msg = await old_channel.fetch_message(item["current_message_id"])
-                await old_msg.delete()
             except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-                pass
+                old_msg = None
+            if old_msg:
+                await self._clear_old_card(old_msg, item["id"], "confirm eBay listed")
 
         listed_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
         view = ListedView(item["id"])
@@ -1451,9 +1445,10 @@ class ItemFlow(commands.Cog):
         if old_channel and item.get("current_message_id"):
             try:
                 old_msg = await old_channel.fetch_message(item["current_message_id"])
-                await old_msg.delete()
             except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-                pass
+                old_msg = None
+            if old_msg:
+                await self._clear_old_card(old_msg, item["id"], "confirm FB Marketplace listed")
 
         listed_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
         view = ListedView(item["id"])
@@ -1480,7 +1475,7 @@ class ItemFlow(commands.Cog):
                        "(don't post a fresh message, or it'll be logged as a separate item).",
         )
         db.update_status(item_id, db.STATUS_REJECTED, actor_id=interaction.user.id, new_message_id=msg.id)
-        await interaction.message.delete()
+        await self._clear_old_card(interaction.message, item_id, "reject to Data Entry")
         await interaction.response.send_message("Sent back to Data Entry.", ephemeral=True)
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
 
@@ -1498,7 +1493,7 @@ class ItemFlow(commands.Cog):
         view = ListedView(item_id)
         msg = await send_item_card(channel, item, view=view)
         db.update_status(item_id, db.STATUS_LISTED, actor_id=interaction.user.id, new_message_id=msg.id)
-        await interaction.message.delete()
+        await self._clear_old_card(interaction.message, item_id, "mark listed (other)")
         await interaction.response.send_message(f"Marked listed. See <#{channel.id}>.", ephemeral=True)
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
 
@@ -1516,7 +1511,7 @@ class ItemFlow(commands.Cog):
         view = ShippedView(item_id)
         msg = await send_item_card(channel, item, view=view)
         db.update_status(item_id, db.STATUS_SOLD, actor_id=interaction.user.id, new_message_id=msg.id)
-        await interaction.message.delete()
+        await self._clear_old_card(interaction.message, item_id, "mark sold")
         await interaction.response.send_message(
             f"Marked sold. 🎉 See <#{channel.id}>. Finance Management can record the sale price "
             f"with `/finance record-sale`.",
@@ -1544,6 +1539,32 @@ class ItemFlow(commands.Cog):
             pass
         await interaction.response.send_message("Marked shipped.", ephemeral=True)
         await finance_utils.refresh_finance_message(self.bot, item["pallet_id"])
+
+    async def _clear_old_card(self, message: discord.Message, item_id: int, context: str):
+        """
+        Best-effort cleanup of an item's now-stale card right after it moves
+        stage - called once the DB status is already updated and the item's
+        new card already posted elsewhere, so nothing here should ever abort
+        the transition itself.
+
+        Deleting can silently fail for reasons that AREN'T just a transient
+        network blip (e.g. the bot lost permission in that channel) - if
+        this only ever swallowed the error, that stale card would sit there
+        looking clickable forever, and every future click on it would just
+        confusingly report "already moved on" instead of the card ever
+        actually clearing out. So: log the real reason (visible in console,
+        instead of a silent repeat), and fall back to stripping its buttons
+        so at least it can't be clicked again even if it can't be removed.
+        """
+        try:
+            await message.delete()
+            return
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
+            print(f"[item_flow] Could not delete stale card for item {item_id} ({context}): {e}")
+        try:
+            await message.edit(view=None)
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
+            print(f"[item_flow] Could not strip buttons from stale card for item {item_id} ({context}): {e}")
 
     async def _require_role(self, interaction: discord.Interaction, role_name: str) -> bool:
         admin_role = runtime_settings.resolve_role(interaction.guild, config.ROLE_ADMIN)
