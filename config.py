@@ -327,6 +327,18 @@ EBAY_CONDITIONS = [
 EBAY_CONDITION_LABELS = dict(EBAY_CONDITIONS)
 EBAY_DEFAULT_CONDITION_ID = "1500"  # "New other (see details)" - most liquidation items land here
 
+# Condition IDs eBay broadly accepts across most categories - checked in
+# ebay_csv.py before writing *ConditionID on an outbound row. Real per-
+# category valid-condition lists vary and would need live eBay API access
+# (GetCategoryFeatures - see ebay_api.py, pending dev approval) to check
+# properly; this is a coarse global fallback for the one case actually
+# observed to fail a real upload - many categories reject "1750" (New with
+# defects, still offered in EBAY_CONDITIONS above) with error 21916883 even
+# though it's a generally valid eBay condition ID. Any chosen condition not
+# in this set falls back to EBAY_DEFAULT_CONDITION_ID rather than risking
+# that rejection.
+EBAY_BROADLY_ACCEPTED_CONDITION_IDS = {"1000", "1500", "2000", "2010", "2020", "2030", "3000", "7000"}
+
 # eBay File Exchange's *Duration values for an Auction-format listing (fixed-
 # price listings always use "GTC" - Good 'Til Cancelled - handled separately
 # in ebay_csv.py). Shown as a Discord select menu, only when the reviewer
@@ -349,16 +361,73 @@ EBAY_AUCTION_DURATIONS = [
 # genuine listable leaf category straight from eBay's own data - there's
 # nothing to hand-configure or keep correcting here anymore.
 
-# ---- eBay CSV batch (eBay's AI-prefill bulk listing tool - see ebay_csv.py) ----
+# ---- eBay CSV batch (classic File Exchange "Add" template - see ebay_csv.py) ----
 # Accumulates one row per item added via "Add to eBay Batch" until an admin
 # runs /ebay export-batch, which hands it over as a Discord attachment and
-# archives + clears it so the next batch starts clean. This is eBay's newer
-# "Prefill Listing" template (SKU/photos/title/category/aspects only - eBay
-# itself suggests price/condition/shipping/etc. after processing the file),
-# not the older classic File Exchange format - no per-row required settings
-# like a ship-from location or a shipping service code apply here any more.
+# archives + clears it so the next batch starts clean. This is eBay's
+# classic File Exchange "Add" template - a single ready-to-upload file built
+# entirely from data Queue Review already captured (title/category/
+# condition/price/weight/dimensions/specifics), not eBay's newer AI-prefill
+# tool's 2-step suggest-then-review round trip (that tool is still available
+# by hand if anyone wants it - see /ebay fill-recommendations - just no
+# longer what this batch is built for).
 EBAY_BATCH_CSV_PATH = os.getenv("EBAY_BATCH_CSV_PATH", "data/ebay_batch.csv")
 EBAY_BATCH_ARCHIVE_DIR = os.getenv("EBAY_BATCH_ARCHIVE_DIR", "data/ebay_batch_archive")
+
+# eBay Business Policy names (Seller Hub > Account > Business Policies) -
+# written into every row's ShippingProfileName/ReturnProfileName/
+# PaymentProfileName columns. Without these (or the older manual shipping
+# fields this replaces), eBay rejects an "Add" row outright once a
+# Calculated-shipping policy is attached to the account. If any of these
+# policies are ever renamed in Seller Hub, update the matching value here to
+# match - eBay matches by exact name, not by an internal ID.
+EBAY_SHIPPING_PROFILE_NAME = os.getenv("EBAY_SHIPPING_PROFILE_NAME", "Shipping")
+EBAY_RETURN_PROFILE_NAME = os.getenv("EBAY_RETURN_PROFILE_NAME", "Returns")
+EBAY_PAYMENT_PROFILE_NAME = os.getenv("EBAY_PAYMENT_PROFILE_NAME", "Payment")
+
+# Ship-from ZIP code, written into every row's PostalCode column. Required
+# once a Calculated-shipping policy is attached (error 216007, "valid postal
+# code") - the *Location column alone isn't enough once policies are in use.
+EBAY_SHIP_FROM_POSTAL_CODE = os.getenv("EBAY_SHIP_FROM_POSTAL_CODE", "47380")  # Ridgeville, IN
+
+# Fallback weight (WeightMajor/WeightMinor), only used when an item has no
+# real captured weight_lb (Queue Review's weight field is optional - see
+# EbayListingModal, item_flow.py). Required once a Calculated-shipping
+# policy is attached (error 216121 otherwise). Keyed by a lowercase keyword
+# matched against the item's resolved eBay category path (ebay_taxonomy.
+# get_path) - first match wins. These are rough ESTIMATES, not real
+# per-item weights - if pallet items start getting weighed at intake, wire
+# that real per-item weight in instead of leaning on this table.
+EBAY_DEFAULT_WEIGHT_BY_CATEGORY_LB = {
+    "ceiling fan": 8.0,
+    "light fixture": 4.0,
+    "chandelier": 6.0,
+    "pendant light": 3.0,
+    "wall sconce": 2.0,
+    "smoke detector": 1.0,
+    "carbon monoxide detector": 1.0,
+}
+EBAY_DEFAULT_WEIGHT_FALLBACK_LB = 2.0  # used when no category keyword above matches at all
+
+# Keyword -> eBay Aspect "Type" value, used to fill C:Type when an item has
+# no Type in its own item_specifics. Matched against the item's title
+# (lowercased) - first match wins. Unlike C:Brand, there's no safe generic
+# placeholder for Type (it's a real search/browse attribute, and a wrong
+# guess is worse than a blank one) - see ebay_csv._infer_type, which logs a
+# warning and leaves the column blank rather than guessing when nothing
+# here matches.
+EBAY_TYPE_KEYWORDS = {
+    "flush mount": "Flush Mount",
+    "pendant": "Pendant",
+    "chandelier": "Chandelier",
+    "sconce": "Wall Sconce",
+    "track light": "Track Lighting",
+    "ceiling fan": "Ceiling Fan",
+    "table lamp": "Table Lamp",
+    "floor lamp": "Floor Lamp",
+    "smoke detector": "Smoke Detector",
+    "carbon monoxide": "Carbon Monoxide Detector",
+}
 
 # ---- Facebook Marketplace CSV batch (see fb_marketplace_csv.py) ----
 # Same accumulate-then-export shape as the eBay batch above: one row per item
@@ -374,13 +443,16 @@ EBAY_BATCH_ARCHIVE_DIR = os.getenv("EBAY_BATCH_ARCHIVE_DIR", "data/ebay_batch_ar
 FB_MARKETPLACE_BATCH_CSV_PATH = os.getenv("FB_MARKETPLACE_BATCH_CSV_PATH", "data/fb_marketplace_batch.csv")
 FB_MARKETPLACE_BATCH_ARCHIVE_DIR = os.getenv("FB_MARKETPLACE_BATCH_ARCHIVE_DIR", "data/fb_marketplace_batch_archive")
 
-# Optional convenience values used ONLY by /ebay fill-recommendations (see
-# ebay_recommendations.py) to help fill in eBay's own RETURNED recommendations
-# file (the one Seller Hub gives back after processing an export-batch
-# upload) - never required, never block anything, unlike this bot's old
-# classic-template export which used to hard-require a location/shipping
-# service before every export. Leave blank to just leave those columns for
-# you to fill in by hand instead.
+# EBAY_ITEM_LOCATION is written into every outbound batch row's *Location
+# column (ebay_csv.py) - eBay rejects a row with no location ("No
+# <Item.Location> exists"). Left blank here just means an empty *Location
+# column, not a blocked export - fill it in by hand before uploading if so.
+#
+# EBAY_SHIPPING_SERVICE is unrelated to the outbound batch (that now uses
+# EBAY_SHIPPING_PROFILE_NAME above instead of a raw per-row shipping
+# service) - it's only used by /ebay fill-recommendations (see
+# ebay_recommendations.py) to help fill in eBay's own RETURNED
+# recommendations file from its separate AI-prefill tool.
 EBAY_ITEM_LOCATION = os.getenv("EBAY_ITEM_LOCATION", "").strip()
 EBAY_SHIPPING_SERVICE = os.getenv("EBAY_SHIPPING_SERVICE", "").strip()
 

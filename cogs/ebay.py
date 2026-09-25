@@ -8,13 +8,18 @@ used while there's no live eBay API integration:
                        durable, numbered ebay_batches snapshot of exactly
                        which items went out in it (see database.
                        create_ebay_batch) - items.ebay_batch_id points back
-                       to it.
-/ebay fill-recommendations - upload eBay's own returned recommendations
-                       file (see ebay_recommendations.py) and get back the
-                       same file with price/quantity/condition/format
-                       filled in from what Queue Review already captured,
-                       so nobody has to retype it by hand before the final
-                       re-upload.
+                       to it. This is eBay's classic File Exchange "Add"
+                       template (see ebay_csv.py) - ready to upload as-is,
+                       built entirely from data Queue Review already
+                       captured.
+/ebay fill-recommendations - a separate, optional path: upload eBay's own
+                       AI-prefill tool's returned recommendations file (see
+                       ebay_recommendations.py) and get back the same file
+                       with price/quantity/condition/format filled in from
+                       what Queue Review already captured. Not part of the
+                       normal export-batch flow above - only useful if
+                       someone chooses to use eBay's separate Prefill
+                       Listing tool by hand instead.
 /ebay batches        - lists recent batches with how many items in each are
                        still waiting on a result.
 /ebay batch          - shows one batch's still-pending items.
@@ -142,19 +147,19 @@ class Ebay(commands.Cog):
         pending_channel_id = db.get_shared_channel_id("pending-ebay-upload")
         pending_channel_mention = f"<#{pending_channel_id}>" if pending_channel_id else "#pending-ebay-upload"
         photo_url_note = (
-            "Item Photo URL is filled in from R2-hosted photo URLs where available."
+            "PicURL is filled in from R2-hosted photo URLs where available."
             if config.R2_ENABLED else
-            "Item Photo URL is blank (R2 photo hosting isn't configured), so add photos yourself "
+            "PicURL is blank (R2 photo hosting isn't configured), so add photos yourself "
             "before or after uploading."
         )
         await interaction.response.send_message(
-            f"📄 eBay batch **#{batch_id}** CSV attached ({len(pending_items)} item(s)). This is eBay's AI-prefill "
-            f"bulk template - upload it via the Reports tab in Seller Hub, wait for eBay to process it and suggest "
-            f"the rest of each listing's details, then download, review, and re-upload that file to actually "
-            f"create the listings. {photo_url_note} The live batch has been cleared - the next **Add to eBay "
-            f"Batch** click starts a new one. Once eBay processes it, either run `/ebay import-results "
-            f"batch_id:{batch_id}` with the results CSV Seller Hub gives you, or `/ebay confirm-listed` by hand "
-            f"after checking Seller Hub, to move these out of {pending_channel_mention}.",
+            f"📄 eBay batch **#{batch_id}** CSV attached ({len(pending_items)} item(s)). This is eBay's classic "
+            f"File Exchange \"Add\" template, ready to upload as-is via the Upload tab in Seller Hub - review it "
+            f"first (especially category, since that's what most often needs a manual correction), then upload. "
+            f"{photo_url_note} The live batch has been cleared - the next **Add to eBay Batch** click starts a "
+            f"new one. Once eBay processes it, either run `/ebay import-results batch_id:{batch_id}` with the "
+            f"results CSV Seller Hub gives you, or `/ebay confirm-listed` by hand after checking Seller Hub, to "
+            f"move these out of {pending_channel_mention}.",
             file=discord.File(path, filename=path.name),
             ephemeral=True,
         )

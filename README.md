@@ -80,12 +80,12 @@ Every item's card always shows which pallet it belongs to.
 - **Awaiting Listing** (shared) is where Listing Management actually lists
   the item, via whichever of four buttons fits:
   - **Add to eBay Batch** - appends the item (using the listing data
-    captured above) as a row to a local CSV matching eBay's newer
-    AI-prefill bulk listing template (SKU/photos/title/category/aspects -
-    see "eBay CSV format" below), no API call. Moves the item to
+    captured above) as a row to a local CSV matching eBay's classic File
+    Exchange **Add** template - a single file ready to upload as-is (see
+    "eBay CSV format" below), no API call. Moves the item to
     **#pending-ebay-upload**, where it sits until an admin runs
     `/ebay export-batch` to grab the file and upload it via Seller Hub's
-    Reports tab - once eBay actually shows it live, tap **Confirm Listed**
+    Upload tab - once eBay actually shows it live, tap **Confirm Listed**
     right on that card (or run `/ebay confirm-listed`) to move it into
     #listed.
   - **Add to FB Marketplace Batch** - same idea, using Facebook's own bulk
@@ -410,49 +410,49 @@ anything.
 
 ### eBay CSV format
 
-The eBay batch CSV (`ebay_csv.py`) matches eBay's newer **AI-powered
-Prefill Listing** bulk tool, not the older classic File Exchange "Add"
-template - eBay's own template file is called
-`eBay-taxonomy-mapping-template_US`. It's a 3-step workflow on eBay's side:
+The eBay batch CSV (`ebay_csv.py`) matches eBay's **classic File Exchange
+"Add"** template - a single file that's ready to upload as-is, built
+entirely from data Queue Review already captured during approval (title,
+category, condition, price, weight/dimensions, item specifics). Unlike
+eBay's separate **AI-Powered Prefill Listing** tool (still available by
+hand - see `/ebay fill-recommendations` below - just not what `/ebay
+export-batch` builds anymore), there's no suggest-then-review round trip:
+upload the CSV **Add to eBay Batch** builds through the **Upload** tab in
+Seller Hub, review row-level errors if any come back (most commonly
+category, which still needs a human to confirm - see "Known limitations"),
+fix and re-upload just those rows, then either run `/ebay import-results`
+with the results CSV Seller Hub gives back, or `/ebay confirm-listed` by
+hand, to move items out of #pending-ebay-upload.
 
-1. Upload the CSV **Add to eBay Batch** builds (via `/ebay export-batch`)
-   through the **Reports** tab in Seller Hub. Every column in it is
-   individually optional per eBay's own template instructions - there's no
-   equivalent of the old "every row rejected without X" failures, so
-   nothing here blocks `/ebay export-batch` from running.
-2. eBay processes the file and returns a downloadable **recommendations**
-   file with its own AI-suggested category, title, description, and item
-   aspects for each item - this may take a few minutes; check the upload's
-   status in Seller Hub. In practice, eBay's own AI leaves price, condition,
-   quantity, and format blank for each item - that's what `/ebay
-   fill-recommendations` is for (see below).
-3. Run `/ebay fill-recommendations`, attaching that downloaded file - this
-   bot fills in price/quantity/condition/format/duration for every item it
-   recognizes, straight from what Queue Review already captured, and hands
-   you back the completed file.
-4. Review the result (eBay's suggestions AND this bot's fills), then
-   re-upload that **same file** via the Reports tab to actually create the
-   listings or drafts.
+Columns, in order: `Action(...)` (always `Add`), `CustomLabel` (this bot's
+`pallet-N-item-M` SKU), `*Category` (the real eBay leaf category ID Queue
+Review resolved via `ebay_taxonomy.py`), `*Title`, `*ConditionID` (checked
+against `EBAY_BROADLY_ACCEPTED_CONDITION_IDS` first - falls back to
+`EBAY_DEFAULT_CONDITION_ID` rather than risking a category-specific
+rejection), `PicURL` (every R2-hosted photo URL, pipe-separated, up to
+eBay's 24-photo cap), `*Description`, `*Format`/`*Duration` (`GTC` for
+FixedPrice, the real auction duration for Auction), `*StartPrice`,
+`*Quantity` (always `1`), `*Location` (`EBAY_ITEM_LOCATION`), `PostalCode`
+(`EBAY_SHIP_FROM_POSTAL_CODE`), `WeightMajor`/`WeightMinor` (from the
+item's real captured weight, or a rough category-keyword estimate -
+`EBAY_DEFAULT_WEIGHT_BY_CATEGORY_LB` - when none was captured),
+`PackageLength`/`Width`/`Depth`, and `ShippingProfileName`/
+`ReturnProfileName`/`PaymentProfileName` (your saved Seller Hub Business
+Policy names - `EBAY_SHIPPING_PROFILE_NAME`/`EBAY_RETURN_PROFILE_NAME`/
+`EBAY_PAYMENT_PROFILE_NAME` - update these if you ever rename a policy in
+Seller Hub). Item specifics grow the header with dynamic `C:<Name>`
+columns, same as before - `C:Brand` always has a value (a real one, or
+eBay's own `Does Not Apply` placeholder for unbranded items - never left
+blank or guessed), and `C:Type` is inferred from the title via
+`EBAY_TYPE_KEYWORDS` when Queue Review didn't capture one, logging a
+warning and leaving it blank rather than guessing when nothing matches.
 
-The file itself has an unusual, fixed shape eBay's own template requires
-("do not change any formatting in the file") - two `#INFO` metadata rows
-before the real header row, then exactly five columns: `Custom Label
-(SKU)`, `Item Photo URL` (every R2-hosted photo URL for the item, up to
-eBay's 24-photo cap, pipe-separated), `Title`, `Category` (free text per
-eBay's own instructions - this bot fills in the real eBay category name
-Queue Review resolved via `ebay_taxonomy.py`, which can only help eBay's
-own suggestion), and `Aspects` (item specifics as pipe-separated
-`Key=Value` pairs, e.g. `Brand=DeWalt|Voltage=20V`).
-
-None of price/condition/shipping/weight needs to be (or is) in this upload
-CSV - but Queue Review still captures price/condition/weight/dimensions
-during approval regardless (see above), since it's useful data either way,
-weight/dimensions specifically feed the Pirate Ship CSV export (see below),
-and - critically - it's exactly what `/ebay fill-recommendations` uses to
-fill in eBay's returned recommendations file automatically.
-
-**`/ebay fill-recommendations`** (`ebay_recommendations.py`) takes eBay's
-downloaded recommendations file (a `.xlsm`, a different, classic-style
+**`/ebay fill-recommendations`** is a separate, optional path - not part of
+the `/ebay export-batch` flow above - for anyone who chooses to use eBay's
+own **AI-Powered Prefill Listing** tool by hand instead (upload a lean
+SKU/photo/title/category file through Seller Hub's Reports tab, eBay
+suggests the rest). `ebay_recommendations.py` takes eBay's downloaded
+recommendations file from that tool (a `.xlsm`, a different, classic-style
 per-item template eBay uses internally for this - `Template=eBay-
 listings-template_EBAY_US`, one sheet per matched category named
 `Cat-<CategoryName>...`) and, for every row whose `Custom Label (SKU)`
@@ -505,7 +505,7 @@ Leave `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
 `R2_BUCKET_NAME`, and `R2_PUBLIC_URL_BASE` blank in `.env` (the default).
 Data Entry still saves photos locally either way - that's what Discord item
 cards render from - it just skips uploading a second copy to R2, and the
-eBay CSV batch's `Item Photo URL` column stays blank (see the known
+eBay CSV batch's `PicURL` column stays blank (see the known
 limitation below). Once all five values are set, restart the bot: every
 photo saved from then on gets uploaded to R2 automatically, no other setup
 needed. Photos saved before R2 was configured are not retroactively
@@ -654,14 +654,14 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   Discord attachment, archives and clears it so the next **Add to eBay
   Batch** click starts a fresh file, and records a durable, numbered batch
   snapshot (`/ebay batches`/`/ebay batch`) of exactly which items went out
-  in it. Every column in this newer prefill-template CSV is optional per
-  eBay's own template, so nothing blocks this from running - see "eBay CSV
-  format" above.
-- `/ebay fill-recommendations <recommendations_file>` - attach the file
-  eBay's Seller Hub gave back after processing your export-batch upload;
-  this bot fills in Start price/Quantity/Condition ID/Format/Duration for
-  every item it recognizes, straight from Queue Review data, and hands
-  back the completed file to review and re-upload - see "eBay CSV format"
+  in it. This is eBay's classic File Exchange "Add" template, ready to
+  upload as-is - see "eBay CSV format" above.
+- `/ebay fill-recommendations <recommendations_file>` - a separate,
+  optional tool for anyone using eBay's own AI-Powered Prefill Listing tool
+  by hand instead of the export-batch flow above; attach the file eBay's
+  Seller Hub gave back after processing a Prefill upload and this bot fills
+  in Start price/Quantity/Condition ID/Format/Duration for every item it
+  recognizes, straight from Queue Review data - see "eBay CSV format"
   above.
 - `/ebay category-search <query>` - looks up real eBay leaf category IDs by
   keyword against eBay's own official taxonomy (`ebay_taxonomy.py`, ~18,000
@@ -919,10 +919,17 @@ this scale.
   the bot, run it again to create just the new `#pending-ebay-upload`
   channel - it skips any channel that already exists.
 - **The eBay CSV batch's photo URLs depend on R2 being configured.** Without
-  `R2_ENABLED` (see "Running without R2" above), `Item Photo URL` is left
+  `R2_ENABLED` (see "Running without R2" above), `PicURL` is left
   blank in the exported CSV - add photos yourself before or after
   uploading. With R2 configured, it's filled in automatically (every
   photo, pipe-separated, up to eBay's 24-photo cap).
+- **Weight/Type/Condition fallbacks are best-effort, not authoritative.**
+  `EBAY_DEFAULT_WEIGHT_BY_CATEGORY_LB` and `EBAY_TYPE_KEYWORDS` are rough
+  estimates for when Queue Review didn't capture real data - update them
+  (or start weighing items at intake) for better accuracy. Condition
+  validation (`EBAY_BROADLY_ACCEPTED_CONDITION_IDS`) is a coarse global
+  check, not real per-category eBay data (that needs live eBay dev API
+  access - see `ebay_api.py`).
 - **`/ebay confirm-listed` is a manual step.** There's no live eBay API to
   automatically detect that an uploaded CSV batch was actually processed, so
   someone has to check Seller Hub and confirm it by hand.
