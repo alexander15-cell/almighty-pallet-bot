@@ -197,9 +197,9 @@ def test_condition_id_kept_when_broadly_accepted(tmp_path, monkeypatch):
 
 def test_condition_id_falls_back_when_not_broadly_accepted(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(config, "EBAY_BROADLY_ACCEPTED_CONDITION_IDS", {"1000", "1500", "3000"})
-    monkeypatch.setattr(config, "EBAY_DEFAULT_CONDITION_ID", "1500")
+    monkeypatch.setattr(config, "EBAY_CONDITION_FALLBACK_ID", "3000")
     row = _row(tmp_path, monkeypatch, {"condition_id": "1750"})
-    assert row["*ConditionID"] == "1500"
+    assert row["*ConditionID"] == "3000"
     assert "1750" in capsys.readouterr().out
 
 

@@ -344,13 +344,27 @@ EBAY_DEFAULT_CONDITION_ID = "1500"  # "New other (see details)" - most liquidati
 # ebay_csv.py before writing *ConditionID on an outbound row. Real per-
 # category valid-condition lists vary and would need live eBay API access
 # (GetCategoryFeatures - see ebay_api.py, pending dev approval) to check
-# properly; this is a coarse global fallback for the one case actually
-# observed to fail a real upload - many categories reject "1750" (New with
-# defects, still offered in EBAY_CONDITIONS above) with error 21916883 even
-# though it's a generally valid eBay condition ID. Any chosen condition not
-# in this set falls back to EBAY_DEFAULT_CONDITION_ID rather than risking
-# that rejection.
-EBAY_BROADLY_ACCEPTED_CONDITION_IDS = {"1000", "1500", "2000", "2010", "2020", "2030", "3000", "7000"}
+# properly - but eBay's own official ConditionEnum reference is explicit
+# about which ones are safe regardless: only 1000 (New) and 3000 (Used)
+# carry the "Most categories support this condition" language. Every other
+# ID - including 1500 "New other" (real upload evidence: rejected outright
+# for Lights/Lamps categories, error 21916883), 1750 (same error, other
+# categories), and the 2000-2030 "Refurbished" tiers (eBay's docs say
+# those require a separate seller application/enrollment program this
+# account isn't in) - is category-restricted, not broadly safe. Any chosen
+# condition not in this set falls back to EBAY_CONDITION_FALLBACK_ID
+# rather than risking that rejection.
+EBAY_BROADLY_ACCEPTED_CONDITION_IDS = {"1000", "3000"}
+
+# What an invalid/category-restricted condition (see above) falls back to -
+# deliberately a SEPARATE constant from EBAY_DEFAULT_CONDITION_ID (which
+# stays "1500" for Queue Review's suggested starting pick, since that's
+# genuinely what most liquidation items physically are - open box, no
+# original packaging). "3000" (Used) is the fallback instead of "1000"
+# (New) precisely because these items usually aren't factory-sealed/new -
+# claiming Used is more honest than claiming New, and it's one of the two
+# IDs eBay's own docs back as broadly accepted.
+EBAY_CONDITION_FALLBACK_ID = "3000"
 
 # eBay File Exchange's *Duration values for an Auction-format listing (fixed-
 # price listings always use "GTC" - Good 'Til Cancelled - handled separately

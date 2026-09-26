@@ -474,8 +474,16 @@ Columns, in order: `Action(...)` (always `Add`), `CustomLabel` (this bot's
 `pallet-N-item-M` SKU), `*Category` (the real eBay leaf category ID Queue
 Review resolved via `ebay_taxonomy.py`), `*Title`, `*ConditionID` (checked
 against `EBAY_BROADLY_ACCEPTED_CONDITION_IDS` first - falls back to
-`EBAY_DEFAULT_CONDITION_ID` rather than risking a category-specific
-rejection), `PicURL` (every R2-hosted photo URL, pipe-separated, up to
+`EBAY_CONDITION_FALLBACK_ID` rather than risking a category-specific
+rejection). Per eBay's own ConditionEnum reference, only `1000` (New) and
+`3000` (Used) carry "most categories support this condition" - so that's
+the entire broadly-accepted set. Everything else, including `1500`/`1750`
+(confirmed by real upload failures against Lights/Lamps categories,
+error 21916883) and the `2000`-`2030` Refurbished tiers (which need a
+separate seller enrollment program this account isn't in), falls back to
+`EBAY_CONDITION_FALLBACK_ID` (`3000`, i.e. Used - more honest than
+claiming New for items that usually aren't factory-sealed). `PicURL`
+(every R2-hosted photo URL, pipe-separated, up to
 eBay's 24-photo cap), `*Description`, `*Format`/`*Duration` (`GTC` for
 FixedPrice, the real auction duration for Auction), `*StartPrice`,
 `*Quantity` (always `1`), `*Location` (`EBAY_ITEM_LOCATION`), `PostalCode`

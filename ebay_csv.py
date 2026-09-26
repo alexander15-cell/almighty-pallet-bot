@@ -44,10 +44,15 @@ see _infer_type, which logs when nothing matches before falling back to
 the same placeholder as Brand/MPN.
 
 *ConditionID is checked against config.EBAY_BROADLY_ACCEPTED_CONDITION_IDS
-before being written - falls back to config.EBAY_DEFAULT_CONDITION_ID
-(instead of submitting a value some categories reject, e.g. "1750" New with
-defects - error 21916883) since this bot has no live per-category
-condition-validity data (that needs eBay dev API access - see ebay_api.py).
+(only "1000" New and "3000" Used - the only two conditions eBay's own
+ConditionEnum reference documents as supported in "most categories";
+every other ID, including "1500" New other and "1750" New with defects,
+is category-restricted) before being written - falls back to
+config.EBAY_CONDITION_FALLBACK_ID instead of submitting a value some
+categories reject (error 21916883, confirmed on real uploads for both
+"1750" and, category-specifically, "1500" on Lights/Lamps) since this bot
+has no live per-category condition-validity data (that needs eBay dev
+API access - see ebay_api.py).
 
 PicURL supports up to 24 pipe-separated ("|") image URLs per item (eBay
 File Exchange's own PicURL convention) - this uses every R2-hosted public
@@ -152,17 +157,17 @@ def _infer_type(title: str) -> str:
 
 def _resolved_condition_id(condition_id: str, item_label: str) -> str:
     """
-    Falls back to config.EBAY_DEFAULT_CONDITION_ID when `condition_id` isn't
-    in config.EBAY_BROADLY_ACCEPTED_CONDITION_IDS - see this module's
-    docstring (error 21916883).
+    Falls back to config.EBAY_CONDITION_FALLBACK_ID when `condition_id`
+    isn't in config.EBAY_BROADLY_ACCEPTED_CONDITION_IDS - see this module's
+    docstring and that config constant's own comment (error 21916883).
     """
     if condition_id in config.EBAY_BROADLY_ACCEPTED_CONDITION_IDS:
         return condition_id
     print(
         f"[ebay_csv] {item_label}: condition ID {condition_id!r} isn't in the broadly-accepted "
-        f"set - falling back to {config.EBAY_DEFAULT_CONDITION_ID!r} to avoid a category rejection."
+        f"set - falling back to {config.EBAY_CONDITION_FALLBACK_ID!r} to avoid a category rejection."
     )
-    return config.EBAY_DEFAULT_CONDITION_ID
+    return config.EBAY_CONDITION_FALLBACK_ID
 
 
 def custom_label(item: dict) -> str:
