@@ -684,6 +684,7 @@ class QueueReviewView(discord.ui.View):
         self.item_id = item_id
         self.approve.custom_id = f"pallet_bot:qr_approve:{item_id}"
         self.edit.custom_id = f"pallet_bot:qr_edit:{item_id}"
+        self.rereview.custom_id = f"pallet_bot:qr_rereview:{item_id}"
         self.reject.custom_id = f"pallet_bot:qr_reject:{item_id}"
 
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.green, emoji="✅")
@@ -694,6 +695,11 @@ class QueueReviewView(discord.ui.View):
     @discord.ui.button(label="Edit", style=discord.ButtonStyle.blurple, emoji="✏️")
     async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(EditDescriptionModal(self.item_id))
+
+    @discord.ui.button(label="Re-review (AI)", style=discord.ButtonStyle.gray, emoji="🔄")
+    async def rereview(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
+        await cog.rereview_item(interaction, self.item_id)
 
     @discord.ui.button(label="Reject / Send Back", style=discord.ButtonStyle.red, emoji="↩️")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1082,6 +1088,31 @@ class ItemFlow(commands.Cog):
         except discord_resilience.TRANSIENT_DISCORD_ERRORS:
             pass
 
+        pallet = db.get_pallet(pallet_id)
+        item_numbers = [db.get_item(i)["item_number"] for i in item_ids]
+        numbers_text = ", ".join(f"#{n}" for n in item_numbers)
+        resubmit_note = " (resubmitted)" if resubmit_item else ""
+        quantity_note = f" ({len(item_ids)} identical items)" if len(item_ids) > 1 else ""
+        clamp_note = (
+            f" ⚠️ Requested quantity was capped at {MAX_DATA_ENTRY_QUANTITY} - "
+            f"submit the rest separately if you actually have more."
+            if quantity_clamped else ""
+        )
+
+        # Posted here, in plain text, in Data Entry itself - not just in
+        # #automated-review, which whoever just submitted this may not be
+        # watching - so the item number is immediately visible while the
+        # box is still in front of them, in time to write it on a sticker
+        # ("we put stickers on the boxes so we can find them easy for when
+        # they are sold").
+        item_word = "Item" if len(item_ids) == 1 else "Items"
+        sticker_line = "write that number on the box" if len(item_ids) == 1 \
+            else "write the matching number on each box"
+        await message.channel.send(
+            f"✅ **{item_word} {numbers_text}** logged for **{pallet['name']}**{resubmit_note} - "
+            f"{sticker_line}."
+        )
+
         # Either new item(s) were received, or a rejected one just got fixed -
         # either way the pallet's stage counts changed, so refresh its card.
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
@@ -1096,17 +1127,6 @@ class ItemFlow(commands.Cog):
                 "until that's done.",
             )
             return
-
-        pallet = db.get_pallet(pallet_id)
-        item_numbers = [db.get_item(i)["item_number"] for i in item_ids]
-        numbers_text = ", ".join(f"#{n}" for n in item_numbers)
-        resubmit_note = " (resubmitted)" if resubmit_item else ""
-        quantity_note = f" ({len(item_ids)} identical items)" if len(item_ids) > 1 else ""
-        clamp_note = (
-            f" ⚠️ Requested quantity was capped at {MAX_DATA_ENTRY_QUANTITY} - "
-            f"submit the rest separately if you actually have more."
-            if quantity_clamped else ""
-        )
 
         if not config.AI_ENABLED:
             await automated_review_channel.send(
@@ -1203,11 +1223,21 @@ class ItemFlow(commands.Cog):
         item's photos/note, and the same result is saved to every item -
         they're identical by definition, so review N-1 more times would
         just burn extra API cost/time for the exact same answer.
+
+        Feeds the AI whatever's currently the most accurate description -
+        ai_description if Queue Review's Edit button already corrected it,
+        else the original raw_description - so QueueReviewView's "Re-review
+        (AI)" button (a second call into this same function, for an item
+        already past Data Entry) picks up a manual correction instead of
+        silently re-running against the stale original note. A freshly
+        created item has no ai_description yet, so this is a no-op change
+        for the normal Data Entry -> first review path.
         """
         first_item = db.get_item(item_ids[0])
         photo_paths = json.loads(first_item["photo_urls"])
+        note_for_review = first_item.get("ai_description") or first_item["raw_description"]
 
-        result = await ai_review.review_item(photo_paths, first_item["raw_description"])
+        result = await ai_review.review_item(photo_paths, note_for_review)
 
         def _safe_float(value):
             try:
@@ -1246,6 +1276,57 @@ class ItemFlow(commands.Cog):
             )
             db.update_status(item_id, db.STATUS_QUEUE_REVIEW, new_message_id=msg.id)
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
+
+    async def rereview_item(self, interaction: discord.Interaction, item_id: int):
+        """
+        'Re-review (AI)' on a Queue Review card - for after editing the
+        description (see EditDescriptionModal) or when the AI's first pass
+        errored/timed out (ai_review.review_item's own fallback result) and
+        it's worth just trying again. Reuses run_ai_review itself (the same
+        function Data Entry's first pass uses) rather than a second copy of
+        the AI-calling/status-transition logic - this just clears the
+        item's current card first (it already has one, unlike a fresh Data
+        Entry item) and posts run_ai_review's usual placeholder in
+        #automated-review before handing off to it.
+        """
+        if not await self._require_role(interaction, config.ROLE_QUEUE_REVIEW):
+            return
+        if not config.AI_ENABLED:
+            await interaction.response.send_message(
+                "AI review isn't configured, so there's nothing to re-run - see #information.",
+                ephemeral=True,
+            )
+            return
+        item = db.get_item(item_id)
+        if item["status"] != db.STATUS_QUEUE_REVIEW:
+            await interaction.response.send_message(
+                f"This item was already moved on (current status: {item['status']}). "
+                f"Someone likely clicked at the same time as you.", ephemeral=True
+            )
+            return
+
+        pallet_id = item["pallet_id"]
+        automated_review_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "automated-review"))
+        if automated_review_channel is None:
+            await interaction.response.send_message(
+                "The shared Automated Review channel isn't set up - ask a Pallet Admin to run "
+                "`/setup shared-channels`.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self._clear_old_card(interaction.message, item_id, "send back for AI re-review")
+
+        pallet = db.get_pallet(pallet_id)
+        placeholder = await automated_review_channel.send(
+            f"🔄 Re-reviewing **{pallet['name']}** item #{item['item_number']}..."
+        )
+        await self.run_ai_review([item_id], placeholder)
+        await interaction.followup.send(
+            f"Sent item #{item['item_number']} back for AI re-review - see the Automated Review channel.",
+            ephemeral=True,
+        )
 
     # ------------------------------------------------------------ movement --
 

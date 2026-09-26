@@ -62,12 +62,13 @@ def _pipeline_embed() -> discord.Embed:
     embed.add_field(
         name="1️⃣ #data-entry (per pallet)",
         value=(
-            "Data Entry posts a photo + short note, one message per item. The bot logs it, "
-            "removes the message, and sends it into Automated Review. Got several of the exact "
-            "same thing? Start the note with \"3x \" (or say \"3 of the same\"/\"3 of these\" "
-            "anywhere in it) and the bot logs 3 separate items, each independently tracked from "
-            "there. Replying to a rejected item's card (not posting a new message) resubmits the "
-            "same item."
+            "Data Entry posts a photo + short note, one message per item. The bot replies right "
+            "there with the item number(s) assigned - write that on the box/sticker - then logs "
+            "it, removes the message, and sends it into Automated Review. Got several of the "
+            "exact same thing? Start the note with \"3x \" (or say \"3 of the same\"/\"3 of these\" "
+            "anywhere in it) and the bot logs 3 separate items, each independently tracked (and "
+            "numbered) from there. Replying to a rejected item's card (not posting a new message) "
+            "resubmits the same item."
         ),
         inline=False,
     )
@@ -83,9 +84,11 @@ def _pipeline_embed() -> discord.Embed:
     embed.add_field(
         name="3️⃣ #queue-review (shared)",
         value=(
-            "Queue Review approves, edits, or rejects back to Data Entry. Approving walks "
-            "through condition, category (AI match or manual search), fixed-price/auction "
-            "format, then a final form for title/price/weight/dimensions/specifics."
+            "Queue Review approves, edits, re-reviews (AI), or rejects back to Data Entry. "
+            "Approving walks through condition, category (AI match or manual search), "
+            "fixed-price/auction format, then a final form for title/price/weight/dimensions/"
+            "specifics. Re-review (AI) re-runs the AI pass (picking up any Edit correction) - "
+            "for after fixing the description, or when the first pass errored/timed out."
         ),
         inline=False,
     )

@@ -26,8 +26,10 @@ Every item's card always shows which pallet it belongs to.
 - Posts a **"Start New Pallet"** button. Clicking it creates a category with
   **#pallet-discussion** (pinned live finance card) and **#data-entry**.
 - In **Data Entry**, the Data Entry role posts a photo + short note per item.
-  The bot logs it, deletes the original message, and sends it into the
-  shared Automated Review channel. Got several of the exact same physical
+  The bot replies right there, in plain text, with the item number(s) just
+  assigned - write that number on the box/sticker so it's easy to find
+  again once it sells - then deletes the original message and sends it into
+  the shared Automated Review channel. Got several of the exact same physical
   item? Start the note with `3x ` (e.g. `3x cordless drill, new in box`) -
   or just say `3 of the same`/`3 of these` anywhere in it - and one
   submission logs 3 separate items instead of one, each independently
@@ -51,8 +53,14 @@ Every item's card always shows which pallet it belongs to.
   Review can accept or change, never treated as final (see "Known
   limitations" below). **Photos are never edited or regenerated.** This
   step is optional - see "Running without AI review" below.
-- In **Queue Review** (shared), the Queue Review role approves, edits, or
-  rejects (sends back to that item's own pallet's Data Entry channel).
+- In **Queue Review** (shared), the Queue Review role approves, edits,
+  re-reviews (AI), or rejects (sends back to that item's own pallet's Data
+  Entry channel). **Re-review (AI)** clears the item's current card and
+  reruns Automated Review on it from scratch, straight back into Queue
+  Review with a fresh AI pass - for after using **Edit** to correct the
+  description (the re-review picks up that correction, not the original
+  raw note), or when the first pass errored/timed out and it's worth just
+  trying again.
   Approving walks through a few steps to capture everything needed to list
   the item on eBay later: a condition dropdown (`config.EBAY_CONDITIONS` -
   New / New other / New with defects / Used / For parts, with "New other"
@@ -599,13 +607,15 @@ UI after a restart (a Discord client caching quirk, not a bug here).
 3. **Purchase Management** runs `/finance setprice` inside the new pallet's category
    to record what was paid.
 4. **Data Entry** posts one message per item in that pallet's `#data-entry`:
-   attach photo(s), type a short note in the same message, send. The card
-   automatically updates - "Items Received" ticks up.
+   attach photo(s), type a short note in the same message, send. The bot
+   replies right there with the item number(s) assigned - write that on the
+   box/sticker - and the card automatically updates - "Items Received" ticks up.
 5. Within a few seconds it reappears in the shared `#queue-review`, labeled
    with its pallet, with an AI-suggested title/description (with a short
    liquidation disclaimer appended) and any flags.
-6. **Queue Review** clicks **Edit** or **Reject / Send Back** (returns to
-   that pallet's own Data Entry), or **Approve** - which asks for the eBay
+6. **Queue Review** clicks **Edit**, **Re-review (AI)** (re-runs the AI
+   pass, picking up any Edit correction), or **Reject / Send Back** (returns
+   to that pallet's own Data Entry), or **Approve** - which asks for the eBay
    condition (dropdown, "New other" sorted to the top), then the eBay
    category - applied automatically (with a "Change category" button) when
    the AI suggested one, otherwise a dropdown of your most-used categories -

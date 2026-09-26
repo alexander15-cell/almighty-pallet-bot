@@ -171,11 +171,14 @@ CHANNEL_INFO = {
     "data-entry": (
         "**Data Entry role** posts here. One message per item: attach photo(s) and "
         "type a short note (e.g. \"cordless drill, has case, untested\") in the same "
-        "message, then send. The bot logs it, removes it from this channel, and "
-        "sends it into the shared Automated Review channel automatically. "
+        "message, then send. The bot replies right here with the item number(s) it "
+        "assigned - write that number on the box/sticker so it's easy to find again "
+        "when it sells - then removes your message and sends it into the shared "
+        "Automated Review channel automatically. "
         "Got several of the exact same thing? Start the note with \"3x \" (e.g. "
         "\"3x cordless drill, new in box\") and the bot logs 3 separate items from "
-        "this one message, each tracked (and sellable) independently from here on - "
+        "this one message, each tracked (and sellable) independently from here on, "
+        "each getting its own number - "
         "\"3 of the same\"/\"3 of these\" anywhere in the note works too. "
         "If an item comes back here rejected from Queue Review, REPLY to that "
         "specific card with the corrected photo(s)/note - don't post a fresh "
@@ -189,8 +192,10 @@ CHANNEL_INFO = {
     "queue-review": (
         "**Queue Review role** works here. Every pallet's items waiting for review "
         "land in this one shared channel - check the embed's Pallet field to see "
-        "which pallet each item is from. Approve, Edit the description, or Reject "
-        "(sends back to that pallet's own Data Entry channel)."
+        "which pallet each item is from. Approve, Edit the description, Re-review "
+        "(AI) - re-runs the AI pass after an edit or an AI error, straight through "
+        "the Automated Review channel and back here - or Reject (sends back to "
+        "that pallet's own Data Entry channel)."
     ),
     "awaiting-listing": (
         "**Listing Management role** works here. These items were approved in Queue Review "
