@@ -33,14 +33,15 @@ PackageLength/Width/Depth are real captured dimensions, left blank (not
 estimated) when missing - shipping cost is still correct without them,
 just less precisely calculated.
 
-C:Brand always has a value - "Does Not Apply" (eBay's own standard
-placeholder for unbranded items) when Queue Review didn't capture a real
-brand, since eBay requires this field non-empty and a wrong guessed brand
-would be worse than an honest placeholder. C:Type is inferred from the
-title via a small keyword table (config.EBAY_TYPE_KEYWORDS) when missing,
-since (unlike Brand) it's a real search/browse attribute where a wrong
-guess actively hurts - see _infer_type, which logs a warning and leaves it
-blank rather than guessing when nothing matches.
+C:Brand/C:MPN/C:Type always have a value - "Does Not Apply" (eBay's own
+standard placeholder) when Queue Review didn't capture one, since real
+uploads confirmed eBay rejects the row outright when any of these three
+are blank (error 21919303, "item specific ... is missing") for at least
+some categories - not a weaker listing, a hard failure. C:Type still
+tries a small keyword table first (config.EBAY_TYPE_KEYWORDS, since it's
+a real search/browse attribute where a good guess beats a placeholder) -
+see _infer_type, which logs when nothing matches before falling back to
+the same placeholder as Brand/MPN.
 
 *ConditionID is checked against config.EBAY_BROADLY_ACCEPTED_CONDITION_IDS
 before being written - falls back to config.EBAY_DEFAULT_CONDITION_ID
@@ -135,10 +136,12 @@ def _estimated_weight_lb(category_path: str) -> float:
 def _infer_type(title: str) -> str:
     """
     Best-effort C:Type inference from an item's title when Queue Review
-    didn't capture one in item_specifics - see this module's docstring for
-    why this warns and leaves the column blank instead of guessing when
-    nothing in config.EBAY_TYPE_KEYWORDS matches, unlike C:Brand's safe
-    "Does Not Apply" placeholder.
+    didn't capture one in item_specifics. Returns "" (not a placeholder)
+    when nothing in config.EBAY_TYPE_KEYWORDS matches - the caller
+    (append_item_to_batch) logs that and falls back to the same "Does Not
+    Apply" placeholder C:Brand/C:MPN use, since a real value here is still
+    worth trying first (it's a genuine search/browse attribute), but eBay
+    requires the column non-empty regardless.
     """
     haystack = (title or "").lower()
     for keyword, type_value in config.EBAY_TYPE_KEYWORDS.items():
@@ -206,20 +209,35 @@ def append_item_to_batch(item: dict, listing: dict) -> None:
     title = listing.get("ebay_title") or ""
 
     specifics = dict(listing.get("item_specifics") or {})
-    # Ensure Brand/Type always end up with a value, without duplicating a
-    # column if Queue Review already typed one under a different case
-    # ("brand" vs "Brand") - see this module's docstring for why each is
-    # handled differently.
+    # Ensure Brand/MPN/Type always end up with a value, without duplicating
+    # a column if Queue Review already typed one under a different case
+    # ("brand" vs "Brand"). Brand and MPN are both eBay's own standard
+    # "Does Not Apply" placeholder fields for real-world real uploads that
+    # confirmed eBay rejects the ENTIRE row outright when either is blank
+    # (error 21919303, "item specific ... is missing") - not just a weaker
+    # listing, a hard failure - so both always get a real value.
     brand_key = next((k for k in specifics if k.strip().lower() == "brand"), None)
     if not (brand_key and specifics[brand_key]):
         specifics[brand_key or "Brand"] = "Does Not Apply"
 
+    mpn_key = next((k for k in specifics if k.strip().lower() == "mpn"), None)
+    if not (mpn_key and specifics[mpn_key]):
+        specifics[mpn_key or "MPN"] = "Does Not Apply"
+
+    # Type gets the same "Does Not Apply" treatment - originally this only
+    # inferred a value from the title and left the column blank otherwise
+    # (reasoning: a wrong guess actively hurts search/browse, worse than a
+    # blank one). Real uploads proved that assumption wrong: eBay treats
+    # Type as REQUIRED for some categories too, so a blank one doesn't
+    # degrade the listing, it blocks it outright - the same hard-failure
+    # class as Brand/MPN. A generic placeholder that still lets the item
+    # list beats guessing wrong, which beats not listing at all.
     type_key = next((k for k in specifics if k.strip().lower() == "type"), None)
     if not (type_key and specifics[type_key]):
         inferred_type = _infer_type(title)
-        specifics[type_key or "Type"] = inferred_type
+        specifics[type_key or "Type"] = inferred_type or "Does Not Apply"
         if not inferred_type:
-            print(f"[ebay_csv] {label}: couldn't infer a C:Type from the title {title!r} - leaving it blank.")
+            print(f"[ebay_csv] {label}: couldn't infer a C:Type from the title {title!r} - using 'Does Not Apply'.")
 
     for key in specifics:
         field = f"C:{key}"

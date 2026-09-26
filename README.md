@@ -487,11 +487,15 @@ item's real captured weight, or a rough category-keyword estimate -
 Policy names - `EBAY_SHIPPING_PROFILE_NAME`/`EBAY_RETURN_PROFILE_NAME`/
 `EBAY_PAYMENT_PROFILE_NAME` - update these if you ever rename a policy in
 Seller Hub). Item specifics grow the header with dynamic `C:<Name>`
-columns, same as before - `C:Brand` always has a value (a real one, or
-eBay's own `Does Not Apply` placeholder for unbranded items - never left
-blank or guessed), and `C:Type` is inferred from the title via
-`EBAY_TYPE_KEYWORDS` when Queue Review didn't capture one, logging a
-warning and leaving it blank rather than guessing when nothing matches.
+columns, same as before - `C:Brand` and `C:MPN` always have a value (a
+real one, or eBay's own `Does Not Apply` placeholder when Queue Review
+didn't capture one), and `C:Type` tries `EBAY_TYPE_KEYWORDS` against the
+title first, logging a warning and falling back to the same `Does Not
+Apply` placeholder when nothing matches. All three confirmed against a
+real upload: eBay rejects the entire row outright when any of them is
+blank (error 21919303, "item specific ... is missing") for at least some
+categories - not a weaker listing, a hard failure - so none of them are
+ever left empty.
 
 **`/ebay fill-recommendations`** is a separate, optional path - not part of
 the `/ebay export-batch` flow above - for anyone who chooses to use eBay's

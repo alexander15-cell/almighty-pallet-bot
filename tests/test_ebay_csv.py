@@ -153,16 +153,34 @@ def test_brand_not_duplicated_when_already_lowercase(tmp_path, monkeypatch):
     assert rows[0]["C:brand"] == "DeWalt"
 
 
+def test_mpn_defaults_to_does_not_apply_when_missing(tmp_path, monkeypatch):
+    row = _row(tmp_path, monkeypatch, {"item_specifics": {}})
+    assert row["C:MPN"] == "Does Not Apply"
+
+
+def test_mpn_preserves_real_value_when_present(tmp_path, monkeypatch):
+    row = _row(tmp_path, monkeypatch, {"item_specifics": {"MPN": "ABC-123"}})
+    assert row["C:MPN"] == "ABC-123"
+
+
+def test_mpn_not_duplicated_when_already_lowercase(tmp_path, monkeypatch):
+    monkeypatch.setattr(ebay_csv, "BATCH_CSV_PATH", tmp_path / "batch.csv")
+    ebay_csv.append_item_to_batch(_fake_item(), _fake_listing(item_specifics={"mpn": "ABC-123"}))
+    fieldnames, rows = ebay_csv._read_existing_rows()
+    assert "C:MPN" not in fieldnames
+    assert rows[0]["C:mpn"] == "ABC-123"
+
+
 def test_type_inferred_from_title_when_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "EBAY_TYPE_KEYWORDS", {"pendant": "Pendant"})
     row = _row(tmp_path, monkeypatch, {"item_specifics": {}, "ebay_title": "Nice Pendant Light Fixture"})
     assert row["C:Type"] == "Pendant"
 
 
-def test_type_left_blank_and_warns_when_not_inferable(tmp_path, monkeypatch, capsys):
+def test_type_falls_back_to_placeholder_and_warns_when_not_inferable(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(config, "EBAY_TYPE_KEYWORDS", {"pendant": "Pendant"})
     row = _row(tmp_path, monkeypatch, {"item_specifics": {}, "ebay_title": "Mystery Object"})
-    assert row["C:Type"] == ""
+    assert row["C:Type"] == "Does Not Apply"
     assert "couldn't infer a C:Type" in capsys.readouterr().out
 
 
