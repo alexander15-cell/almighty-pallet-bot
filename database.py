@@ -1506,6 +1506,66 @@ def clear_photo_public_urls(item_ids: list, actor_id: int = None):
             )
 
 
+def get_items_with_photo_url_prefix(prefix: str) -> list:
+    """
+    Items whose photo_public_urls contains at least one URL starting with
+    `prefix` (normalized the same way r2_storage.upload_photo builds a URL -
+    a trailing slash stripped, then exactly one added back). Used by /admin
+    rewrite-photo-url-base to preview/apply a one-time correction across
+    already-stored URLs after fixing a wrong R2_PUBLIC_URL_BASE in .env -
+    changing that env var only affects newly-uploaded photos going forward,
+    since each URL is written once into the database at upload time, never
+    rebuilt from config on read.
+    """
+    normalized_prefix = prefix.rstrip("/") + "/"
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, item_number, photo_public_urls FROM items WHERE photo_public_urls IS NOT NULL"
+        ).fetchall()
+    matches = []
+    for row in rows:
+        urls = json.loads(row["photo_public_urls"] or "[]")
+        if any(u and u.startswith(normalized_prefix) for u in urls):
+            matches.append(dict(row))
+    return matches
+
+
+def rewrite_photo_url_prefix(old_prefix: str, new_prefix: str, actor_id: int = None) -> int:
+    """
+    Rewrites every stored photo_public_urls entry starting with old_prefix
+    to start with new_prefix instead - a plain string substitution, safe
+    only because the object keys themselves (the path after the domain) are
+    identical between old and new - see get_items_with_photo_url_prefix.
+    Only touches photo_public_urls; local photo_urls (disk paths) and every
+    other item field are untouched. Irreversible; the caller should always
+    show a preview and require an explicit confirm before calling this,
+    same as clear_photo_public_urls/purge_buyer_data. Returns how many
+    items were updated (an item's whole URL list is rewritten together, so
+    this isn't a per-photo count).
+    """
+    normalized_old = old_prefix.rstrip("/") + "/"
+    normalized_new = new_prefix.rstrip("/") + "/"
+    items = get_items_with_photo_url_prefix(old_prefix)
+    now = _now()
+    with get_conn() as conn:
+        for item in items:
+            urls = json.loads(item["photo_public_urls"] or "[]")
+            rewritten = [
+                normalized_new + u[len(normalized_old):] if u and u.startswith(normalized_old) else u
+                for u in urls
+            ]
+            conn.execute(
+                "UPDATE items SET photo_public_urls = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(rewritten), now, item["id"]),
+            )
+            conn.execute(
+                "INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp) "
+                "VALUES (?, NULL, (SELECT status FROM items WHERE id = ?), ?, ?, ?)",
+                (item["id"], item["id"], actor_id, "R2 photo URL base corrected (fixed R2_PUBLIC_URL_BASE)", now),
+            )
+    return len(items)
+
+
 def set_finance_message(pallet_id: int, message_id: int):
     with get_conn() as conn:
         conn.execute("UPDATE pallets SET finance_message_id = ? WHERE id = ?", (message_id, pallet_id))

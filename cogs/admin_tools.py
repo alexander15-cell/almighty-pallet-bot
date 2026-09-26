@@ -517,6 +517,64 @@ class AdminTools(commands.Cog):
             ephemeral=True,
         )
 
+    @admin_group.command(
+        name="rewrite-photo-url-base",
+        description="Preview, or (confirm:True) fix, stored photo URLs after correcting R2_PUBLIC_URL_BASE.",
+    )
+    @app_commands.describe(
+        old_base="The wrong base URL that was in .env before (e.g. the old R2_PUBLIC_URL_BASE value)",
+        new_base="The corrected base URL now in .env",
+        confirm="Set True to actually rewrite them - default is preview-only",
+    )
+    async def rewrite_photo_url_base(
+        self, interaction: discord.Interaction, old_base: str, new_base: str, confirm: bool = False
+    ):
+        """
+        A one-time data fix, not a recurring admin tool: changing
+        R2_PUBLIC_URL_BASE in .env only affects photos uploaded AFTER the
+        fix, since r2_storage.upload_photo() writes each photo's full URL
+        into items.photo_public_urls once, at upload time - it's never
+        rebuilt from config on read. Anyone who fixes a wrong
+        R2_PUBLIC_URL_BASE needs this to also correct already-stored URLs
+        for existing items, or those items keep pointing at the old
+        (broken) domain forever. Only safe when the object key portion
+        (everything after the domain) is identical between old and new -
+        this does a plain prefix swap, nothing smarter.
+        """
+        if not await _require_admin(interaction):
+            return
+
+        candidates = db.get_items_with_photo_url_prefix(old_base)
+        if not candidates:
+            await interaction.response.send_message(
+                f"No stored photo URLs start with `{old_base}` - nothing to rewrite.", ephemeral=True
+            )
+            return
+
+        numbers = ", ".join(f"#{item['item_number']}" for item in candidates[:25])
+        if len(candidates) > 25:
+            numbers += f", and {len(candidates) - 25} more"
+
+        if not confirm:
+            example_urls = json.loads(candidates[0]["photo_public_urls"] or "[]")
+            example_old = next((u for u in example_urls if u and u.startswith(old_base.rstrip("/") + "/")), None)
+            example_new = (new_base.rstrip("/") + "/" + example_old[len(old_base.rstrip("/") + "/"):]) if example_old else None
+            example_line = f"\nExample: `{example_old}` → `{example_new}`" if example_old else ""
+            await interaction.response.send_message(
+                f"**Preview only** - {len(candidates)} item(s) have a stored photo URL starting with "
+                f"`{old_base}`: {numbers}.{example_line}\nOnly `photo_public_urls` is touched - local "
+                f"photo copies and every other record are untouched. Run again with `confirm:True` to "
+                f"actually rewrite them.",
+                ephemeral=True,
+            )
+            return
+
+        updated_count = db.rewrite_photo_url_prefix(old_base, new_base, actor_id=interaction.user.id)
+        await interaction.response.send_message(
+            f"✏️ Rewrote stored photo URLs for {updated_count} item(s): {numbers}.",
+            ephemeral=True,
+        )
+
     @admin_group.command(name="bind-role", description="Bind one of this bot's roles to a specific Discord role, so a future rename doesn't break it.")
     @app_commands.describe(role_name="Which of this bot's roles to bind", role="The actual Discord role to bind it to")
     @app_commands.choices(role_name=_ROLE_NAME_CHOICES)

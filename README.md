@@ -736,6 +736,15 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   refund, without keeping every photo in R2 forever. Only the R2 (public,
   durable-URL) copy is ever touched - the local disk copy, inventory
   identity, sale price, and audit history are all untouched.
+- `/admin rewrite-photo-url-base <old_base> <new_base> [confirm]` - a
+  one-time fix, not a recurring tool: if `R2_PUBLIC_URL_BASE` was ever
+  wrong in `.env` and gets corrected, this backfills already-stored photo
+  URLs to match, since each one is written into `items.photo_public_urls`
+  once at upload time (never rebuilt from config on read) - correcting the
+  env var alone only affects photos uploaded from that point forward.
+  Previews (default) or, with `confirm:True`, applies a plain prefix swap -
+  only safe when the object key portion (everything after the domain) is
+  identical between old and new.
 - `/admin bind-role <role_name> <role>` / `/admin unbind-role <role_name>` /
   `/admin role-bindings` - optional role-ID bindings (see "Role bindings" below),
   editable live from Discord, no restart needed.
