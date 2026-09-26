@@ -734,6 +734,18 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   this particular retry doesn't touch them.
   Skipping a needed correction just resubmits the same bad data and fails
   identically.
+- `/ebay requeue-pending` - the bulk version of `/ebay retry-item` above:
+  re-queues EVERY item currently pending an eBay upload (across every
+  pallet, already-exported or not) into a fresh live batch at once, no
+  pallet context needed. Doesn't take corrections like `retry-item` does -
+  just rebuilds each row from whatever's currently in the database. Useful
+  after fixing stored data that already-exported items' CSV rows were
+  originally built from (e.g. `/admin rewrite-photo-url-base` correcting a
+  wrong `R2_PUBLIC_URL_BASE`) - the database fix doesn't retroactively
+  rewrite a CSV file that's already been downloaded (or even already
+  uploaded), so getting the correction into eBay's hands means generating
+  a fresh CSV, which this does for everything pending in one command
+  instead of running `/ebay retry-item` once per item.
 - `/ebay import-results <batch_id> <results_csv>` - reconciles a batch
   against the results/report CSV Seller Hub gives you after processing an
   upload. Column names in eBay's results CSVs vary, so this matches them

@@ -800,6 +800,26 @@ def get_unbatched_pending_items():
         return [dict(r) for r in rows]
 
 
+def get_all_items_pending_ebay_upload():
+    """
+    EVERY item currently in pending_ebay_upload, regardless of whether
+    it's already been through an export (unlike get_unbatched_pending_items,
+    which only returns the not-yet-exported ones) - used by /ebay
+    requeue-pending to re-queue every already-exported-but-still-pending
+    item into a fresh live batch at once (e.g. after a bulk data fix like
+    correcting a wrong R2_PUBLIC_URL_BASE across many items' photo URLs -
+    the original CSV those items went out in has the old, stale data baked
+    into it as a static file, so getting the fix into eBay's hands means
+    generating a fresh CSV, not editing the one already downloaded).
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM items WHERE status = ? ORDER BY pallet_id, item_number",
+            (STATUS_PENDING_EBAY_UPLOAD,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_items_pending_fb_marketplace_upload():
     """
     Items currently sitting in pending_fb_marketplace_upload, waiting on

@@ -496,6 +496,56 @@ class Ebay(commands.Cog):
             ephemeral=True,
         )
 
+    @ebay_group.command(
+        name="requeue-pending",
+        description="Bulk /ebay retry-item: re-queue every item pending an eBay upload into a fresh batch.",
+    )
+    async def requeue_pending(self, interaction: discord.Interaction):
+        """
+        The bulk version of /ebay retry-item above, for when EVERY currently-
+        pending item (not just one) needs a fresh CSV row - e.g. after
+        correcting stored data that already-exported items' rows were built
+        from (a wrong R2_PUBLIC_URL_BASE baked stale photo URLs into the
+        original CSV, which fixing the database alone doesn't retroactively
+        fix - that file's already downloaded/possibly already uploaded).
+        Doesn't touch category/condition/specifics/weight/dimensions like
+        retry-item can - just rebuilds each row from whatever's currently in
+        the database, same as a plain re-run of retry-item with no
+        corrections would, for every pending item at once instead of one at
+        a time.
+        """
+        if not await _require_admin(interaction):
+            return
+
+        pending_items = db.get_all_items_pending_ebay_upload()
+        if not pending_items:
+            await interaction.response.send_message(
+                "No items are currently pending an eBay batch upload.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        requeued_numbers = []
+        skipped_numbers = []
+        for item in pending_items:
+            listing = db.get_ebay_listing_data(item["id"])
+            if not listing:
+                skipped_numbers.append(item["item_number"])
+                continue
+            db.clear_ebay_batch_id(item["id"])
+            ebay_csv.append_item_to_batch(item, listing)
+            requeued_numbers.append(item["item_number"])
+
+        lines = [
+            f"🔁 Re-queued {len(requeued_numbers)} item(s) into the current (live) eBay CSV batch - "
+            f"they'll go out in the next `/ebay export-batch`."
+        ]
+        if skipped_numbers:
+            shown = ", ".join(f"#{n}" for n in skipped_numbers[:10])
+            more = f", and {len(skipped_numbers) - 10} more" if len(skipped_numbers) > 10 else ""
+            lines.append(f"⚠️ Skipped {len(skipped_numbers)} item(s) with no eBay listing data on file: {shown}{more}.")
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Ebay(bot))
