@@ -544,9 +544,17 @@ class AdminTools(commands.Cog):
         if not await _require_admin(interaction):
             return
 
+        # Scanning every item's photo_public_urls (unlike purge-old-photos'
+        # targeted SQL WHERE, this has to parse each one's JSON in Python to
+        # check for a prefix match) can take longer than Discord's 3-second
+        # interaction-response window on a large item table - defer first so
+        # a slow scan can't blow that window and get "Unknown interaction"
+        # (error 10062) instead of ever actually replying.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         candidates = db.get_items_with_photo_url_prefix(old_base)
         if not candidates:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"No stored photo URLs start with `{old_base}` - nothing to rewrite.", ephemeral=True
             )
             return
@@ -560,7 +568,7 @@ class AdminTools(commands.Cog):
             example_old = next((u for u in example_urls if u and u.startswith(old_base.rstrip("/") + "/")), None)
             example_new = (new_base.rstrip("/") + "/" + example_old[len(old_base.rstrip("/") + "/"):]) if example_old else None
             example_line = f"\nExample: `{example_old}` → `{example_new}`" if example_old else ""
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"**Preview only** - {len(candidates)} item(s) have a stored photo URL starting with "
                 f"`{old_base}`: {numbers}.{example_line}\nOnly `photo_public_urls` is touched - local "
                 f"photo copies and every other record are untouched. Run again with `confirm:True` to "
@@ -570,7 +578,7 @@ class AdminTools(commands.Cog):
             return
 
         updated_count = db.rewrite_photo_url_prefix(old_base, new_base, actor_id=interaction.user.id)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✏️ Rewrote stored photo URLs for {updated_count} item(s): {numbers}.",
             ephemeral=True,
         )

@@ -22,16 +22,25 @@ NEW_BASE = "https://pub-d2913da42e5f420683d61bd260c5573d.r2.dev"
 
 
 class _FakeResponse:
+    async def defer(self, ephemeral=True, thinking=True):
+        pass
+
+    async def send_message(self, content=None, **kwargs):
+        raise AssertionError("should defer and use followup.send, not response.send_message")
+
+
+class _FakeFollowup:
     def __init__(self):
         self.content = None
 
-    async def send_message(self, content=None, **kwargs):
+    async def send(self, content=None, **kwargs):
         self.content = content
 
 
 class _FakeInteraction:
     def __init__(self):
         self.response = _FakeResponse()
+        self.followup = _FakeFollowup()
         self.user = type("U", (), {"id": 1})()
 
 
@@ -120,7 +129,7 @@ def test_rewrite_photo_url_prefix_logs_item_event(fresh_db):
 def test_rewrite_photo_url_base_no_candidates(fresh_db, cog):
     interaction = _FakeInteraction()
     asyncio.run(AdminTools.rewrite_photo_url_base.callback(cog, interaction, OLD_BASE, NEW_BASE, confirm=False))
-    assert "nothing to rewrite" in interaction.response.content
+    assert "nothing to rewrite" in interaction.followup.content
 
 
 def test_rewrite_photo_url_base_preview_does_not_modify(fresh_db, cog):
@@ -131,8 +140,8 @@ def test_rewrite_photo_url_base_preview_does_not_modify(fresh_db, cog):
     interaction = _FakeInteraction()
     asyncio.run(AdminTools.rewrite_photo_url_base.callback(cog, interaction, OLD_BASE, NEW_BASE, confirm=False))
 
-    assert "Preview only" in interaction.response.content
-    assert "Example:" in interaction.response.content
+    assert "Preview only" in interaction.followup.content
+    assert "Example:" in interaction.followup.content
     import json
     urls = json.loads(fresh_db.get_item(item_id)["photo_public_urls"])
     assert urls[0].startswith(OLD_BASE.rstrip("/"))  # untouched
@@ -146,7 +155,7 @@ def test_rewrite_photo_url_base_confirm_rewrites(fresh_db, cog):
     interaction = _FakeInteraction()
     asyncio.run(AdminTools.rewrite_photo_url_base.callback(cog, interaction, OLD_BASE, NEW_BASE, confirm=True))
 
-    assert "Rewrote stored photo URLs for 1 item" in interaction.response.content
+    assert "Rewrote stored photo URLs for 1 item" in interaction.followup.content
     import json
     urls = json.loads(fresh_db.get_item(item_id)["photo_public_urls"])
     assert urls[0] == NEW_BASE.rstrip("/") + "/items/1/a.jpg"
