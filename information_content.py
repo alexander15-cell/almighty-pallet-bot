@@ -197,6 +197,11 @@ def _pallet_item_commands_embed() -> discord.Embed:
         value="Split an item still in Queue Review into N identical, independently-tracked items - for when Data Entry's \"3x ...\" shorthand wasn't used, or the count changes later.",
         inline=False,
     )
+    embed.add_field(
+        name="/item hold <item_number> reason:<choice> [note]",
+        value="Move an item into #hold with a fixed reason (Queue Review or Listing Management role - not admin-only). Tap Resolved on its card to send it back where it came from.",
+        inline=False,
+    )
     return embed
 
 
@@ -207,5 +212,5 @@ def _admin_setup_commands_embed() -> discord.Embed:
     embed.add_field(name="/admin purge-old-photos [days] [confirm]", value="Preview/delete R2 photo copies for items sold past the retention window (local copies untouched).", inline=False)
     embed.add_field(name="/admin db-wipe", value="⚠️ Irreversible - permanently erases all pallet/item data, and R2 photos too if configured.", inline=False)
     embed.add_field(name="/setup shared-channels / hub / info-channel", value="One-time server setup commands (this channel included).", inline=False)
-    embed.set_footer(text="All /admin and /item, /pallet, /setup commands require the Pallet Admin role.")
+    embed.set_footer(text="All /admin and /pallet, /setup commands (and /item delete, /item duplicate) require the Pallet Admin role - /item hold is the one exception, see Pallets & Items.")
     return embed

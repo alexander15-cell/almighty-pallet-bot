@@ -62,6 +62,18 @@ async def _require_admin(interaction: discord.Interaction) -> bool:
     return False
 
 
+async def _require_any_role(interaction: discord.Interaction, role_names: list) -> bool:
+    if _is_pallet_admin(interaction):
+        return True
+    for name in role_names:
+        role = runtime_settings.resolve_role(interaction.guild, name)
+        if role and role in interaction.user.roles:
+            return True
+    names = " or ".join(f"**{r}**" for r in role_names)
+    await interaction.response.send_message(f"You need {names} to do that.", ephemeral=True)
+    return False
+
+
 class ConfirmArchiveView(discord.ui.View):
     """One-click confirmation before deleting real Discord channels."""
 
@@ -301,6 +313,64 @@ class AdminTools(commands.Cog):
         await interaction.followup.send(
             f"✅ Created {extra} more identical item(s) from #{item_number}: {numbers_text} - each now "
             f"tracked independently in Queue Review (its own price, sale, and shipping going forward).",
+            ephemeral=True,
+        )
+
+    @item_group.command(
+        name="hold",
+        description="Put an item on hold with a reason - moves it to the shared Hold channel.",
+    )
+    @app_commands.describe(
+        item_number="The item's number shown on its card (e.g. 3)",
+        reason="Why this item is being held",
+        note="Extra context - required if reason is Other",
+    )
+    @app_commands.choices(reason=[
+        app_commands.Choice(name=label, value=value) for value, label in db.HOLD_REASON_LABELS.items()
+    ])
+    async def item_hold(
+        self, interaction: discord.Interaction, item_number: int,
+        reason: app_commands.Choice[str], note: str = None,
+    ):
+        if not await _require_any_role(interaction, [config.ROLE_QUEUE_REVIEW, config.ROLE_LISTING_MGMT]):
+            return
+
+        pallet = db.get_pallet_by_category(interaction.channel.category_id)
+        if not pallet:
+            await interaction.response.send_message(
+                "Run this inside one of the pallet's own channels, not somewhere else.",
+                ephemeral=True,
+            )
+            return
+
+        item = db.get_item_by_pallet_and_number(pallet["id"], item_number)
+        if not item:
+            await interaction.response.send_message(
+                f"No item #{item_number} found in **{pallet['name']}**.", ephemeral=True
+            )
+            return
+        if reason.value == db.HOLD_REASON_OTHER and not note:
+            await interaction.response.send_message(
+                "A `note` is required when reason is **Other** - rerun with it filled in.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        cog = self.bot.get_cog("ItemFlow")
+        placed = await cog.place_item_on_hold(item, reason=reason.value, note=note, actor_id=interaction.user.id)
+        if not placed:
+            await interaction.followup.send(
+                f"Can't place item #{item_number} on hold from its current status (`{item['status']}`).",
+                ephemeral=True,
+            )
+            return
+
+        hold_channel_id = db.get_shared_channel_id("hold")
+        hold_channel_mention = f"<#{hold_channel_id}>" if hold_channel_id else "#hold"
+        await interaction.followup.send(
+            f"⏸️ Item #{item_number} placed on hold ({reason.name})"
+            + (f" - {note}" if note else "")
+            + f". See {hold_channel_mention}.",
             ephemeral=True,
         )
 

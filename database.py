@@ -43,8 +43,27 @@ STATUS_PENDING_FB_MARKETPLACE_UPLOAD = "pending_fb_marketplace_upload"  # added 
 STATUS_LISTED = "listed"
 STATUS_SOLD = "sold"
 STATUS_SHIPPED = "shipped"
+STATUS_ON_HOLD = "on_hold"    # see item_holds table - a pause with a reason, resolved back to whatever status it was held from
 STATUS_REJECTED = "rejected"  # sent back to data entry for redo
 STATUS_DELETED = "deleted"    # soft-deleted via /item delete - row kept for audit trail
+
+# Fixed hold reasons for /item hold - a proper lookup value (not free text)
+# so holds can be filtered/reported on later, e.g. "how many items are
+# stuck on an eBay category problem right now". HOLD_REASON_OTHER is the
+# only one where a note is actually required (enforced in cogs/admin_tools.py's
+# /item hold command) - every other reason's note is optional extra context.
+HOLD_REASON_EBAY_POLICY = "ebay_policy"
+HOLD_REASON_CATEGORY_REVIEW = "category_review"
+HOLD_REASON_MANUAL_LISTING = "manual_listing"
+HOLD_REASON_PHOTO_DATA_ISSUE = "photo_data_issue"
+HOLD_REASON_OTHER = "other"
+HOLD_REASON_LABELS = {
+    HOLD_REASON_EBAY_POLICY: "eBay policy - permanently blocked",
+    HOLD_REASON_CATEGORY_REVIEW: "Category needs manual review",
+    HOLD_REASON_MANUAL_LISTING: "Needs manual listing",
+    HOLD_REASON_PHOTO_DATA_ISSUE: "Photo/data issue",
+    HOLD_REASON_OTHER: "Other",
+}
 
 
 def _now() -> str:
@@ -206,6 +225,30 @@ def init_db():
                 actor_id    INTEGER,
                 note        TEXT,
                 timestamp   TEXT NOT NULL
+            );
+
+            -- One row per hold placed on an item (see /item hold,
+            -- cogs/admin_tools.py) - a real, filterable record, not just
+            -- text buried in item_events.note, so "how many items are held
+            -- for X reason" can actually be queried. resolved_at/resolved_by
+            -- stay NULL while the hold is open; resolving NEVER deletes the
+            -- row (see database.resolve_item_hold), so the full history of
+            -- every hold an item's ever had survives, including which
+            -- ones are still open (an item can only have one open hold at
+            -- a time - its status is STATUS_ON_HOLD while one exists).
+            -- pre_hold_status is what status the item was AT when placed
+            -- on hold, so resolving can send its card back to exactly
+            -- that stage's channel/view instead of guessing.
+            CREATE TABLE IF NOT EXISTS item_holds (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id          INTEGER NOT NULL REFERENCES items(id),
+                reason           TEXT NOT NULL,     -- one of HOLD_REASON_* above
+                note             TEXT,              -- required only when reason = HOLD_REASON_OTHER
+                pre_hold_status  TEXT NOT NULL,
+                set_by           INTEGER,
+                set_at           TEXT NOT NULL,
+                resolved_by      INTEGER,
+                resolved_at      TEXT
             );
 
             -- One row per item, captured during Queue Review approval (see the
@@ -600,6 +643,62 @@ def soft_delete_item(item_id: int, actor_id: int):
     update_status(item_id, STATUS_DELETED, actor_id=actor_id, note="Deleted by admin")
 
 
+def get_open_hold(item_id: int):
+    """The item's currently-open hold record (resolved_at IS NULL), or None
+    if it isn't on hold - see item_holds' own CREATE TABLE comment. An item
+    can only have one open hold at a time."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM item_holds WHERE item_id = ? AND resolved_at IS NULL ORDER BY id DESC LIMIT 1",
+            (item_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def place_item_on_hold(item_id: int, reason: str, note: str, pre_hold_status: str, actor_id: int = None) -> int:
+    """
+    Records a new open hold for this item (see item_holds' own CREATE
+    TABLE comment) and moves its status to STATUS_ON_HOLD - the actual
+    Discord side (posting the hold card, clearing the old one) is
+    cogs/item_flow.py's ItemFlow.place_item_on_hold's job; this is just the
+    data half, same split as every other stage transition in this file.
+    Returns the new item_holds row's id.
+    """
+    now = _now()
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO item_holds (item_id, reason, note, pre_hold_status, set_by, set_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (item_id, reason, note, pre_hold_status, actor_id, now),
+        )
+        hold_id = cur.lastrowid
+    update_status(item_id, STATUS_ON_HOLD, actor_id=actor_id, note=f"On hold: {HOLD_REASON_LABELS[reason]}")
+    return hold_id
+
+
+def resolve_item_hold(item_id: int, actor_id: int = None):
+    """
+    Marks the item's open hold resolved (timestamp + who) WITHOUT deleting
+    it - the full hold history (including this one) stays queryable/
+    reportable forever, per item_holds' own CREATE TABLE comment. Does NOT
+    change items.status itself - the caller (ItemFlow.resolve_item_hold)
+    does that once it's actually reposted the item's card in the right
+    channel, same ordering every other stage transition uses (post the new
+    card, then update_status). Returns the hold's pre_hold_status (so the
+    caller knows where to send the item back to), or None if there was no
+    open hold to resolve.
+    """
+    hold = get_open_hold(item_id)
+    if not hold:
+        return None
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE item_holds SET resolved_by = ?, resolved_at = ? WHERE id = ?",
+            (actor_id, _now(), hold["id"]),
+        )
+    return hold["pre_hold_status"]
+
+
 def get_item_by_pallet_and_number(pallet_id: int, item_number: int):
     with get_conn() as conn:
         row = conn.execute(
@@ -891,7 +990,9 @@ def get_pallet_financials(pallet_id: int):
         and listed. Deliberately broad: an item is "priced" the moment Queue
         Review approves it, well before it's actually live anywhere, and
         this is meant to answer "what's the value of everything I've priced
-        so far" regardless of exactly which pre-sale stage it's sitting in.
+        so far" regardless of exactly which pre-sale stage it's sitting in
+        - including on_hold, since a hold is a pause, not a change in
+        whether the item is still genuinely priced and pending a sale.
         Expected revenue still "in the pipeline", not yet realized (that's
         revenue_so_far, from actual recorded sale_price) - the two are
         deliberately separate numbers, never added together.
@@ -927,9 +1028,9 @@ def get_pallet_financials(pallet_id: int):
         pending_row = conn.execute(
             """SELECT COUNT(*) AS n, COALESCE(SUM(eld.price), 0) AS total
                FROM items i JOIN ebay_listing_data eld ON eld.item_id = i.id
-               WHERE i.pallet_id = ? AND i.status IN (?, ?, ?, ?)""",
+               WHERE i.pallet_id = ? AND i.status IN (?, ?, ?, ?, ?)""",
             (pallet_id, STATUS_AWAITING_LISTING, STATUS_PENDING_EBAY_UPLOAD,
-             STATUS_PENDING_FB_MARKETPLACE_UPLOAD, STATUS_LISTED),
+             STATUS_PENDING_FB_MARKETPLACE_UPLOAD, STATUS_LISTED, STATUS_ON_HOLD),
         ).fetchone()
 
     items_received = pallet.get("items_received_override")
@@ -1667,6 +1768,7 @@ def wipe_database():
         conn.executescript(
             """
             DROP TABLE IF EXISTS item_events;
+            DROP TABLE IF EXISTS item_holds;
             DROP TABLE IF EXISTS ebay_listing_data;
             DROP TABLE IF EXISTS ebay_batches;
             DROP TABLE IF EXISTS ebay_category_usage;

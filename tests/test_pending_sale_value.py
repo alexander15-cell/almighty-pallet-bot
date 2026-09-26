@@ -48,6 +48,18 @@ def test_pending_sale_value_includes_every_pre_sale_stage(fresh_db):
     assert fin["pending_sale_value"] == 100.0
 
 
+def test_pending_sale_value_includes_items_on_hold(fresh_db):
+    # A hold is a pause, not a change in whether an item is still genuinely
+    # priced and pending a sale - shouldn't disappear from this figure just
+    # because something's temporarily blocking it.
+    pallet_id = fresh_db.create_pallet("Pending Pallet 7", category_id=8, created_by=1)
+    _priced_item(fresh_db, pallet_id, 15.0, fresh_db.STATUS_ON_HOLD)
+
+    fin = fresh_db.get_pallet_financials(pallet_id)
+    assert fin["items_pending_sale"] == 1
+    assert fin["pending_sale_value"] == 15.0
+
+
 def test_pending_sale_value_excludes_sold_items(fresh_db):
     pallet_id = fresh_db.create_pallet("Pending Pallet 2", category_id=2, created_by=1)
     item_id = _priced_item(fresh_db, pallet_id, 30.0, fresh_db.STATUS_LISTED)

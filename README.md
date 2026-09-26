@@ -11,6 +11,8 @@ live, auto-updating cost/profit card per pallet:
 #automated-review (AI) → #queue-review → #awaiting-listing → #listed → #sold
                                                     ↓               ↑      ↓
                                           #pending-ebay-upload ------      #10-day-alerts
+
+(any of #queue-review/#awaiting-listing/#pending-*-upload/#listed/#sold → #hold → back to where it came from)
 ```
 
 Only **#pallet-discussion** and **#data-entry** are created per pallet.
@@ -109,6 +111,42 @@ Every item's card always shows which pallet it belongs to.
   channel, just checks it off).
 - A background job checks every 12 hours for anything sitting in Listed for
   10+ days and pings the shared **10-Day Alerts** channel, naming the pallet.
+- **Hold** (shared) is a pause, not a stage in the normal pipeline order -
+  see "Item holds" below.
+
+## Item holds
+
+Something can go wrong at any point mid-pipeline (an eBay category that
+turns out to be permanently restricted, an item that needs its listing
+handled by hand, a photo that needs re-shooting) without that meaning the
+item should go all the way back to Data Entry. `/item hold <item_number>
+reason:<choice> [note]` (run inside that pallet's category - **Queue
+Review** or **Listing Management** role) moves it into the shared
+**#hold** channel instead, remembering exactly where it was so it can go
+right back there once resolved.
+
+`reason` is a fixed dropdown, not free typing, so holds stay reportable:
+**eBay policy** (permanently blocked category), **Category needs manual
+review**, **Needs manual listing**, **Photo/data issue**, or **Other**
+(the only one that requires `note` to be filled in - every other reason's
+note is optional extra context). Every hold is a real, queryable database
+row (`item_holds`), kept forever even after it's resolved - resolving
+never deletes the record, just timestamps it, so "how many items have
+ever been held for X reason" stays answerable.
+
+The hold card shows the reason (and note, if any) right on it, alongside
+the item's usual photo/title/pallet-and-item-number. Tap **Resolved** once
+whatever was wrong is sorted out - the item's card reposts in whatever
+channel/view it would normally have at the stage it was held FROM (Queue
+Review, Awaiting Listing, a pending-upload channel, Listed, or Sold), and
+picks back up from there. No separate confirmation step on **Resolved** -
+none of this bot's other one-click resolve-type buttons (Confirm Listed,
+Mark Listed, Mark as Sold) have one either.
+
+Only items already sitting in one of those six stages can be placed on
+hold - an item still in Data Entry or Automated Review, or already
+Shipped/Rejected/Deleted, isn't a valid hold target (there'd be nowhere
+sensible to send it back to).
 
 ## Financial tracking: decoupled from the operational buttons
 
@@ -629,6 +667,10 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   Review. The manual counterpart to Data Entry's `3x ...` shorthand above,
   for when that wasn't used or the count changes later. Capped at 25 new
   items per run as a sanity check against a typo.
+- `/item hold <item_number> reason:<choice> [note]` - run inside a
+  pallet's category. **Queue Review or Listing Management role** (not
+  Pallet-Admin-only, unlike the rest of this section) - see "Item holds"
+  above.
 - `/pallet archive` - run inside a pallet's category. Asks for confirmation,
   then deletes that pallet's own channels (`#pallet-discussion`,
   `#data-entry`). All item data stays in the database permanently - this

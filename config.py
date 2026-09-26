@@ -95,6 +95,7 @@ SHARED_STAGE_CHANNELS = [
     "pending-fb-marketplace-upload",
     "listed",
     "sold",
+    "hold",
     "10-day-alerts",
 ]
 SHARED_PIPELINE_CATEGORY_NAME = "Shared Pallet Pipeline"
@@ -151,6 +152,7 @@ CHANNEL_ROLE_PERMISSIONS = {
     "pending-fb-marketplace-upload": [ROLE_LISTING_MGMT],
     "listed": [ROLE_LISTING_MGMT],
     "sold": [ROLE_LISTING_MGMT],
+    "hold": [ROLE_LISTING_MGMT, ROLE_QUEUE_REVIEW],
     "10-day-alerts": [ROLE_LISTING_MGMT, ROLE_FINANCE_MGMT],
     "credit-card-charges": [ROLE_FINANCE_MGMT, ROLE_PURCHASE_MGMT],
     "awaiting-pallet-charges": [ROLE_FINANCE_MGMT, ROLE_PURCHASE_MGMT],
@@ -219,6 +221,12 @@ CHANNEL_INFO = {
     "sold": (
         "Sold items land here. Click Mark as Shipped once it's been packed and sent "
         "to the buyer, just so there's a record of what's shipped vs. sold-but-not-out-yet."
+    ),
+    "hold": (
+        "**Listing Management or Queue Review role** works here. Items land here via "
+        "`/item hold`, run inside that pallet's category - each card shows why it's held. "
+        "Once whatever's blocking it is sorted out, tap **Resolved** to send it right back "
+        "to wherever it would normally be sitting at this point in the pipeline."
     ),
     "10-day-alerts": (
         "No action needed most of the time - this channel gets an automatic ping "
@@ -297,7 +305,7 @@ ANTHROPIC_MODEL = "claude-sonnet-5"
 STAGE_ORDER_FOR_STATUS = [
     "data_entry", "automated_review", "queue_review", "awaiting_listing",
     "pending_ebay_upload", "pending_fb_marketplace_upload", "listed", "sold", "shipped",
-    "rejected", "deleted",
+    "on_hold", "rejected", "deleted",
 ]
 
 # ---- eBay (optional direct API path - see ebay_api.py) ----

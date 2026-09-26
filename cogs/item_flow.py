@@ -853,6 +853,79 @@ class ShippedView(discord.ui.View):
         await cog.mark_shipped(interaction, self.item_id)
 
 
+def _channel_and_view_for_status(item_id: int, status: str):
+    """
+    The channel "stage" key and matching persistent view for reposting an
+    item's card at `status` - the exact same channel+view every other
+    stage transition already posts a card with (finalize_ebay_approval,
+    add_to_ebay_batch, move_to_listed, etc.), factored out here so
+    ItemFlow.place_item_on_hold/resolve_item_hold reuse it instead of
+    re-deciding it. Returns (None, None) for any status this bot doesn't
+    post a live, actionable card for (data_entry, automated_review,
+    shipped, rejected, deleted, on_hold itself) - those aren't valid
+    hold/resolve targets.
+    """
+    if status == db.STATUS_QUEUE_REVIEW:
+        return "queue-review", QueueReviewView(item_id)
+    if status == db.STATUS_AWAITING_LISTING:
+        return "awaiting-listing", AwaitingListingView(item_id)
+    if status == db.STATUS_PENDING_EBAY_UPLOAD:
+        view = discord.ui.View(timeout=None)
+        view.add_item(ConfirmEbayListedButton(item_id))
+        return "pending-ebay-upload", view
+    if status == db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD:
+        view = discord.ui.View(timeout=None)
+        view.add_item(ConfirmFbMarketplaceListedButton(item_id))
+        return "pending-fb-marketplace-upload", view
+    if status == db.STATUS_LISTED:
+        return "listed", ListedView(item_id)
+    if status == db.STATUS_SOLD:
+        return "sold", ShippedView(item_id)
+    return None, None
+
+
+class HoldResolvedButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pallet_bot:hold_resolved:(?P<item_id>\d+)"):
+    """
+    Marks an item's open hold resolved and moves its card back to wherever
+    it would normally be sitting at this point in the pipeline - wherever
+    it was right before being put on hold (see _channel_and_view_for_status
+    and database.resolve_item_hold) - a DynamicItem, same pattern as
+    ConfirmEbayListedButton, so it keeps working across bot restarts.
+
+    No extra "are you sure?" step - none of this bot's other resolve-type
+    buttons (Confirm Listed, Mark Listed, Mark as Sold) have one either, so
+    this matches that existing pattern rather than inventing a new one.
+    """
+
+    def __init__(self, item_id: int):
+        super().__init__(discord.ui.Button(
+            label="Resolved", style=discord.ButtonStyle.green, emoji="✅",
+            custom_id=f"pallet_bot:hold_resolved:{item_id}",
+        ))
+        self.item_id = item_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: dict):
+        return cls(int(match["item_id"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
+        if not await cog._require_role(interaction, config.ROLE_LISTING_MGMT):
+            return
+        item = db.get_item(self.item_id)
+        if not item or item["status"] != db.STATUS_ON_HOLD:
+            await interaction.response.send_message("This item isn't on hold anymore.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        moved, stage = await cog.resolve_item_hold(item, actor_id=interaction.user.id)
+        await finance_utils.refresh_finance_message(interaction.client, item["pallet_id"])
+        await interaction.followup.send(
+            f"✅ Hold resolved - moved back to **#{stage}**." if moved
+            else "Couldn't resolve (no open hold record found, or status changed under us) - try again.",
+            ephemeral=True,
+        )
+
+
 class ItemFlow(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -860,7 +933,7 @@ class ItemFlow(commands.Cog):
 
     async def cog_load(self):
         self.stale_check_loop.start()
-        self.bot.add_dynamic_items(ConfirmEbayListedButton, ConfirmFbMarketplaceListedButton)
+        self.bot.add_dynamic_items(ConfirmEbayListedButton, ConfirmFbMarketplaceListedButton, HoldResolvedButton)
 
     def cog_unload(self):
         self.stale_check_loop.cancel()
@@ -1457,6 +1530,79 @@ class ItemFlow(commands.Cog):
         )
         db.update_status(item["id"], db.STATUS_LISTED, actor_id=actor_id, new_message_id=msg.id)
         return True
+
+    async def place_item_on_hold(self, item: dict, reason: str, note: str, actor_id: int) -> bool:
+        """
+        Used by /item hold (cogs/admin_tools.py). Moves an item from
+        wherever it currently is into the shared #hold channel, recording
+        why (see database.place_item_on_hold - a real, filterable reason,
+        not just text) and remembering its current status so
+        resolve_item_hold can send it right back later. Returns False
+        (does nothing) if the item's current status isn't one this bot
+        posts a live card for in the first place (see
+        _channel_and_view_for_status) - nothing to hold/resolve for those.
+        """
+        old_stage, _ = _channel_and_view_for_status(item["id"], item["status"])
+        if old_stage is None:
+            return False
+
+        pallet_id = item["pallet_id"]
+        hold_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "hold"))
+        view = discord.ui.View(timeout=None)
+        view.add_item(HoldResolvedButton(item["id"]))
+        reason_label = db.HOLD_REASON_LABELS[reason]
+        extra = f"⏸️ **On Hold - {reason_label}**" + (f"\nNote: {note}" if note else "")
+        msg = await send_item_card(hold_channel, item, view=view, extra_text=extra)
+
+        db.place_item_on_hold(item["id"], reason=reason, note=note, pre_hold_status=item["status"], actor_id=actor_id)
+        db.update_status(item["id"], db.STATUS_ON_HOLD, actor_id=actor_id, new_message_id=msg.id)
+
+        old_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, old_stage))
+        if old_channel and item.get("current_message_id"):
+            try:
+                old_msg = await old_channel.fetch_message(item["current_message_id"])
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                old_msg = None
+            if old_msg:
+                await self._clear_old_card(old_msg, item["id"], "place on hold")
+
+        await finance_utils.refresh_finance_message(self.bot, pallet_id)
+        return True
+
+    async def resolve_item_hold(self, item: dict, actor_id: int):
+        """
+        Used by HoldResolvedButton. Marks the item's open hold resolved
+        (see database.resolve_item_hold - the record itself is kept, not
+        deleted) and reposts its card in whatever channel/view it would
+        normally have at the status it was held FROM - the exact same
+        channel+view every other stage transition already uses to post
+        there (_channel_and_view_for_status), so resolving a hold just
+        continues the pipeline from where it left off. Returns
+        (True, stage_name) on success, (False, None) if there was no open
+        hold to resolve (e.g. a double-click on Resolved).
+        """
+        if item["status"] != db.STATUS_ON_HOLD:
+            return False, None
+        pre_status = db.resolve_item_hold(item["id"], actor_id=actor_id)
+        if pre_status is None:
+            return False, None
+
+        pallet_id = item["pallet_id"]
+        stage, view = _channel_and_view_for_status(item["id"], pre_status)
+        channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, stage))
+        msg = await send_item_card(channel, item, view=view)
+        db.update_status(item["id"], pre_status, actor_id=actor_id, note="Hold resolved", new_message_id=msg.id)
+
+        old_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "hold"))
+        if old_channel and item.get("current_message_id"):
+            try:
+                old_msg = await old_channel.fetch_message(item["current_message_id"])
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                old_msg = None
+            if old_msg:
+                await self._clear_old_card(old_msg, item["id"], "resolve hold")
+
+        return True, stage
 
     async def reject_to_data_entry(self, interaction: discord.Interaction, item_id: int):
         if not await self._require_role(interaction, config.ROLE_QUEUE_REVIEW):
