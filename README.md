@@ -485,7 +485,13 @@ separate seller enrollment program this account isn't in), falls back to
 claiming New for items that usually aren't factory-sealed). `PicURL`
 (every R2-hosted photo URL, pipe-separated, up to
 eBay's 24-photo cap), `*Description`, `*Format`/`*Duration` (`GTC` for
-FixedPrice, the real auction duration for Auction), `*StartPrice`,
+FixedPrice, the real auction duration for Auction), `ScheduleTime` (every
+listing in the batch starts `EBAY_LISTING_SCHEDULE_DELAY_DAYS` - 7 by
+default - days out, stamped once by `/ebay export-batch` at export time,
+not when each item was individually added to the running batch, since a
+batch can sit for a while before it's actually uploaded and eBay rejects a
+scheduled time that's already close to or past "now"; left blank until
+then), `*StartPrice`,
 `*Quantity` (always `1`), `*Location` (`EBAY_ITEM_LOCATION`), `PostalCode`
 (`EBAY_SHIP_FROM_POSTAL_CODE`), `WeightMajor`/`WeightMinor` (from the
 item's real captured weight, or a rough category-keyword estimate -

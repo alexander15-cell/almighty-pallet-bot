@@ -366,6 +366,15 @@ EBAY_BROADLY_ACCEPTED_CONDITION_IDS = {"1000", "3000"}
 # IDs eBay's own docs back as broadly accepted.
 EBAY_CONDITION_FALLBACK_ID = "3000"
 
+# How many days out from export every listing in an eBay batch CSV gets
+# scheduled to start (ebay_csv.py's ScheduleTime column, stamped once at
+# export_and_archive() time - not when each item was individually added to
+# the batch, since a batch can sit for a while before it's actually
+# uploaded, and eBay rejects a ScheduleTime that's already passed by the
+# time File Exchange processes it). eBay allows scheduling up to 3 weeks
+# out, so 7 days leaves plenty of room.
+EBAY_LISTING_SCHEDULE_DELAY_DAYS = 7
+
 # eBay File Exchange's *Duration values for an Auction-format listing (fixed-
 # price listings always use "GTC" - Good 'Til Cancelled - handled separately
 # in ebay_csv.py). Shown as a Discord select menu, only when the reviewer

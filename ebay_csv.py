@@ -62,6 +62,18 @@ saved to local disk in that case, not to a public URL eBay's bulk upload
 can fetch, so whoever processes the batch still needs to attach photos in
 Seller Hub (or fill this in by hand) before uploading.
 
+ScheduleTime (eBay's File Exchange field for a future listing start,
+format "YYYY-MM-DD HH:MM:SS" in GMT, max 3 weeks out) is left blank by
+append_item_to_batch and only filled in by export_and_archive, which
+stamps every row in the batch with the same timestamp -
+config.EBAY_LISTING_SCHEDULE_DELAY_DAYS days from the moment the CSV is
+actually exported, not from whenever each item was individually added to
+the batch. Stamping at export time (rather than append time) matters
+because a batch can sit for days before someone runs /ebay export-batch -
+a ScheduleTime computed at append time could already be in the past, or
+too close to "now", by the time File Exchange actually processes the
+upload.
+
 This lives outside any single cog, same as finance_utils.py, because both
 item_flow.py (writes rows) and ebay.py (exports/archives the file) need the
 same logic.
@@ -69,7 +81,7 @@ same logic.
 import csv
 import json
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import config
@@ -93,6 +105,7 @@ BASE_FIELDS = [
     "*Description",
     "*Format",
     "*Duration",
+    "ScheduleTime",
     "*StartPrice",
     "*Quantity",
     "*Location",
@@ -308,13 +321,29 @@ def append_item_to_batch(item: dict, listing: dict) -> None:
 
 def export_and_archive() -> Path | None:
     """
-    Returns a Path to a copy of the current batch CSV (for attaching to
-    Discord), then archives it under ARCHIVE_DIR with a timestamped name and
-    clears the live file so the next "Add to eBay Batch" click starts a
-    fresh batch. Returns None if the batch is currently empty.
+    Stamps every row in the current batch CSV with a ScheduleTime
+    config.EBAY_LISTING_SCHEDULE_DELAY_DAYS days out (see this module's
+    docstring - done here, not at append time, so the delay counts from
+    when the file is actually exported/uploaded), then returns a Path to a
+    copy of it (for attaching to Discord), archives it under ARCHIVE_DIR
+    with a timestamped name, and clears the live file so the next "Add to
+    eBay Batch" click starts a fresh batch. Returns None if the batch is
+    currently empty.
     """
     if not BATCH_CSV_PATH.exists() or BATCH_CSV_PATH.stat().st_size == 0:
         return None
+
+    fieldnames, rows = _read_existing_rows()
+    schedule_time = (datetime.now(timezone.utc) + timedelta(days=config.EBAY_LISTING_SCHEDULE_DELAY_DAYS)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    for row in rows:
+        row["ScheduleTime"] = schedule_time
+    with BATCH_CSV_PATH.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({field: r.get(field, "") for field in fieldnames})
 
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

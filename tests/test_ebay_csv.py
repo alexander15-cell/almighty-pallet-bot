@@ -2,8 +2,10 @@
 template (Action/CustomLabel/*Category/*Title/*ConditionID/.../
 ShippingProfileName/ReturnProfileName/PaymentProfileName, plus dynamic
 C:<Specific> columns)."""
+import csv
 import json
 import os
+from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("DISCORD_BOT_TOKEN", "test-token")
 
@@ -267,3 +269,30 @@ def test_export_and_archive_clears_the_live_file(tmp_path, monkeypatch):
     assert archived_path is not None
     assert archived_path.exists()
     assert not (tmp_path / "batch.csv").exists()
+
+
+def test_schedule_time_is_blank_until_export(tmp_path, monkeypatch):
+    row = _row(tmp_path, monkeypatch)
+    assert row["ScheduleTime"] == ""
+
+
+def test_export_stamps_schedule_time_days_out(tmp_path, monkeypatch):
+    monkeypatch.setattr(ebay_csv, "BATCH_CSV_PATH", tmp_path / "batch.csv")
+    monkeypatch.setattr(ebay_csv, "ARCHIVE_DIR", tmp_path / "archive")
+    monkeypatch.setattr(config, "EBAY_LISTING_SCHEDULE_DELAY_DAYS", 7)
+    ebay_csv.append_item_to_batch(_fake_item(pallet_id=1, item_number=1), _fake_listing())
+    ebay_csv.append_item_to_batch(_fake_item(pallet_id=1, item_number=2), _fake_listing())
+
+    before = datetime.now(timezone.utc)
+    archived_path = ebay_csv.export_and_archive()
+    after = datetime.now(timezone.utc)
+
+    with archived_path.open("r", newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 2
+    for row in rows:
+        stamped = datetime.strptime(row["ScheduleTime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        # +/- 1s slack: strftime truncates the sub-second remainder of `now`.
+        assert before + timedelta(days=7, seconds=-1) <= stamped <= after + timedelta(days=7)
+    # Both rows in the same export get the identical timestamp.
+    assert rows[0]["ScheduleTime"] == rows[1]["ScheduleTime"]
