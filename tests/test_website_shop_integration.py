@@ -13,7 +13,9 @@ Covers the three actual code changes this integration needed:
 - database.ensure_items_autoincrement_floor().
 """
 import asyncio
+import importlib
 import json
+import os
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -171,6 +173,43 @@ def test_ensure_items_autoincrement_floor_works_on_a_database_with_existing_item
     assert db.ensure_items_autoincrement_floor(1_000_000_000) is True
     new_item_id = fresh_db.create_item(pallet_id, "New item after bump", [], 1)
     assert new_item_id >= 1_000_000_000
+
+
+def test_item_flow_saves_absolute_photo_paths_even_when_config_path_is_relative(tmp_path, monkeypatch):
+    """
+    Regression guard: config.PHOTO_DIR defaults to a relative path
+    ("data/photos" in production), and cogs/item_flow.py used to compute its
+    own PHOTO_DIR constant as `Path(config.PHOTO_DIR)` unchanged - so every
+    photo path saved into an item's photo_urls was a relative string.
+    combined_intake.py's _photos() (reused unchanged from combined_bot.py)
+    requires every stored path to be absolute - a real security boundary,
+    not something to loosen - so every real item created through the normal
+    Data Entry flow was silently rejected from #website_shop with
+    "invalid_intake_photos", the very first time any item ever reached that
+    check in production. This was masked by every existing test building
+    its own already-absolute tmp_path photo paths by hand, never through
+    item_flow.py's own PHOTO_DIR/photo_dir_for(). Confirmed live: after
+    fixing database.ensure_items_autoincrement_floor (a separate bug), the
+    first item to actually reach reconcile() was blocked with exactly
+    "invalid_intake_photos".
+    """
+    original_env = os.environ.get("PHOTO_DIR")
+    import cogs.item_flow as flow_module
+    try:
+        monkeypatch.chdir(tmp_path)
+        os.environ["PHOTO_DIR"] = "data/photos"  # relative, matching production's default
+        importlib.reload(config)
+        importlib.reload(flow_module)
+
+        assert flow_module.PHOTO_DIR.is_absolute()
+        folder = flow_module.photo_dir_for(999)
+        assert folder.is_absolute()
+        assert folder == tmp_path / "data" / "photos" / "999"
+    finally:
+        if original_env is not None:
+            os.environ["PHOTO_DIR"] = original_env
+        importlib.reload(config)
+        importlib.reload(flow_module)
 
 
 def test_backup_includes_website_shop_databases_when_present(tmp_path, monkeypatch):

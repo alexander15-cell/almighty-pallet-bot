@@ -30,6 +30,7 @@ so that card never goes stale.
 """
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 
@@ -50,7 +51,7 @@ import runtime_settings
 import recovery_safety
 from website_contract import build_website_contract, FOOTER_PREFIX, STATUSES as WEBSITE_STATUSES
 
-PHOTO_DIR = Path(config.PHOTO_DIR)
+PHOTO_DIR = Path(os.path.abspath(config.PHOTO_DIR))
 
 # How many identical physical items one Data Entry submission can spawn at
 # once - a sanity cap against an obvious typo (e.g. "300x") flooding the
