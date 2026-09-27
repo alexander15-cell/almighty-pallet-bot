@@ -509,7 +509,18 @@ def ensure_items_autoincrement_floor(floor: int) -> bool:
         target_seq = floor - 1
         if current_seq >= target_seq:
             return False
-        conn.execute("INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES ('items', ?)", (target_seq,))
+        # Deliberately not "INSERT OR REPLACE": against sqlite_sequence that
+        # silently fails to persist (a documented SQLite quirk with this
+        # internal bookkeeping table) even though it reports success and
+        # raises nothing - confirmed by reproducing it directly against a
+        # scratch database. A plain UPDATE (when a row already exists, which
+        # it always will once any item has ever been inserted) or INSERT
+        # (only for a table that has never had a row) are the only forms
+        # that actually take effect.
+        if current is None:
+            conn.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('items', ?)", (target_seq,))
+        else:
+            conn.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = 'items'", (target_seq,))
         return True
 
 

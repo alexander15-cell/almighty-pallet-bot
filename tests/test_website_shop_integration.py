@@ -150,6 +150,29 @@ def test_ensure_items_autoincrement_floor_is_idempotent_and_never_lowers(fresh_d
     assert next_id == 1_000_000_001
 
 
+def test_ensure_items_autoincrement_floor_works_on_a_database_with_existing_items(fresh_db):
+    """
+    Regression guard: a real install always has real pre-existing items
+    (and therefore an existing items.sqlite_sequence row) by the time this
+    feature gets turned on - unlike test_..._is_idempotent_and_never_lowers
+    above, which only exercises a brand-new database with zero items, where
+    no such row exists yet. Those are different code paths against SQLite's
+    special-cased sqlite_sequence bookkeeping table: "INSERT OR REPLACE"
+    against an EXISTING row there silently fails to persist (confirmed by
+    reproducing it directly against a scratch database), even though it
+    reports success and raises nothing, while a plain INSERT (no existing
+    row) works fine - which is exactly why the first test alone didn't
+    catch this.
+    """
+    pallet_id = fresh_db.create_pallet("Existing Pallet", category_id=1, created_by=1)
+    for i in range(5):
+        fresh_db.create_item(pallet_id, f"Pre-existing item {i}", [], 1)
+
+    assert db.ensure_items_autoincrement_floor(1_000_000_000) is True
+    new_item_id = fresh_db.create_item(pallet_id, "New item after bump", [], 1)
+    assert new_item_id >= 1_000_000_000
+
+
 def test_backup_includes_website_shop_databases_when_present(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DATABASE_PATH", str(tmp_path / "pallet_tracker.db"))
     monkeypatch.setattr(config, "BACKUP_DIR", str(tmp_path / "backups"))
