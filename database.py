@@ -494,6 +494,25 @@ def get_all_shared_channels() -> dict:
         return {r["stage"]: r["channel_id"] for r in rows}
 
 
+def ensure_items_autoincrement_floor(floor: int) -> bool:
+    """
+    One-time bump so the NEXT item created gets id >= floor - used by
+    cogs/website_shop.py so every item eligible for that feature is a new
+    one created after it was turned on, never a pre-existing real item.
+    Idempotent and safe to call every startup: only raises the counter,
+    never lowers it (so it can't undo real IDs already issued above floor,
+    and calling it again after the first real bump is a no-op).
+    """
+    with get_conn() as conn:
+        current = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'items'").fetchone()
+        current_seq = current["seq"] if current else 0
+        target_seq = floor - 1
+        if current_seq >= target_seq:
+            return False
+        conn.execute("INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES ('items', ?)", (target_seq,))
+        return True
+
+
 def is_shared_channels_setup() -> bool:
     existing = get_all_shared_channels()
     return all(stage in existing for stage in config.SHARED_STAGE_CHANNELS)

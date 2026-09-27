@@ -32,6 +32,10 @@ COGS = [
     "cogs.fb_marketplace",
     "cogs.pirate_ship",
 ]
+if config.WEBSITE_SHOP_ENABLED:
+    # Off by default (see config.WEBSITE_SHOP_ENABLED) - the module isn't
+    # even imported unless this is explicitly turned on.
+    COGS.append("cogs.website_shop")
 
 
 @bot.event

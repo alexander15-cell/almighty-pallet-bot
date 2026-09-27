@@ -51,6 +51,37 @@ if WEBSITE_SKU_PREFIX and not re.fullmatch(r"[A-Z][A-Z0-9]{0,15}-", WEBSITE_SKU_
 # genuinely feeding its own separate website integration.
 WEBSITE_MARKERS_ENABLED = os.getenv("WEBSITE_MARKERS_ENABLED", "false").strip().lower() == "true"
 
+# ---- Website shop integration (cogs/website_shop.py) ----
+# Adds a "#website_shop" approval flow to THIS bot - same process, same
+# database, same Discord token - for publishing items to a separate
+# storefront website, reusing the website's existing Publisher contract/
+# transport/durable journal (see publisher/). Defaults OFF; every setting
+# below is required only once this is turned on. This reuses
+# combined_intake.py/combined_delivery.py, originally built for the
+# separate combined_bot.py deployment - see that module's own comments for
+# why it only ever manages items at/above WEBSITE_SHOP_ITEM_ID_FLOOR
+# (never adopts historical inventory) and always uses the fixed "FGNEW-"
+# SKU prefix.
+WEBSITE_SHOP_ENABLED = os.getenv("WEBSITE_SHOP_ENABLED", "false").strip().lower() == "true"
+WEBSITE_SHOP_ITEM_ID_FLOOR = 1_000_000_000
+WEBSITE_SHOP_SKU_PREFIX = "FGNEW-"
+WEBSITE_SHOP_CHANNEL_ID = int(os.getenv("WEBSITE_SHOP_CHANNEL_ID") or "0")
+# Discord user IDs allowed to act in #website_shop (comma-separated) - this
+# module's approval store checks a fixed staff list, not a role, since it's
+# reused unchanged from the separate deployment it was built for.
+WEBSITE_SHOP_OPERATOR_IDS = tuple(
+    v.strip() for v in (os.getenv("WEBSITE_SHOP_OPERATOR_IDS") or "").split(",") if v.strip()
+)
+WEBSITE_URL = os.getenv("WEBSITE_URL", "")
+WEBSITE_SOURCE_ID = os.getenv("WEBSITE_SOURCE_ID", "")
+WEBSITE_SECRET = os.getenv("WEBSITE_SECRET", "")
+# Separate from WEBSITE_SHOP_ENABLED, same staged-rollout reasoning as
+# combined_bot.py's publishEnabled: turn the shop review flow on first
+# (WEBSITE_SHOP_ENABLED), confirm it behaves, THEN also turn this on once
+# ready to actually send approved items to the real website.
+WEBSITE_PUBLISH_ENABLED = os.getenv("WEBSITE_PUBLISH_ENABLED", "false").strip().lower() == "true"
+WEBSITE_SHOP_POLL_SECONDS = int(os.getenv("WEBSITE_SHOP_POLL_SECONDS") or "30")
+
 # ---- Automated Review (AI) backend ----
 # "anthropic" (default) - Claude's cloud vision API, requires ANTHROPIC_API_KEY.
 # "ollama"    - a local Ollama server (https://ollama.com), no API key or
@@ -293,6 +324,13 @@ STALE_CHECK_INTERVAL_HOURS = 12  # how often the background job checks for stale
 
 # ---- Database ----
 DATABASE_PATH = os.getenv("DATABASE_PATH", "data/pallet_tracker.db")
+
+# The website-shop feature's own two sqlite stores (shop_approval.py's
+# review store, publisher/journal.py's durable delivery journal) - kept
+# alongside the main database so backup.py picks them up in the same
+# backup/restore cycle as everything else (see backup.py's own comment).
+WEBSITE_SHOP_APPROVAL_DB_PATH = os.path.join(os.path.dirname(DATABASE_PATH), "shop_approval.sqlite")
+WEBSITE_SHOP_JOURNAL_DB_PATH = os.path.join(os.path.dirname(DATABASE_PATH), "website_journal.sqlite")
 
 # ---- Local backups (see backup.py) ----
 # Verified zip snapshots of the database + photos + CSV batch archives.

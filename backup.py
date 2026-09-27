@@ -19,9 +19,11 @@ Restore only ever writes into a NEW, empty destination directory - never
 into a live data directory - so a bad restore can't clobber a working
 installation. Stop the bot first; the restored directory has the same
 layout as config's data paths (pallet_tracker.db, photos/,
-ebay_batch_archive/, fb_marketplace_batch_archive/, pirate_ship_exports/),
-so pointing DATABASE_PATH/PHOTO_DIR/etc at it (or renaming it to replace
-your data/ directory) is enough to bring a restored copy back online.
+ebay_batch_archive/, fb_marketplace_batch_archive/, pirate_ship_exports/,
+and shop_approval.sqlite/website_journal.sqlite if the website-shop feature
+is in use), so pointing DATABASE_PATH/PHOTO_DIR/etc at it (or renaming it
+to replace your data/ directory) is enough to bring a restored copy back
+online.
 """
 import argparse
 import hashlib
@@ -45,6 +47,10 @@ _ARCHIVE_DIRS = {
     "pirate_ship_exports": lambda: Path(config.PIRATE_SHIP_EXPORT_ARCHIVE_DIR),
 }
 _DB_ARCHIVE_NAME = "pallet_tracker.db"
+_WEBSITE_SHOP_DBS = {
+    "shop_approval.sqlite": config.WEBSITE_SHOP_APPROVAL_DB_PATH,
+    "website_journal.sqlite": config.WEBSITE_SHOP_JOURNAL_DB_PATH,
+}
 
 
 def _sha256(path: Path) -> str:
@@ -55,8 +61,8 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _snapshot_database(dest_path: Path):
-    source_path = Path(config.DATABASE_PATH)
+def _snapshot_database(dest_path: Path, source_path: Path = None):
+    source_path = source_path or Path(config.DATABASE_PATH)
     if not source_path.exists():
         raise FileNotFoundError(f"Database not found at {source_path} - nothing to back up yet.")
     with closing(sqlite3.connect(str(source_path))) as source, \
@@ -82,6 +88,17 @@ def create_backup() -> Path:
         db_dest = staging / _DB_ARCHIVE_NAME
         _snapshot_database(db_dest)
         manifest["files"][_DB_ARCHIVE_NAME] = _sha256(db_dest)
+
+        # Only present once the website-shop feature (cogs/website_shop.py)
+        # has actually been turned on and used - same online-safe snapshot
+        # approach as the main database, not a plain file copy.
+        for archive_name, source_path in _WEBSITE_SHOP_DBS.items():
+            source_path = Path(source_path)
+            if not source_path.exists():
+                continue
+            dest = staging / archive_name
+            _snapshot_database(dest, source_path)
+            manifest["files"][archive_name] = _sha256(dest)
 
         for archive_name, resolve_dir in _ARCHIVE_DIRS.items():
             source_dir = resolve_dir()

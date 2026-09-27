@@ -52,7 +52,13 @@ class IntakeAdapter:
         import config
         import database
 
-        if (not getattr(config, "COMBINED_MODE", False) or not config.PRESERVE_DISCORD_HISTORY
+        # Two callers construct this: combined_bot.py's isolated deployment
+        # (COMBINED_MODE + PRESERVE_DISCORD_HISTORY, unchanged) and this
+        # repo's own bot.py, integrated via cogs/website_shop.py
+        # (config.WEBSITE_SHOP_ENABLED) - see that config constant's comment.
+        combined_scope = getattr(config, "COMBINED_MODE", False) and config.PRESERVE_DISCORD_HISTORY
+        integrated_scope = getattr(config, "WEBSITE_SHOP_ENABLED", False)
+        if (not (combined_scope or integrated_scope)
                 or str(settings.guild_id) != store.guild_id
                 or str(settings.channels["website_shop"]) != store.shop_channel_id
                 or type(settings.item_id_floor) is not int
@@ -136,9 +142,17 @@ class IntakeAdapter:
         if item is None:
             return None
         pallet_id = item.get("pallet_id")
+        # "data-entry" is only checked when present in settings.channels - the
+        # isolated combined_bot.py deployment has exactly one such channel to
+        # verify against; this repo's own integrated bot.py (see
+        # cogs/website_shop.py) has one per pallet, so identity here isn't a
+        # meaningful safety boundary for it - the item_id_floor check above
+        # already ensures only items created after this feature was turned on
+        # are ever considered, regardless of which pallet they belong to.
         if (item.get("id") != number or type(pallet_id) is not int or pallet_id <= 0
                 or type(item.get("item_number")) is not int or item["item_number"] <= 0
-                or str(self.db.get_stage_channel_id(pallet_id, "data-entry")) != str(self.settings.channels["data-entry"])
+                or ("data-entry" in self.settings.channels
+                    and str(self.db.get_stage_channel_id(pallet_id, "data-entry")) != str(self.settings.channels["data-entry"]))
                 or str(self.db.resolve_channel_id(pallet_id, "listed")) != str(self.settings.channels["listed"])
                 or str(self.db.resolve_channel_id(pallet_id, "sold")) != str(self.settings.channels["sold"])):
             raise IntakeAdapterError("intake_channel_mapping_changed")
