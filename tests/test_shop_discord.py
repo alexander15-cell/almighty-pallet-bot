@@ -212,6 +212,71 @@ def test_review_posts_are_append_only_and_scoped_to_owned_bot(setup):
         assert event.channel.send.call_count == 1
     asyncio.run(run())
 
+def test_confirming_approval_deletes_the_card(setup):
+    """
+    Regression guard: the card served its purpose once actually accepted -
+    leaving it in #website_shop forever just accumulates clutter. Deleting
+    it must never happen before the approval is actually committed (see the
+    other approve_item tests above for that), only after.
+    """
+    async def run():
+        store, actor, review, payload = setup
+        ready = complete(store, actor, review)
+        event = interaction()
+        event.message.delete = AsyncMock()
+        await view_for(store, ready, payload).approve_item(event)
+        event.message.delete.assert_awaited_once()
+    asyncio.run(run())
+
+
+def test_a_rejected_approval_does_not_delete_the_card(setup):
+    async def run():
+        store, actor, review, payload = setup
+        ready = complete(store, actor, review)
+        changed = deepcopy(payload)
+        changed['description'] = 'Changed contents, not the reviewed item description.'
+        event = interaction()
+        event.message.delete = AsyncMock()
+        await view_for(store, ready, changed).approve_item(event)
+        event.message.delete.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_entering_details_deletes_the_prior_card_once_the_new_one_is_posted(setup):
+    """
+    Regression guard: entering price/eBay link used to always post a brand
+    new card and leave the old one behind forever (deliberately, per the
+    removed "append-only" comment) - accumulating one stale, dead-buttoned
+    card per edit. The new card is posted FIRST (so a failed post never
+    loses the fallback - see the next test), and only once that succeeds is
+    the old one cleaned up.
+    """
+    async def run():
+        store, actor, review, payload = setup
+        view = view_for(store, review, payload)
+        source_message = SimpleNamespace(delete=AsyncMock())
+        modal = ShopDetailsModal(view, USER, source_message)
+        modal.price._value, modal.ebay._value = '25.99', URL
+        event = interaction()
+        await modal.on_submit(event)
+        source_message.delete.assert_awaited_once()
+    asyncio.run(run())
+
+
+def test_a_failed_new_card_post_does_not_delete_the_old_one(setup):
+    async def run():
+        store, actor, review, payload = setup
+        view = view_for(store, review, payload)
+        source_message = SimpleNamespace(delete=AsyncMock())
+        modal = ShopDetailsModal(view, USER, source_message)
+        modal.price._value, modal.ebay._value = '25.99', URL
+        event = interaction()
+        event.channel.send.side_effect = RuntimeError('synthetic send failure')
+        await modal.on_submit(event)
+        source_message.delete.assert_not_awaited()
+    asyncio.run(run())
+
+
 def test_condition_classification_is_visible_not_just_notes(setup):
     store, actor, review, payload = setup
     first = review_embed(review, payload['title'], payload).to_dict()['fields'][0]['value']

@@ -80,7 +80,7 @@ class ShopReviewView(discord.ui.View):
         self.resolver, self.application_id = resolver, application_id
         self.details = discord.ui.Button(label='Enter price and eBay link', style=discord.ButtonStyle.secondary,
             custom_id=f'fgshop:details:{review.item_id}:{review.revision}', disabled=review.state not in {'draft', 'approved', 'published'})
-        self.approve = discord.ui.Button(label='Approve for website', style=discord.ButtonStyle.success,
+        self.approve = discord.ui.Button(label='Confirm', style=discord.ButtonStyle.success,
             custom_id=f'fgshop:approve:{review.item_id}:{review.revision}',
             disabled=review.state != 'draft' or bool(missing_fields(review)))
         self.details.callback = self.open_details
@@ -103,7 +103,8 @@ class ShopReviewView(discord.ui.View):
     async def open_details(self, interaction):
         try:
             self.current(interaction, for_edit=True)
-            await interaction.response.send_modal(ShopDetailsModal(self, str(interaction.user.id)))
+            await interaction.response.send_modal(
+                ShopDetailsModal(self, str(interaction.user.id), interaction.message))
         except (ShopApprovalError, ShopContentError, ShopValidationError) as error:
             await tell(interaction, friendly_error(error))
 
@@ -129,10 +130,16 @@ class ShopReviewView(discord.ui.View):
             latest = self.store.get_review(actor, review.item_id)
             if job.state not in {'queued', 'claimed', 'published'} or latest.revision != job.revision or latest.state not in {'approved', 'published'}:
                 await tell(interaction, 'The review changed or was cancelled. Use Show latest review before trying again.')
-            elif job.state == 'published':
-                await tell(interaction, 'This version has already been confirmed by the website.')
-            else:
-                await tell(interaction, 'Approved and queued for the website. It is not live until the website confirms the update.')
+                return
+            await tell(interaction,
+                'This version has already been confirmed by the website.' if job.state == 'published' else
+                'Approved and queued for the website. It is not live until the website confirms the update.')
+            # The card served its purpose once actually accepted - removing it
+            # is best-effort (this whole block already swallows failures) and
+            # never allowed to make a committed approval look like it failed.
+            message = getattr(interaction, 'message', None)
+            if message is not None:
+                await message.delete()
         except Exception:
             pass
 
@@ -152,6 +159,12 @@ class ShopReviewView(discord.ui.View):
                         request_id=f'discord-{interaction.id}', content_digest=verified.digest, quantity=verified.quantity)
             await post_review(interaction.channel, store=self.store, review=current, title=title,
                               resolver=self.resolver, application_id=self.application_id)
+            message = getattr(interaction, 'message', None)
+            if message is not None:
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
             await tell(interaction, 'The latest review is posted in #website_shop. No new approval was given.')
         except (ShopApprovalError, ShopContentError, ShopValidationError) as error:
             await tell(interaction, friendly_error(error))
@@ -159,10 +172,10 @@ class ShopReviewView(discord.ui.View):
             await tell(interaction, 'The latest review could not be posted. Nothing was newly approved; try Show latest review again.')
 
 class ShopDetailsModal(discord.ui.Modal):
-    def __init__(self, view, owner_id):
+    def __init__(self, view, owner_id, source_message=None):
         super().__init__(title='Website price and eBay link', timeout=300,
                          custom_id=f'fgshop:form:{view.review.item_id}:{view.review.revision}')
-        self.review_view, self.owner_id = view, owner_id
+        self.review_view, self.owner_id, self.source_message = view, owner_id, source_message
         cents = view.review.price_cents
         self.price = discord.ui.TextInput(label='Selling price ($)', placeholder='24.99',
             default=None if cents is None else f'{cents // 100}.{cents % 100:02d}', max_length=128, required=True)
@@ -184,15 +197,24 @@ class ShopDetailsModal(discord.ui.Modal):
                 raise ShopContentError('reviewed_content_changed')
             changed = view.store.edit(actor, current.item_id, expected_revision=current.revision,
                 request_id=f'discord-{interaction.id}', price_cents=cents, ebay_url=url, content_digest=verified.digest)
-            # A new message preserves every prior card. Old buttons reject its
-            # revision. A failed send leaves a draft, never an automatic publish.
+            # The new card is posted FIRST, as a fallback that still exists if
+            # this fails partway - only once it's confirmed posted does the
+            # stale prior card get cleaned up (best-effort; never allowed to
+            # make a successful save look like it failed).
             await post_review(interaction.channel, store=view.store, review=changed, title=verified.title,
                               resolver=view.resolver, application_id=view.application_id)
-            await tell(interaction, 'Saved. Check the new review card in #website_shop, then click Approve for website.')
         except (ShopApprovalError, ShopContentError, ShopValidationError) as error:
             await tell(interaction, friendly_error(error))
+            return
         except Exception:
             await tell(interaction, 'The review card could not be posted. No new approval was given. Click Show latest review on the earlier card to recover the saved draft.')
+            return
+        if self.source_message is not None:
+            try:
+                await self.source_message.delete()
+            except Exception:
+                pass
+        await tell(interaction, 'Saved. Check the new review card in #website_shop, then Confirm to approve it, or send it back for more info to make changes.')
 
 async def post_review(channel, *, store, review, title, resolver, application_id):
     member = getattr(getattr(channel, 'guild', None), 'me', None)
