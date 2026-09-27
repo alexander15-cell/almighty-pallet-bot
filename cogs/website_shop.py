@@ -73,40 +73,12 @@ class WebsiteShop(commands.Cog):
         self.store = self.adapter = self.journal = self.delivery = None
 
     async def cog_load(self):
-        db.ensure_items_autoincrement_floor(config.WEBSITE_SHOP_ITEM_ID_FLOOR)
-
-        guild_id = str(config.GUILD_ID)
-        shop_channel_id = str(config.WEBSITE_SHOP_CHANNEL_ID)
-        listed_channel_id = str(db.get_shared_channel_id("listed"))
-        sold_channel_id = str(db.get_shared_channel_id("sold"))
-        application_id = str(self.bot.user.id)
-
-        self.store = ShopReviewStore(
-            config.WEBSITE_SHOP_APPROVAL_DB_PATH,
-            guild_id=guild_id, shop_channel_id=shop_channel_id,
-            operator_ids=config.WEBSITE_SHOP_OPERATOR_IDS,
-        )
-        settings = _AdapterSettings(
-            guild_id, {"website_shop": shop_channel_id, "listed": listed_channel_id, "sold": sold_channel_id},
-            application_id,
-        )
-        self.adapter = IntakeAdapter(self.bot, settings, self.store)
-        self.journal = Journal(
-            config.WEBSITE_SHOP_JOURNAL_DB_PATH, config.WEBSITE_SOURCE_ID, guild_id,
-            config.WEBSITE_URL, application_id, listed_channel_id, sold_channel_id,
-        )
-        transport = Transport(config.WEBSITE_URL, config.WEBSITE_SECRET) if config.WEBSITE_PUBLISH_ENABLED else None
-        self.delivery = DeliveryService(
-            self.store, self.journal, transport, self.adapter.resolve_content, self.adapter.lifecycle,
-            enabled=config.WEBSITE_PUBLISH_ENABLED, max_deliveries=1,
-        )
-        await self.adapter.restore_views()
-        if not self.poll_loop.is_running():
-            self.poll_loop.start()
-        log.info(
-            "Website shop ready in #%s. Publishing: %s.",
-            shop_channel_id, config.WEBSITE_PUBLISH_ENABLED,
-        )
+        # Deliberately does NOT build Store/Adapter/Journal/Delivery here:
+        # cog_load() runs during bot.load_extension(), which bot.py calls
+        # BEFORE bot.start() logs in - self.bot.user is still None at this
+        # point. Construction (which needs the bot's own real application
+        # ID) happens once, in poll_loop's before_loop, right after login.
+        self.poll_loop.start()
 
     def cog_unload(self):
         self.poll_loop.cancel()
@@ -116,6 +88,43 @@ class WebsiteShop(commands.Cog):
             self.store.close()
         if self.journal is not None:
             self.journal.close()
+
+    async def _ensure_ready(self):
+        if self.store is not None:
+            return
+        db.ensure_items_autoincrement_floor(config.WEBSITE_SHOP_ITEM_ID_FLOOR)
+
+        guild_id = str(config.GUILD_ID)
+        shop_channel_id = str(config.WEBSITE_SHOP_CHANNEL_ID)
+        listed_channel_id = str(db.get_shared_channel_id("listed"))
+        sold_channel_id = str(db.get_shared_channel_id("sold"))
+        application_id = str(self.bot.user.id)
+
+        store = ShopReviewStore(
+            config.WEBSITE_SHOP_APPROVAL_DB_PATH,
+            guild_id=guild_id, shop_channel_id=shop_channel_id,
+            operator_ids=config.WEBSITE_SHOP_OPERATOR_IDS,
+        )
+        settings = _AdapterSettings(
+            guild_id, {"website_shop": shop_channel_id, "listed": listed_channel_id, "sold": sold_channel_id},
+            application_id,
+        )
+        adapter = IntakeAdapter(self.bot, settings, store)
+        journal = Journal(
+            config.WEBSITE_SHOP_JOURNAL_DB_PATH, config.WEBSITE_SOURCE_ID, guild_id,
+            config.WEBSITE_URL, application_id, listed_channel_id, sold_channel_id,
+        )
+        transport = Transport(config.WEBSITE_URL, config.WEBSITE_SECRET) if config.WEBSITE_PUBLISH_ENABLED else None
+        delivery = DeliveryService(
+            store, journal, transport, adapter.resolve_content, adapter.lifecycle,
+            enabled=config.WEBSITE_PUBLISH_ENABLED, max_deliveries=1,
+        )
+        await adapter.restore_views()
+        self.store, self.adapter, self.journal, self.delivery = store, adapter, journal, delivery
+        log.info(
+            "Website shop ready in #%s. Publishing: %s.",
+            shop_channel_id, config.WEBSITE_PUBLISH_ENABLED,
+        )
 
     @tasks.loop(seconds=config.WEBSITE_SHOP_POLL_SECONDS)
     async def poll_loop(self):
@@ -128,10 +137,14 @@ class WebsiteShop(commands.Cog):
     @poll_loop.before_loop
     async def _before_poll_loop(self):
         await self.bot.wait_until_ready()
+        await self._ensure_ready()
 
     @website_group.command(name="status", description="Check website approval and delivery status")
     async def status(self, interaction: discord.Interaction):
         if not await _require_role(interaction, config.ROLE_LISTING_MGMT):
+            return
+        if self.journal is None:
+            await interaction.response.send_message("Still starting up - try again in a moment.", ephemeral=True)
             return
         counts = self.journal.counts()
         mode = "Live publishing" if config.WEBSITE_PUBLISH_ENABLED else "Preview only - no website sends"
@@ -140,6 +153,9 @@ class WebsiteShop(commands.Cog):
     @website_group.command(name="review", description="Show or recover the latest website reviews")
     async def review(self, interaction: discord.Interaction):
         if not await _require_role(interaction, config.ROLE_LISTING_MGMT):
+            return
+        if self.adapter is None:
+            await interaction.response.send_message("Still starting up - try again in a moment.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         await self.adapter.reconcile()

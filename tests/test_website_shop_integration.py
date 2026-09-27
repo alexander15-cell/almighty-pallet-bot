@@ -23,6 +23,7 @@ import pytest
 import backup
 import config
 import database as db
+from cogs.website_shop import WebsiteShop
 from combined_intake import IntakeAdapter, MIN_NEW_ITEM_ID
 from shop_approval import ShopReviewStore
 
@@ -210,3 +211,57 @@ def test_bot_py_only_loads_website_shop_cog_when_enabled(monkeypatch):
         assert "cogs.website_shop" in bot_module.COGS
         monkeypatch.setattr(config, "WEBSITE_SHOP_ENABLED", False)
         importlib.reload(bot_module)
+
+
+def test_cog_load_does_not_touch_bot_user(monkeypatch):
+    # cog_load() runs during bot.load_extension(), BEFORE bot.start() logs
+    # in - self.bot.user is None at that point. Regression test for exactly
+    # that: cog_load() must not read it (construction happens later, in
+    # poll_loop's before_loop, once the bot has actually logged in).
+    monkeypatch.setattr(config, "WEBSITE_SHOP_POLL_SECONDS", 3600)
+
+    async def _never_ready():
+        await asyncio.sleep(3600)
+
+    fake_bot = SimpleNamespace(user=None, wait_until_ready=_never_ready)
+    cog = WebsiteShop(fake_bot)
+    run(cog.cog_load())
+    try:
+        assert cog.store is None  # not constructed yet - still pre-login
+    finally:
+        cog.poll_loop.cancel()
+
+
+def test_ensure_ready_constructs_once_bot_is_logged_in(fresh_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WEBSITE_SHOP_ENABLED", True)
+    monkeypatch.setattr(config, "WEBSITE_SHOP_CHANNEL_ID", int(SHOP))
+    monkeypatch.setattr(config, "WEBSITE_SHOP_OPERATOR_IDS", (USER,))
+    monkeypatch.setattr(config, "WEBSITE_SHOP_APPROVAL_DB_PATH", str(tmp_path / "shop_approval.sqlite"))
+    monkeypatch.setattr(config, "WEBSITE_SHOP_JOURNAL_DB_PATH", str(tmp_path / "website_journal.sqlite"))
+    monkeypatch.setattr(config, "WEBSITE_URL", "https://example.com")
+    monkeypatch.setattr(config, "WEBSITE_SOURCE_ID", "a" * 32)
+    monkeypatch.setattr(config, "WEBSITE_SECRET", "")
+    monkeypatch.setattr(config, "WEBSITE_PUBLISH_ENABLED", False)
+    monkeypatch.setattr(config, "GUILD_ID", int(GUILD))
+    fresh_db.set_shared_channel("listed", int(LISTED))
+    fresh_db.set_shared_channel("sold", int(SOLD))
+
+    # bot.user is None until "login" happens - matches the real timing.
+    fake_bot = SimpleNamespace(user=None, get_channel=lambda _id: None, add_view=Mock())
+    cog = WebsiteShop(fake_bot)
+    assert cog.store is None
+    fake_bot.user = SimpleNamespace(id=int(APP))  # "login" completes
+    run(cog._ensure_ready())
+    try:
+        assert cog.store is not None
+        assert cog.adapter is not None
+        assert cog.journal is not None
+        assert cog.delivery is not None
+        # Idempotent - a second call (e.g. a reconnect) must not rebuild.
+        store_before = cog.store
+        run(cog._ensure_ready())
+        assert cog.store is store_before
+    finally:
+        cog.adapter.close()
+        cog.store.close()
+        cog.journal.close()
