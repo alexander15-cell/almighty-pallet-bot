@@ -92,7 +92,22 @@ class WebsiteShop(commands.Cog):
     async def _ensure_ready(self):
         if self.store is not None:
             return
-        db.ensure_items_autoincrement_floor(config.WEBSITE_SHOP_ITEM_ID_FLOOR)
+        bumped = db.ensure_items_autoincrement_floor(config.WEBSITE_SHOP_ITEM_ID_FLOOR)
+        with db.get_conn() as conn:
+            max_id = conn.execute("SELECT MAX(id) FROM items").fetchone()[0]
+            current_seq_row = conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'items'"
+            ).fetchone()
+            eligible = conn.execute(
+                "SELECT COUNT(*) FROM items WHERE id >= ?", (config.WEBSITE_SHOP_ITEM_ID_FLOOR,)
+            ).fetchone()[0]
+        log.info(
+            "Website shop item-id floor check: bump %s this run. Highest item id: %s. "
+            "items.sqlite_sequence: %s. Items already at/above floor %s: %s.",
+            "applied" if bumped else "already applied (no-op)", max_id,
+            current_seq_row["seq"] if current_seq_row else "(no row - never autoincremented)",
+            config.WEBSITE_SHOP_ITEM_ID_FLOOR, eligible,
+        )
 
         guild_id = str(config.GUILD_ID)
         shop_channel_id = str(config.WEBSITE_SHOP_CHANNEL_ID)
