@@ -253,6 +253,7 @@ class EditDescriptionModal(discord.ui.Modal, title="Edit Listing Description"):
             cog = interaction.client.get_cog("ItemFlow")
             if not await cog._require_role(interaction, config.ROLE_QUEUE_REVIEW):
                 return
+            await interaction.response.defer(ephemeral=True, thinking=True)
             channel = interaction.client.get_channel(db.resolve_channel_id(item["pallet_id"], "queue-review"))
             updated = {**item, "ai_description": self.new_description.value}
             msg = await send_item_card(channel, updated, view=QueueReviewView(self.item_id),
@@ -261,7 +262,7 @@ class EditDescriptionModal(discord.ui.Modal, title="Edit Listing Description"):
             db.update_status(self.item_id, db.STATUS_QUEUE_REVIEW,
                              actor_id=interaction.user.id, new_message_id=msg.id,
                              note="Description edited; previous Discord card preserved")
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Description updated on a new card. The earlier card was kept.", ephemeral=True,
             )
             return
@@ -1579,6 +1580,12 @@ class ItemFlow(commands.Cog):
             )
             return
 
+        # From here on: CSV file I/O plus posting a new card (photo uploads)
+        # and clearing the old one - real work that can exceed the 3-second
+        # window for the interaction's FIRST response. Defer now, before any
+        # of it, and use a followup for the final confirmation instead.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         ebay_csv.append_item_to_batch(item, listing)
 
         pallet_id = item["pallet_id"]
@@ -1593,7 +1600,7 @@ class ItemFlow(commands.Cog):
         )
         db.update_status(item_id, db.STATUS_PENDING_EBAY_UPLOAD, actor_id=interaction.user.id, new_message_id=msg.id)
         await self._clear_old_card(interaction.message, item_id, "add to eBay batch")
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Added to the eBay batch CSV. Moved to <#{channel.id}> pending upload confirmation.",
             ephemeral=True,
         )
@@ -1625,6 +1632,10 @@ class ItemFlow(commands.Cog):
             )
             return
 
+        # See add_to_ebay_batch's identical comment above - defer before the
+        # CSV write and card posting, not after.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         fb_marketplace_csv.append_item_to_batch(item, listing)
 
         pallet_id = item["pallet_id"]
@@ -1641,7 +1652,7 @@ class ItemFlow(commands.Cog):
             item_id, db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD, actor_id=interaction.user.id, new_message_id=msg.id
         )
         await self._clear_old_card(interaction.message, item_id, "add to FB Marketplace batch")
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Added to the FB Marketplace batch CSV. Moved to <#{channel.id}> pending upload confirmation.",
             ephemeral=True,
         )
@@ -1873,6 +1884,7 @@ class ItemFlow(commands.Cog):
                 f"This item was already moved on (current status: {item['status']}).", ephemeral=True
             )
             return
+        await interaction.response.defer(ephemeral=True, thinking=True)
         pallet_id = item["pallet_id"]
         channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "data-entry"))
         msg = await send_item_card(
@@ -1882,7 +1894,7 @@ class ItemFlow(commands.Cog):
         )
         db.update_status(item_id, db.STATUS_REJECTED, actor_id=interaction.user.id, new_message_id=msg.id)
         await self._clear_old_card(interaction.message, item_id, "reject to Data Entry")
-        await interaction.response.send_message("Sent back to Data Entry.", ephemeral=True)
+        await interaction.followup.send("Sent back to Data Entry.", ephemeral=True)
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
 
     async def move_to_listed(self, interaction: discord.Interaction, item_id: int):
@@ -1896,13 +1908,14 @@ class ItemFlow(commands.Cog):
                 f"This item was already moved on (current status: {item['status']}).", ephemeral=True
             )
             return
+        await interaction.response.defer(ephemeral=True, thinking=True)
         pallet_id = item["pallet_id"]
         channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
         view = ListedView(item_id)
         msg = await send_item_card(channel, item, view=view, destination_status=db.STATUS_LISTED)
         db.update_status(item_id, db.STATUS_LISTED, actor_id=interaction.user.id, new_message_id=msg.id)
         await self._clear_old_card(interaction.message, item_id, "mark listed (other)")
-        await interaction.response.send_message(f"Marked listed. See <#{channel.id}>.", ephemeral=True)
+        await interaction.followup.send(f"Marked listed. See <#{channel.id}>.", ephemeral=True)
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
 
     async def move_to_sold(self, interaction: discord.Interaction, item_id: int):
@@ -1916,13 +1929,14 @@ class ItemFlow(commands.Cog):
                 f"This item was already moved on (current status: {item['status']}).", ephemeral=True
             )
             return
+        await interaction.response.defer(ephemeral=True, thinking=True)
         pallet_id = item["pallet_id"]
         channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "sold"))
         view = ShippedView(item_id)
         msg = await send_item_card(channel, item, view=view, destination_status=db.STATUS_SOLD)
         db.update_status(item_id, db.STATUS_SOLD, actor_id=interaction.user.id, new_message_id=msg.id)
         await self._clear_old_card(interaction.message, item_id, "mark sold")
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Marked sold. 🎉 See <#{channel.id}>. Finance Management can record the sale price "
             f"with `/finance record-sale`.",
             ephemeral=True,
@@ -1941,13 +1955,14 @@ class ItemFlow(commands.Cog):
                 ephemeral=True,
             )
             return
+        await interaction.response.defer(ephemeral=True, thinking=True)
         if config.PRESERVE_DISCORD_HISTORY:
             channel = self.bot.get_channel(db.resolve_channel_id(item["pallet_id"], "sold"))
             msg = await send_item_card(channel, item, destination_status=db.STATUS_SHIPPED,
                                        extra_text="Shipped; previous card preserved")
             db.update_status(item_id, db.STATUS_SHIPPED, actor_id=interaction.user.id,
                              new_message_id=msg.id)
-            await interaction.response.send_message("Marked shipped. The earlier card was kept.", ephemeral=True)
+            await interaction.followup.send("Marked shipped. The earlier card was kept.", ephemeral=True)
             return
         db.update_status(item_id, db.STATUS_SHIPPED, actor_id=interaction.user.id)
         try:
@@ -1971,7 +1986,7 @@ class ItemFlow(commands.Cog):
             await interaction.message.edit(embeds=all_embeds, view=None)
         except (*discord_resilience.TRANSIENT_DISCORD_ERRORS, IndexError, KeyError, TypeError, ValueError):
             pass
-        await interaction.response.send_message("Marked shipped.", ephemeral=True)
+        await interaction.followup.send("Marked shipped.", ephemeral=True)
         await finance_utils.refresh_finance_message(self.bot, item["pallet_id"])
 
     async def _clear_old_card(self, message: discord.Message, item_id: int, context: str):

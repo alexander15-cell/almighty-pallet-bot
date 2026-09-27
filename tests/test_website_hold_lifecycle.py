@@ -81,7 +81,8 @@ def lifecycle(fresh_db, tmp_path, monkeypatch):
 
 def interaction(message):
     return SimpleNamespace(message=message, user=SimpleNamespace(id=42),
-                           response=SimpleNamespace(send_message=AsyncMock()))
+                           response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()),
+                           followup=SimpleNamespace(send=AsyncMock()))
 
 
 def place_hold(case):

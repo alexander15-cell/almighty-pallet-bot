@@ -276,8 +276,9 @@ class PalletSetup(commands.Cog):
             ),
             color=discord.Color.blurple(),
         )
+        await interaction.response.defer(ephemeral=True, thinking=True)
         await interaction.channel.send(embed=embed, view=NewPalletView())
-        await interaction.response.send_message("Hub message posted.", ephemeral=True)
+        await interaction.followup.send("Hub message posted.", ephemeral=True)
 
     @setup_group.command(
         name="shared-channels",

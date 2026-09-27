@@ -129,8 +129,8 @@ def test_refresh_card_sends_confirmation(fresh_db, cog):
     interaction = _FakeInteraction(channel=_FakeChannel(category_id=7))
     asyncio.run(Finance.refresh_card.callback(cog, interaction))
 
-    assert "Refresh Pallet" in interaction.response.content
-    assert "refreshed" in interaction.response.content
+    assert "Refresh Pallet" in interaction.followup.content
+    assert "refreshed" in interaction.followup.content
 
 
 def test_refresh_card_no_context(fresh_db, cog):

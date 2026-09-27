@@ -143,7 +143,7 @@ def test_confirm_listed_single_item(fresh_db, cog, pending_item):
     interaction = _FakeInteraction(category_id=99)
     asyncio.run(FbMarketplace.confirm_listed.callback(c, interaction, item_number=pending_item["item_number"]))
 
-    assert "Confirmed item" in interaction.response.content
+    assert "Confirmed item" in interaction.followup.content
     assert item_flow_cog.confirmed_ids == [pending_item["id"]]
 
 

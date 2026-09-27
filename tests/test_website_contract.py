@@ -186,7 +186,8 @@ def test_mark_shipped_updates_contract_and_removes_buttons(monkeypatch):
     embed.set_image(url="attachment://photo-01.jpg")
     message = SimpleNamespace(embeds=[embed], edit=AsyncMock())
     interaction = SimpleNamespace(message=message, user=SimpleNamespace(id=123),
-                                  response=SimpleNamespace(send_message=AsyncMock()))
+                                  response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()),
+                                  followup=SimpleNamespace(send=AsyncMock()))
     monkeypatch.setattr(flow.db, "get_item", lambda _: item)
     monkeypatch.setattr(flow.db, "get_ebay_listing_data", lambda _: listing)
     monkeypatch.setattr(flow.db, "update_status", lambda *args, **kwargs: None)
@@ -210,7 +211,8 @@ def test_transition_passes_destination_before_source_update(monkeypatch, method,
     item["status"] = start_status
     channel = SimpleNamespace(id=321)
     interaction = SimpleNamespace(message=SimpleNamespace(delete=AsyncMock()), user=SimpleNamespace(id=123),
-                                  response=SimpleNamespace(send_message=AsyncMock()))
+                                  response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()),
+                                  followup=SimpleNamespace(send=AsyncMock()))
     monkeypatch.setattr(flow.db, "get_item", lambda _: item)
     monkeypatch.setattr(flow.db, "resolve_channel_id", lambda *args: 321)
     monkeypatch.setattr(flow.db, "update_status", lambda *args, **kwargs: None)

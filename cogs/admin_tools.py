@@ -236,6 +236,11 @@ class AdminTools(commands.Cog):
             await interaction.response.send_message(f"Item #{item_number} was already deleted.", ephemeral=True)
             return
 
+        # The loop below can fetch/delete a message per stage until it finds
+        # the right one - real Discord API round trips that can exceed the
+        # 3-second window for the interaction's FIRST response. Defer now.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         # Best-effort: find and delete whatever message currently represents
         # this item, wherever it currently lives. Most stages are shared
         # channels now (one channel serves every pallet), so resolve_channel_id
@@ -258,7 +263,7 @@ class AdminTools(commands.Cog):
                     continue
 
         db.soft_delete_item(item["id"], actor_id=interaction.user.id)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"🗑️ Deleted item #{item_number} from **{pallet['name']}**"
             + ("." if deleted_message else " (its card was already gone from Discord, but it's now removed from tracking)."),
             ephemeral=True,

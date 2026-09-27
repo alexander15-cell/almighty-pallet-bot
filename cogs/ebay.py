@@ -355,9 +355,10 @@ class Ebay(commands.Cog):
                     ephemeral=True,
                 )
                 return
+            await interaction.response.defer(ephemeral=True, thinking=True)
             moved = await cog.confirm_ebay_pending_item(item, actor_id=interaction.user.id)
             await finance_utils.refresh_finance_message(self.bot, pallet["id"])
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"✅ Confirmed item #{item_number} live on eBay. Moved to Listed." if moved
                 else f"Item #{item_number} couldn't be confirmed (status changed under us - try again).",
                 ephemeral=True,

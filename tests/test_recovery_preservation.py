@@ -30,7 +30,8 @@ def interaction(message_id=201):
     return SimpleNamespace(
         message=SimpleNamespace(id=message_id, delete=AsyncMock(), edit=AsyncMock()),
         guild=SimpleNamespace(id=100), user=SimpleNamespace(id=42),
-        response=SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock()),
+        response=SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock(), defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
         client=None,
     )
 

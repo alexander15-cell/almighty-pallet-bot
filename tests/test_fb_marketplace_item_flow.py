@@ -69,10 +69,22 @@ class _FakeResponse:
     async def send_message(self, content=None, **kwargs):
         self.content = content
 
+    async def defer(self, ephemeral=True, thinking=True):
+        pass
+
+
+class _FakeFollowup:
+    def __init__(self):
+        self.content = None
+
+    async def send(self, content=None, **kwargs):
+        self.content = content
+
 
 class _FakeInteraction:
     def __init__(self, message, role):
         self.response = _FakeResponse()
+        self.followup = _FakeFollowup()
         self.message = message
         self.user = _FakeUser(role)
         self.guild = object()

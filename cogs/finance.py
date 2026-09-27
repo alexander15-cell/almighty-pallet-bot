@@ -405,10 +405,11 @@ class AllocateChargeButton(discord.ui.DynamicItem[discord.ui.Button], template=r
             await interaction.response.send_message("This charge has already been allocated.", ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             txn = await quickbooks.get_transaction(self.txn_id)
         except quickbooks.QuickBooksError as e:
-            await interaction.response.send_message(f"Couldn't look up this charge in QuickBooks: {e}", ephemeral=True)
+            await interaction.followup.send(f"Couldn't look up this charge in QuickBooks: {e}", ephemeral=True)
             return
 
         # Discord select menus cap out at 25 options - leave room for "New
@@ -416,7 +417,7 @@ class AllocateChargeButton(discord.ui.DynamicItem[discord.ui.Button], template=r
         # there happen to be more than that many in flight at once.
         pallets = db.get_all_pallets(include_archived=False)[:24]
         view = PalletAllocateView(self.txn_id, txn["amount"], txn["merchant"], txn["date"], interaction.message, pallets)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Allocate this ${txn['amount']:.2f} charge from **{txn['merchant']}** to which pallet?",
             view=view, ephemeral=True,
         )
@@ -561,9 +562,10 @@ class Finance(commands.Cog):
             await interaction.response.send_message("Cost can't be negative.", ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
         db.set_pallet_cost(pallet["id"], cost, actor_id=interaction.user.id)
         await finance_utils.refresh_finance_message(self.bot, pallet["id"])
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"💵 Set **{pallet['name']}** cost to ${cost:.2f}. Live card updated.", ephemeral=True
         )
 
@@ -590,12 +592,13 @@ class Finance(commands.Cog):
             await interaction.response.send_message("Price can't be negative.", ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
         was_already_priced = item["sale_price"] is not None
         db.record_item_sale(item["id"], price, platform.strip(), actor_id=interaction.user.id)
         await finance_utils.refresh_finance_message(self.bot, pallet["id"])
 
         verb = "Corrected" if was_already_priced else "Recorded"
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"💰 {verb} sale price for **{pallet['name']}** item #{item_number}: "
             f"${price:.2f} on {platform.strip()}. Live card updated.",
             ephemeral=True,
@@ -624,9 +627,10 @@ class Finance(commands.Cog):
             await interaction.response.send_message("Refund amount must be positive.", ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
         db.record_refund(item["id"], amount, reason.strip(), actor_id=interaction.user.id)
         await finance_utils.refresh_finance_message(self.bot, pallet["id"])
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"↩️ Logged a ${amount:.2f} refund for **{pallet['name']}** item #{item_number} ({reason.strip()}). "
             f"Live card updated.",
             ephemeral=True,
@@ -659,10 +663,11 @@ class Finance(commands.Cog):
                 return
             item_id = item["id"]
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
         db.record_expense(pallet["id"], amount, reason.strip(), actor_id=interaction.user.id, item_id=item_id)
         await finance_utils.refresh_finance_message(self.bot, pallet["id"])
         item_note = f" (item #{item_number})" if item_number is not None else ""
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"🧾 Logged a ${amount:.2f} expense for **{pallet['name']}**{item_note}: {reason.strip()}. Live card updated.",
             ephemeral=True,
         )
@@ -686,14 +691,15 @@ class Finance(commands.Cog):
             await interaction.response.send_message(f"No item #{item_number} found in **{pallet['name']}**.", ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
         old_price = db.reverse_sale(item["id"], reason.strip(), actor_id=interaction.user.id)
         if old_price is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Item #{item_number} doesn't have a sale price recorded - nothing to reverse.", ephemeral=True
             )
             return
         await finance_utils.refresh_finance_message(self.bot, pallet["id"])
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"⏪ Reversed **{pallet['name']}** item #{item_number}'s sale (was ${old_price:.2f}, {reason.strip()}). "
             f"Live card updated.",
             ephemeral=True,
@@ -763,9 +769,10 @@ class Finance(commands.Cog):
             await interaction.response.send_message("Count can't be negative.", ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
         db.set_items_received_override(pallet["id"], count)
         await finance_utils.refresh_finance_message(self.bot, pallet["id"])
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"📦 **{pallet['name']}** items received manually set to {count}. Live card updated.",
             ephemeral=True,
         )
@@ -781,9 +788,10 @@ class Finance(commands.Cog):
             )
             return
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
         db.clear_items_received_override(pallet["id"])
         await finance_utils.refresh_finance_message(self.bot, pallet["id"])
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"📦 **{pallet['name']}** items received count reverted to automatic. Live card updated.",
             ephemeral=True,
         )
@@ -800,8 +808,9 @@ class Finance(commands.Cog):
             )
             return
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
         await finance_utils.refresh_finance_message(self.bot, pallet["id"])
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"🔄 **{pallet['name']}**'s pinned status card in #pallet-discussion refreshed with current numbers.",
             ephemeral=True,
         )
