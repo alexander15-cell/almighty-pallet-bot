@@ -1506,6 +1506,13 @@ class ItemFlow(commands.Cog):
             )
             return
 
+        # Everything from here on posts a new card (with photo uploads) and
+        # cleans up the old one - real Discord API round trips that can
+        # easily exceed the 3-second window for a interaction's FIRST
+        # response, unlike everything checked above. Defer now, before any
+        # of that, and use a followup for the final confirmation instead.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         db.save_ebay_listing_data(
             item_id, ebay_title=title, category_id=category_id, condition_id=condition_id,
             price=price, item_specifics=specifics, listing_format=listing_format,
@@ -1539,7 +1546,7 @@ class ItemFlow(commands.Cog):
             if listing_format == "Auction" else
             f"Fixed Price, ${price:.2f}"
         )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Approved. eBay listing data saved (condition: **{condition_label}**, {format_note}, "
             f"{weight_lb:g} lb, {length_in:g}x{width_in:g}x{height_in:g} in). "
             f"Moved to <#{channel.id}> for listing.",
