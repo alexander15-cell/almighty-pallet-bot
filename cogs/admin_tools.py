@@ -37,6 +37,7 @@ import discord_resilience
 import finance_utils
 import r2_storage
 import runtime_settings
+import recovery_safety
 from cogs import item_flow
 
 log = logging.getLogger(__name__)
@@ -108,6 +109,8 @@ class ConfirmWipeModal(discord.ui.Modal, title="⚠️ Confirm Full Database Wip
         self.cog = cog
 
     async def on_submit(self, interaction: discord.Interaction):
+        if await recovery_safety.block_destructive(interaction):
+            return
         if self.confirmation.value.strip() != config.DB_WIPE_CONFIRMATION_PHRASE:
             await interaction.response.send_message(
                 "Text didn't match exactly. Nothing was deleted. Run `/admin db-wipe` again if you're sure.",
@@ -179,7 +182,8 @@ class ConfirmWipeModal(discord.ui.Modal, title="⚠️ Confirm Full Database Wip
 class AdminTools(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.backup_loop.start()
+        if not config.PRESERVE_DISCORD_HISTORY:
+            self.backup_loop.start()
 
     def cog_unload(self):
         self.backup_loop.cancel()
@@ -194,6 +198,8 @@ class AdminTools(commands.Cog):
         BACKUP_INTERVAL_HOURS while the bot is online. A failure here is
         logged, not raised, so one bad backup attempt doesn't crash the
         whole bot or stop future scheduled attempts."""
+        if config.PRESERVE_DISCORD_HISTORY:
+            return
         try:
             path = await asyncio.to_thread(backup.create_backup)
             log.info(f"Scheduled backup created: {path}")
@@ -207,6 +213,8 @@ class AdminTools(commands.Cog):
     @item_group.command(name="delete", description="Delete a single item by its number. Run inside that pallet's category.")
     @app_commands.describe(item_number="The item's number shown on its card (e.g. 3)")
     async def item_delete(self, interaction: discord.Interaction, item_number: int):
+        if await recovery_safety.block_destructive(interaction):
+            return
         if not await _require_admin(interaction):
             return
 
@@ -376,6 +384,8 @@ class AdminTools(commands.Cog):
 
     @pallet_group.command(name="archive", description="Close out a finished pallet: deletes its Discord channels, keeps all data.")
     async def pallet_archive(self, interaction: discord.Interaction):
+        if await recovery_safety.block_destructive(interaction):
+            return
         if not await _require_admin(interaction):
             return
 
@@ -461,6 +471,8 @@ class AdminTools(commands.Cog):
     @admin_group.command(name="db-wipe", description="⚠️ DANGER: permanently erase ALL pallet/item data and delete every pallet channel.")
     @app_commands.checks.has_permissions(administrator=True)
     async def db_wipe(self, interaction: discord.Interaction):
+        if await recovery_safety.block_destructive(interaction):
+            return
         if not await _require_admin(interaction):
             return
         # app_commands.checks.has_permissions already gated on Discord's own

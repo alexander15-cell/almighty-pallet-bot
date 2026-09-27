@@ -3,9 +3,17 @@ Central configuration for the pallet tracking bot.
 Edit these values to match your actual Discord server setup.
 """
 import os
+import re
 from dotenv import load_dotenv
 
-load_dotenv()
+# The combined website-publishing entry point (combined_bot.py) sets this
+# before importing config, and supplies every setting itself (via
+# combined_settings.activate_intake) instead of a .env file - see that
+# module's docstring.
+if os.environ.get("FOUR_GUYS_COMBINED") != "1":
+    load_dotenv()
+
+COMBINED_MODE = os.environ.get("FOUR_GUYS_COMBINED") == "1"
 
 # ---- Secrets (set these in a .env file, never hardcode them) ----
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -16,6 +24,32 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")  # optional - only used by th
 # "DISCORD_GUILD_ID=" from a freshly-copied .env.example), which crashed
 # the bot at startup with a ValueError instead of using the default.
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID") or "0")  # your server's ID
+
+# Recovery/combined deployment: keep every existing Discord message
+# unchanged - edits post a new card instead of editing/deleting the old
+# one, background loops that would otherwise touch old cards don't start,
+# and destructive admin commands refuse to run (see recovery_safety.py).
+# Defaults OFF so the standalone bot's behavior is unchanged - combined_bot.py
+# (combined_settings.activate_intake) turns this on explicitly for itself.
+_history_setting = os.getenv("PRESERVE_DISCORD_HISTORY", "false").strip().lower()
+if _history_setting not in {"true", "false"}:
+    raise ValueError("PRESERVE_DISCORD_HISTORY must be true or false")
+PRESERVE_DISCORD_HISTORY = _history_setting == "true"
+WEBSITE_SKU_PREFIX = os.getenv("WEBSITE_SKU_PREFIX", "")
+if WEBSITE_SKU_PREFIX and not re.fullmatch(r"[A-Z][A-Z0-9]{0,15}-", WEBSITE_SKU_PREFIX):
+    raise ValueError("WEBSITE_SKU_PREFIX must be empty or an uppercase prefix such as MAIN-")
+
+# Whether cogs/item_flow.py's send_item_card/send_website_hold_notice
+# automatically embed website-contract marker fields ("Website item ID",
+# "Website SKU", etc.) on ordinary listed/sold/shipped cards - see
+# website_contract.py. This only ever applies OUTSIDE combined mode
+# (combined mode's own #website_shop review flow is the sole source of
+# truth for what's actually approved for the website - an ordinary card
+# there never carries these markers, so nothing could be mistaken for an
+# approved one). Defaults OFF so the standalone bot's cards stay exactly
+# as they are today; turn it on only if this standalone deployment is
+# genuinely feeding its own separate website integration.
+WEBSITE_MARKERS_ENABLED = os.getenv("WEBSITE_MARKERS_ENABLED", "false").strip().lower() == "true"
 
 # ---- Automated Review (AI) backend ----
 # "anthropic" (default) - Claude's cloud vision API, requires ANTHROPIC_API_KEY.

@@ -123,6 +123,8 @@ def _apply_retention():
     anything older than BACKUP_MAX_AGE_DAYS - run after every create_backup()
     so the backup directory doesn't grow without bound."""
     backup_dir = Path(config.BACKUP_DIR)
+    if config.PRESERVE_DISCORD_HISTORY:
+        return
     backups = sorted(backup_dir.glob("backup_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
     cutoff = datetime.now(timezone.utc).timestamp() - config.BACKUP_MAX_AGE_DAYS * 86400
     for index, path in enumerate(backups):

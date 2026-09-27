@@ -23,6 +23,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
+import recovery_safety
 import database as db
 import discord_resilience
 import finance_utils
@@ -116,7 +117,7 @@ async def _claim_awaiting_charges(interaction: discord.Interaction, pallet_id: i
                 charge["quickbooks_txn_id"],
             )
 
-        if awaiting_channel and charge.get("message_id"):
+        if not config.PRESERVE_DISCORD_HISTORY and awaiting_channel and charge.get("message_id"):
             try:
                 msg = await awaiting_channel.fetch_message(charge["message_id"])
                 await msg.delete()
@@ -341,6 +342,8 @@ class PalletSetup(commands.Cog):
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def setup_info_channel(self, interaction: discord.Interaction):
+        if await recovery_safety.block_destructive(interaction):
+            return
         await interaction.response.defer(ephemeral=True, thinking=True)
         guild = interaction.guild
 

@@ -13,6 +13,13 @@ from pathlib import Path
 _TEST_DATA_DIR = Path(tempfile.mkdtemp(prefix="pallet_bot_tests_"))
 
 os.environ.setdefault("DISCORD_BOT_TOKEN", "test-token")
+# Upstream tests exercise legacy mode; focused recovery tests enable protection.
+# A separate subprocess test verifies that real deployments default to protection.
+os.environ["PRESERVE_DISCORD_HISTORY"] = "false"
+# Upstream tests exercise this repo's own website-marker feature, which
+# defaults off in production (see config.WEBSITE_MARKERS_ENABLED) so the
+# standalone bot's real cards don't show unused marker fields.
+os.environ["WEBSITE_MARKERS_ENABLED"] = "true"
 os.environ["DATABASE_PATH"] = str(_TEST_DATA_DIR / "test.db")
 os.environ["PHOTO_DIR"] = str(_TEST_DATA_DIR / "photos")
 os.environ["EBAY_BATCH_CSV_PATH"] = str(_TEST_DATA_DIR / "ebay_batch.csv")

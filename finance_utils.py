@@ -116,6 +116,9 @@ async def refresh_finance_message(bot: discord.Client, pallet_id: int):
     the message/channel has since been deleted (e.g. an archived pallet) -
     a missing card is not worth crashing whatever action triggered this.
     """
+    if config.PRESERVE_DISCORD_HISTORY:
+        # Incomplete recovered totals must not replace historical finance cards.
+        return
     pallet = db.get_pallet(pallet_id)
     if not pallet or not pallet.get("finance_message_id"):
         return

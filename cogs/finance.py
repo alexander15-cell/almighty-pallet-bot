@@ -255,6 +255,8 @@ async def _mark_charge_message_handled(message: discord.Message, note: str):
     """Edits a posted #credit-card-charges card to show how it was resolved
     and removes its Allocate button, so it's obvious at a glance which
     charges still need attention."""
+    if config.PRESERVE_DISCORD_HISTORY:
+        return
     try:
         embed = message.embeds[0] if message.embeds else discord.Embed()
         embed.add_field(name="Status", value=note, inline=False)
@@ -485,14 +487,16 @@ class UnmatchedShippingSelect(discord.ui.Select):
 class Finance(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.credit_card_poll_loop.start()
+        if not config.PRESERVE_DISCORD_HISTORY:
+            self.credit_card_poll_loop.start()
 
     async def cog_load(self):
         # Registers the (txn_id -> button) template once so every
         # #credit-card-charges card's Allocate button keeps working across
         # bot restarts, not just the ones posted during this process's
         # lifetime - see AllocateChargeButton.
-        self.bot.add_dynamic_items(AllocateChargeButton)
+        if not config.PRESERVE_DISCORD_HISTORY:
+            self.bot.add_dynamic_items(AllocateChargeButton)
 
     def cog_unload(self):
         self.credit_card_poll_loop.cancel()
@@ -511,6 +515,8 @@ class Finance(commands.Cog):
         QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID is configured - watching zero
         accounts is the safe default (see config.py).
         """
+        if config.PRESERVE_DISCORD_HISTORY:
+            return
         if not (quickbooks.is_connected() and config.QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID):
             return
         try:

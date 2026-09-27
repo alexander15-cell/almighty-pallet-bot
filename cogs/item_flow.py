@@ -47,6 +47,8 @@ import fb_marketplace_csv
 import finance_utils
 import r2_storage
 import runtime_settings
+import recovery_safety
+from website_contract import build_website_contract, FOOTER_PREFIX, STATUSES as WEBSITE_STATUSES
 
 PHOTO_DIR = Path(config.PHOTO_DIR)
 
@@ -107,7 +109,7 @@ def photo_dir_for(item_id: int) -> Path:
 
 
 async def send_item_card(channel: discord.TextChannel, item: dict, view: discord.ui.View = None,
-                          extra_text: str = "") -> discord.Message:
+                          extra_text: str = "", *, destination_status: str = None) -> discord.Message:
     """
     Reposts an item's photos + current description as a fresh message in
     `channel`. Always leads with a Pallet field, since shared channels mix
@@ -119,29 +121,69 @@ async def send_item_card(channel: discord.TextChannel, item: dict, view: discord
     embed per photo, all in the same message - Discord visually stacks
     multiple embeds on one message together as a single grouped block.
     """
-    photo_paths = json.loads(item["photo_urls"])
+    photo_error = False
+    try:
+        photo_paths = json.loads(item["photo_urls"])
+        if not isinstance(photo_paths, list):
+            raise ValueError("Invalid photo list")
+    except (TypeError, ValueError):
+        photo_paths = []
+        photo_error = True
     pallet = db.get_pallet(item["pallet_id"])
     pallet_name = pallet["name"] if pallet else f"(pallet #{item['pallet_id']})"
 
     files = []
-    for p in photo_paths:
-        path = Path(p)
-        if path.exists():
-            files.append(discord.File(path, filename=path.name))
+    photo_error = photo_error or len(photo_paths) > 10
+    for index, p in enumerate(photo_paths[:10], start=1):
+        try:
+            path = Path(p)
+            # Unique short names prevent duplicate source basenames from making
+            # multiple gallery embeds point at the first attachment.
+            suffix = path.suffix.lower() if len(path.suffix) <= 10 else ".img"
+            files.append(discord.File(path, filename=f"photo-{index:02d}{suffix}"))
+        except (OSError, TypeError, ValueError):
+            photo_error = True
 
     title = item.get("ai_title") or f"Item #{item['item_number']}"
     description = item.get("ai_description") or item.get("raw_description") or "(no description yet)"
     flags = item.get("ai_flags")
     color = discord.Color.orange()
 
-    main_embed = discord.Embed(title=title, description=description, color=color)
-    main_embed.add_field(name="📦 Pallet", value=pallet_name, inline=True)
+    status = destination_status or item["status"]
+    contract = None
+    # Never in combined mode - its #website_shop review flow (shop_discord.py)
+    # is the sole source of truth for what's actually approved for the
+    # website; an ordinary card here must never carry these markers, or it
+    # could be mistaken for one that went through that approval flow.
+    # Outside combined mode, config.WEBSITE_MARKERS_ENABLED (off by default)
+    # gates it - see that constant's own comment.
+    if status in WEBSITE_STATUSES and not getattr(config, "COMBINED_MODE", False) and config.WEBSITE_MARKERS_ENABLED:
+        try:
+            contract = build_website_contract(
+                item, db.get_ebay_listing_data(item["id"]), status=status,
+                photo_count=len(files), photo_error=photo_error, sku_prefix=config.WEBSITE_SKU_PREFIX,
+            )
+        except (KeyError, TypeError, ValueError):
+            # No marker means the publisher refuses the card. The ordinary
+            # intake workflow must remain usable even with a malformed record.
+            contract = None
+    main_embed = discord.Embed(
+        title=contract["title"] if contract else str(title)[:256],
+        description=contract["description"] if contract else str(description)[:4000], color=color,
+    )
+    main_embed.add_field(name="📦 Pallet", value=pallet_name[:100], inline=True)
     main_embed.add_field(name="Item #", value=str(item["item_number"]), inline=True)
-    main_embed.add_field(name="Status", value=item["status"], inline=True)
+    main_embed.add_field(name="Status", value=status, inline=True)
     if flags and flags not in ("[]", None, ""):
-        main_embed.add_field(name="⚠️ Flags", value=str(flags), inline=False)
-    if extra_text:
-        main_embed.set_footer(text=extra_text)
+        main_embed.add_field(name="⚠️ Flags", value=str(flags)[:300], inline=False)
+    if contract:
+        for field in contract["fields"]:
+            main_embed.add_field(**field)
+        main_embed.set_footer(text=FOOTER_PREFIX + (f" | {extra_text[:200]}" if extra_text else ""))
+    elif getattr(config, "COMBINED_MODE", False):
+        main_embed.set_footer(text=f"New inventory ID {item['id']}" + (f" | {extra_text[:150]}" if extra_text else ""))
+    elif extra_text:
+        main_embed.set_footer(text=extra_text[:200])
 
     embeds = [main_embed]
     if files:
@@ -151,14 +193,47 @@ async def send_item_card(channel: discord.TextChannel, item: dict, view: discord
             gallery_embed.set_image(url=f"attachment://{extra_file.filename}")
             embeds.append(gallery_embed)
 
-    msg = await channel.send(embeds=embeds, files=files, view=view)
-    return msg
+    try:
+        return await channel.send(embeds=embeds, files=files, view=view)
+    finally:
+        for photo_file in files:
+            photo_file.close()
+
+
+async def send_website_hold_notice(channel: discord.TextChannel, item: dict):
+    """Retained public withdrawal in #listed, without access to the #hold channel.
+
+    A new message ID orders this after all previous listing cards, even if a
+    stale card cannot be deleted. Do not export the private hold reason/note,
+    staff identifiers, flags, or attachments. A later successful resolution
+    posts a newer complete listing card and supersedes this notice.
+    """
+    if getattr(config, "COMBINED_MODE", False):
+        # Combined publishing is driven by the durable shop gate/lifecycle
+        # adapter, not an ordinary channel card that could bypass approval.
+        return await channel.send(
+            embed=discord.Embed(title="Item on hold", description="This item is not available for sale."),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    if not config.WEBSITE_MARKERS_ENABLED:
+        # Standalone bot with no website integration turned on - nothing to
+        # withdraw, so post nothing (see config.WEBSITE_MARKERS_ENABLED).
+        return None
+    contract = build_website_contract(
+        {"id": item["id"], "pallet_id": item["pallet_id"],
+         "item_number": item["item_number"], "on_hold": True},
+        None, status=db.STATUS_LISTED, photo_count=0, sku_prefix=config.WEBSITE_SKU_PREFIX,
+    )
+    contract["description"] = "This item is on hold and is not available on the website."
+    embed = discord.Embed.from_dict(contract)
+    return await channel.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
 
 
 class EditDescriptionModal(discord.ui.Modal, title="Edit Listing Description"):
-    def __init__(self, item_id: int):
+    def __init__(self, item_id: int, source_message_id=None):
         super().__init__()
         self.item_id = item_id
+        self.source_message_id = source_message_id
         item = db.get_item(item_id)
         self.new_description = discord.ui.TextInput(
             label="Description",
@@ -169,6 +244,27 @@ class EditDescriptionModal(discord.ui.Modal, title="Edit Listing Description"):
         self.add_item(self.new_description)
 
     async def on_submit(self, interaction: discord.Interaction):
+        item = db.get_item(self.item_id)
+        if not await recovery_safety.require_current_card(
+            interaction, item, db.STATUS_QUEUE_REVIEW, source_message_id=self.source_message_id,
+        ):
+            return
+        if config.PRESERVE_DISCORD_HISTORY:
+            cog = interaction.client.get_cog("ItemFlow")
+            if not await cog._require_role(interaction, config.ROLE_QUEUE_REVIEW):
+                return
+            channel = interaction.client.get_channel(db.resolve_channel_id(item["pallet_id"], "queue-review"))
+            updated = {**item, "ai_description": self.new_description.value}
+            msg = await send_item_card(channel, updated, view=QueueReviewView(self.item_id),
+                                       destination_status=db.STATUS_QUEUE_REVIEW)
+            db.update_description(self.item_id, self.new_description.value)
+            db.update_status(self.item_id, db.STATUS_QUEUE_REVIEW,
+                             actor_id=interaction.user.id, new_message_id=msg.id,
+                             note="Description edited; previous Discord card preserved")
+            await interaction.response.send_message(
+                "Description updated on a new card. The earlier card was kept.", ephemeral=True,
+            )
+            return
         db.update_description(self.item_id, self.new_description.value)
         await interaction.response.send_message("Description updated. Re-approve when ready.", ephemeral=True)
         all_embeds = list(interaction.message.embeds)
@@ -189,9 +285,10 @@ class EbayConditionSelectView(discord.ui.View):
     want. Picking a condition moves to the category step (step 2).
     """
 
-    def __init__(self, item_id: int):
+    def __init__(self, item_id: int, source_message_id=None):
         super().__init__(timeout=300)
         self.item_id = item_id
+        self.source_message_id = source_message_id
         ordered = sorted(
             config.EBAY_CONDITIONS,
             key=lambda pair: pair[0] != config.EBAY_DEFAULT_CONDITION_ID,
@@ -224,12 +321,13 @@ class EbayConditionSelectView(discord.ui.View):
                 ),
                 view=EbayFormatSelectView(
                     self.item_id, condition_id, category_id, show_change_category=True,
+                    source_message_id=self.source_message_id,
                 ),
             )
         else:
             await interaction.response.edit_message(
                 content="Now select this item's eBay category...",
-                view=EbayCategoryPickView(self.item_id, condition_id),
+                view=EbayCategoryPickView(self.item_id, condition_id, source_message_id=self.source_message_id),
             )
 
 
@@ -284,9 +382,10 @@ class EbayCategoryPickView(discord.ui.View):
 
     MAX_QUICK_PICK = 24  # leaves room for the search button as a 25th component in the worst case
 
-    def __init__(self, item_id: int, condition_id: str):
+    def __init__(self, item_id: int, condition_id: str, source_message_id=None):
         super().__init__(timeout=300)
         self.item_id = item_id
+        self.source_message_id = source_message_id
         self.condition_id = condition_id
 
         counts = db.get_ebay_category_counts()
@@ -323,11 +422,11 @@ class EbayCategoryPickView(discord.ui.View):
         category_id = self.select.values[0]
         await interaction.response.edit_message(
             content="Fixed price or auction?",
-            view=EbayFormatSelectView(self.item_id, self.condition_id, category_id),
+            view=EbayFormatSelectView(self.item_id, self.condition_id, category_id, source_message_id=self.source_message_id),
         )
 
     async def _on_search(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(EbayCategorySearchModal(self.item_id, self.condition_id))
+        await interaction.response.send_modal(EbayCategorySearchModal(self.item_id, self.condition_id, source_message_id=self.source_message_id))
 
 
 class EbayCategorySearchModal(discord.ui.Modal, title="Search eBay Categories"):
@@ -340,9 +439,10 @@ class EbayCategorySearchModal(discord.ui.Modal, title="Search eBay Categories"):
     browsing for anything not already in the quick-pick list.
     """
 
-    def __init__(self, item_id: int, condition_id: str):
+    def __init__(self, item_id: int, condition_id: str, source_message_id=None):
         super().__init__()
         self.item_id = item_id
+        self.source_message_id = source_message_id
         self.condition_id = condition_id
         self.query = discord.ui.TextInput(
             label="Keywords (e.g. \"cordless drill\")",
@@ -357,12 +457,12 @@ class EbayCategorySearchModal(discord.ui.Modal, title="Search eBay Categories"):
         if not matches:
             await interaction.response.edit_message(
                 content=f"No eBay categories matched \"{query}\" - try different or fewer keywords.",
-                view=EbayCategoryPickView(self.item_id, self.condition_id),
+                view=EbayCategoryPickView(self.item_id, self.condition_id, source_message_id=self.source_message_id),
             )
             return
         await interaction.response.edit_message(
             content=f"Categories matching \"{query}\" - pick one, or search again:",
-            view=EbayCategorySearchResultsView(self.item_id, self.condition_id, matches),
+            view=EbayCategorySearchResultsView(self.item_id, self.condition_id, matches, source_message_id=self.source_message_id),
         )
 
 
@@ -374,9 +474,10 @@ class EbayCategorySearchResultsView(discord.ui.View):
     old static EBAY_CATEGORIES dict this can't produce duplicate option
     values."""
 
-    def __init__(self, item_id: int, condition_id: str, matches: list):
+    def __init__(self, item_id: int, condition_id: str, matches: list, source_message_id=None):
         super().__init__(timeout=300)
         self.item_id = item_id
+        self.source_message_id = source_message_id
         self.condition_id = condition_id
         self.select = discord.ui.Select(
             placeholder="Pick a category...",
@@ -396,11 +497,11 @@ class EbayCategorySearchResultsView(discord.ui.View):
         category_id = self.select.values[0]
         await interaction.response.edit_message(
             content="Fixed price or auction?",
-            view=EbayFormatSelectView(self.item_id, self.condition_id, category_id),
+            view=EbayFormatSelectView(self.item_id, self.condition_id, category_id, source_message_id=self.source_message_id),
         )
 
     async def _on_search_again(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(EbayCategorySearchModal(self.item_id, self.condition_id))
+        await interaction.response.send_modal(EbayCategorySearchModal(self.item_id, self.condition_id, source_message_id=self.source_message_id))
 
 
 class EbayFormatSelectView(discord.ui.View):
@@ -418,9 +519,10 @@ class EbayFormatSelectView(discord.ui.View):
     reviewer disagrees with the AI's pick.
     """
 
-    def __init__(self, item_id: int, condition_id: str, category_id: str, show_change_category: bool = False):
+    def __init__(self, item_id: int, condition_id: str, category_id: str, show_change_category: bool = False, source_message_id=None):
         super().__init__(timeout=300)
         self.item_id = item_id
+        self.source_message_id = source_message_id
         self.condition_id = condition_id
         self.category_id = category_id
         self.select = discord.ui.Select(
@@ -442,17 +544,17 @@ class EbayFormatSelectView(discord.ui.View):
         if listing_format == "Auction":
             await interaction.response.edit_message(
                 content="Select this auction's duration...",
-                view=EbayAuctionDurationSelectView(self.item_id, self.condition_id, self.category_id),
+                view=EbayAuctionDurationSelectView(self.item_id, self.condition_id, self.category_id, source_message_id=self.source_message_id),
             )
         else:
             await interaction.response.send_modal(
-                EbayListingModal(self.item_id, self.condition_id, self.category_id, "FixedPrice", None)
+                EbayListingModal(self.item_id, self.condition_id, self.category_id, "FixedPrice", None, source_message_id=self.source_message_id)
             )
 
     async def _on_change_category(self, interaction: discord.Interaction):
         await interaction.response.edit_message(
             content="Now select this item's eBay category...",
-            view=EbayCategoryPickView(self.item_id, self.condition_id),
+            view=EbayCategoryPickView(self.item_id, self.condition_id, source_message_id=self.source_message_id),
         )
 
 
@@ -460,9 +562,10 @@ class EbayAuctionDurationSelectView(discord.ui.View):
     """Only reached when Auction was picked in EbayFormatSelectView - eBay's
     *Duration values for auctions (config.EBAY_AUCTION_DURATIONS)."""
 
-    def __init__(self, item_id: int, condition_id: str, category_id: str):
+    def __init__(self, item_id: int, condition_id: str, category_id: str, source_message_id=None):
         super().__init__(timeout=300)
         self.item_id = item_id
+        self.source_message_id = source_message_id
         self.condition_id = condition_id
         self.category_id = category_id
         self.select = discord.ui.Select(
@@ -478,7 +581,7 @@ class EbayAuctionDurationSelectView(discord.ui.View):
     async def _on_select(self, interaction: discord.Interaction):
         duration = self.select.values[0]
         await interaction.response.send_modal(
-            EbayListingModal(self.item_id, self.condition_id, self.category_id, "Auction", duration)
+            EbayListingModal(self.item_id, self.condition_id, self.category_id, "Auction", duration, source_message_id=self.source_message_id)
         )
 
 
@@ -539,9 +642,10 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
     """
 
     def __init__(self, item_id: int, condition_id: str, category_id: str,
-                 listing_format: str, auction_duration: str):
+                 listing_format: str, auction_duration: str, source_message_id=None):
         super().__init__()
         self.item_id = item_id
+        self.source_message_id = source_message_id
         self.condition_id = condition_id
         self.category_id = category_id
         self.listing_format = listing_format
@@ -673,6 +777,7 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
         await cog.finalize_ebay_approval(
             interaction, self.item_id, self.condition_id, self.category_id, title, price, specifics,
             self.listing_format, self.auction_duration, weight_lb, length_in, width_in, height_in,
+            source_message_id=self.source_message_id,
         )
 
 
@@ -694,7 +799,16 @@ class QueueReviewView(discord.ui.View):
 
     @discord.ui.button(label="Edit", style=discord.ButtonStyle.blurple, emoji="✏️")
     async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(EditDescriptionModal(self.item_id))
+        item = db.get_item(self.item_id)
+        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_QUEUE_REVIEW):
+            return
+        if config.PRESERVE_DISCORD_HISTORY:
+            cog = interaction.client.get_cog("ItemFlow")
+            if not await cog._require_role(interaction, config.ROLE_QUEUE_REVIEW):
+                return
+        await interaction.response.send_modal(EditDescriptionModal(
+            self.item_id, source_message_id=getattr(interaction.message, "id", None),
+        ))
 
     @discord.ui.button(label="Re-review (AI)", style=discord.ButtonStyle.gray, emoji="🔄")
     async def rereview(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -741,6 +855,8 @@ class ConfirmEbayListedButton(discord.ui.DynamicItem[discord.ui.Button], templat
         if not await cog._require_role(interaction, config.ROLE_LISTING_MGMT):
             return
         item = db.get_item(self.item_id)
+        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_PENDING_EBAY_UPLOAD):
+            return
         if not item or item["status"] != db.STATUS_PENDING_EBAY_UPLOAD:
             await interaction.response.send_message(
                 "This item isn't waiting on an eBay batch upload anymore.", ephemeral=True
@@ -776,6 +892,8 @@ class ConfirmFbMarketplaceListedButton(discord.ui.DynamicItem[discord.ui.Button]
         if not await cog._require_role(interaction, config.ROLE_LISTING_MGMT):
             return
         item = db.get_item(self.item_id)
+        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD):
+            return
         if not item or item["status"] != db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD:
             await interaction.response.send_message(
                 "This item isn't waiting on an FB Marketplace batch upload anymore.", ephemeral=True
@@ -919,6 +1037,8 @@ class HoldResolvedButton(discord.ui.DynamicItem[discord.ui.Button], template=r"p
         if not await cog._require_role(interaction, config.ROLE_LISTING_MGMT):
             return
         item = db.get_item(self.item_id)
+        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_ON_HOLD):
+            return
         if not item or item["status"] != db.STATUS_ON_HOLD:
             await interaction.response.send_message("This item isn't on hold anymore.", ephemeral=True)
             return
@@ -938,7 +1058,8 @@ class ItemFlow(commands.Cog):
         self._views_reconnected = False
 
     async def cog_load(self):
-        self.stale_check_loop.start()
+        if not config.PRESERVE_DISCORD_HISTORY:
+            self.stale_check_loop.start()
         self.bot.add_dynamic_items(ConfirmEbayListedButton, ConfirmFbMarketplaceListedButton, HoldResolvedButton)
 
     def cog_unload(self):
@@ -1015,8 +1136,9 @@ class ItemFlow(commands.Cog):
             note_text = message.content or ""
             # Clear out the old photo files before saving new ones, so a
             # resubmission doesn't end up with a mix of old and new images.
-            for old_file in photo_dir_for(item_ids[0]).glob("*"):
-                old_file.unlink(missing_ok=True)
+            if not config.PRESERVE_DISCORD_HISTORY:
+                for old_file in photo_dir_for(item_ids[0]).glob("*"):
+                    old_file.unlink(missing_ok=True)
         else:
             quantity, note_text, quantity_clamped = parse_quantity(message.content or "")
             item_ids = [
@@ -1039,6 +1161,9 @@ class ItemFlow(commands.Cog):
         saved_paths_by_item = {}
         for item_id in item_ids:
             folder = photo_dir_for(item_id)
+            if config.PRESERVE_DISCORD_HISTORY:
+                folder = folder / f"submission-{message.id}"
+                folder.mkdir(parents=True, exist_ok=False)
             saved_paths = []
             for i, (ext, data) in enumerate(attachments_data):
                 dest = folder / f"photo_{i}{ext}"
@@ -1083,10 +1208,11 @@ class ItemFlow(commands.Cog):
                         public_urls.append(None)
                 db.update_photo_public_urls(item_id, public_urls)
 
-        try:
-            await message.delete()
-        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-            pass
+        if not config.PRESERVE_DISCORD_HISTORY:
+            try:
+                await message.delete()
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                pass
 
         pallet = db.get_pallet(pallet_id)
         item_numbers = [db.get_item(i)["item_number"] for i in item_ids]
@@ -1259,10 +1385,11 @@ class ItemFlow(commands.Cog):
                 suggested_height_in=_safe_float(result.get("estimated_height_in")),
             )
 
-        try:
-            await placeholder_message.delete()
-        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-            pass
+        if not config.PRESERVE_DISCORD_HISTORY:
+            try:
+                await placeholder_message.delete()
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                pass
 
         confidence = result.get("confidence", "unknown")
         pallet_id = first_item["pallet_id"]
@@ -1298,6 +1425,8 @@ class ItemFlow(commands.Cog):
             )
             return
         item = db.get_item(item_id)
+        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_QUEUE_REVIEW):
+            return
         if item["status"] != db.STATUS_QUEUE_REVIEW:
             await interaction.response.send_message(
                 f"This item was already moved on (current status: {item['status']}). "
@@ -1335,6 +1464,8 @@ class ItemFlow(commands.Cog):
         if not await self._require_role(interaction, config.ROLE_QUEUE_REVIEW):
             return
         item = db.get_item(item_id)
+        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_QUEUE_REVIEW):
+            return
         if item["status"] != db.STATUS_QUEUE_REVIEW:
             await interaction.response.send_message(
                 f"This item was already moved on (current status: {item['status']}). "
@@ -1344,7 +1475,7 @@ class ItemFlow(commands.Cog):
         await interaction.response.send_message(
             "Select this item's eBay condition to continue approving - you'll pick a "
             "category and format (fixed price/auction), then enter title/price/specifics next.",
-            view=EbayConditionSelectView(item_id),
+            view=EbayConditionSelectView(item_id, source_message_id=getattr(interaction.message, "id", None)),
             ephemeral=True,
         )
 
@@ -1352,10 +1483,22 @@ class ItemFlow(commands.Cog):
                                       category_id: str, title: str, price: float, specifics: dict,
                                       listing_format: str = "FixedPrice", auction_duration: str = None,
                                       weight_lb: float = None, length_in: float = None,
-                                      width_in: float = None, height_in: float = None):
+                                      width_in: float = None, height_in: float = None,
+                                      source_message_id=None):
         """Final step of Approve, called from EbayListingModal.on_submit: saves
         the eBay data and actually moves the item to Awaiting Listing."""
         item = db.get_item(item_id)
+        if config.PRESERVE_DISCORD_HISTORY:
+            if not await self._require_role(interaction, config.ROLE_QUEUE_REVIEW):
+                return
+            # Ephemeral forms must retain the original card identity.
+            if source_message_id is None:
+                await interaction.response.send_message("Open Approve from the latest item card.", ephemeral=True)
+                return
+        if not await recovery_safety.require_current_card(
+            interaction, item, db.STATUS_QUEUE_REVIEW, source_message_id=source_message_id,
+        ):
+            return
         if item["status"] != db.STATUS_QUEUE_REVIEW:
             await interaction.response.send_message(
                 f"This item was already moved on (current status: {item['status']}). "
@@ -1412,6 +1555,8 @@ class ItemFlow(commands.Cog):
         if not await self._require_role(interaction, config.ROLE_LISTING_MGMT):
             return
         item = db.get_item(item_id)
+        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_AWAITING_LISTING):
+            return
         if item["status"] != db.STATUS_AWAITING_LISTING:
             await interaction.response.send_message(
                 f"This item was already moved on (current status: {item['status']}).", ephemeral=True
@@ -1456,6 +1601,8 @@ class ItemFlow(commands.Cog):
         if not await self._require_role(interaction, config.ROLE_LISTING_MGMT):
             return
         item = db.get_item(item_id)
+        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_AWAITING_LISTING):
+            return
         if item["status"] != db.STATUS_AWAITING_LISTING:
             await interaction.response.send_message(
                 f"This item was already moved on (current status: {item['status']}).", ephemeral=True
@@ -1504,6 +1651,8 @@ class ItemFlow(commands.Cog):
         if not await self._require_role(interaction, config.ROLE_LISTING_MGMT):
             return
         item = db.get_item(item_id)
+        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_AWAITING_LISTING):
+            return
         if item["status"] != db.STATUS_AWAITING_LISTING:
             await interaction.response.send_message(
                 f"This item was already moved on (current status: {item['status']}).", ephemeral=True
@@ -1532,6 +1681,7 @@ class ItemFlow(commands.Cog):
         msg = await send_item_card(
             channel, item, view=view,
             extra_text=f"✅ Listed live on eBay (item ID: {result.get('ebay_item_id', '?')}).",
+            destination_status=db.STATUS_LISTED,
         )
         db.update_status(item_id, db.STATUS_LISTED, actor_id=interaction.user.id, new_message_id=msg.id)
         await self._clear_old_card(interaction.message, item_id, "list on eBay (API)")
@@ -1577,7 +1727,8 @@ class ItemFlow(commands.Cog):
         view = ListedView(item["id"])
         extra = f"✅ Confirmed live on eBay from batch upload (item ID: {ebay_item_id})." if ebay_item_id \
             else "✅ Confirmed live on eBay from batch upload."
-        msg = await send_item_card(listed_channel, item, view=view, extra_text=extra)
+        msg = await send_item_card(listed_channel, item, view=view, extra_text=extra,
+                                   destination_status=db.STATUS_LISTED)
         db.update_status(item["id"], db.STATUS_LISTED, actor_id=actor_id, new_message_id=msg.id)
         return True
 
@@ -1607,7 +1758,8 @@ class ItemFlow(commands.Cog):
         listed_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
         view = ListedView(item["id"])
         msg = await send_item_card(
-            listed_channel, item, view=view, extra_text="✅ Confirmed live on FB Marketplace from batch upload."
+            listed_channel, item, view=view, extra_text="✅ Confirmed live on FB Marketplace from batch upload.",
+            destination_status=db.STATUS_LISTED,
         )
         db.update_status(item["id"], db.STATUS_LISTED, actor_id=actor_id, new_message_id=msg.id)
         return True
@@ -1629,11 +1781,21 @@ class ItemFlow(commands.Cog):
 
         pallet_id = item["pallet_id"]
         hold_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "hold"))
+        if hold_channel is None:
+            return False
+        if item["status"] == db.STATUS_LISTED:
+            listed_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
+            if listed_channel is None:
+                return False
+            # Required, not best effort: a failed withdrawal must not claim the
+            # hold succeeded while the website still offers the item for sale.
+            await send_website_hold_notice(listed_channel, item)
         view = discord.ui.View(timeout=None)
         view.add_item(HoldResolvedButton(item["id"]))
         reason_label = db.HOLD_REASON_LABELS[reason]
         extra = f"⏸️ **On Hold - {reason_label}**" + (f"\nNote: {note}" if note else "")
-        msg = await send_item_card(hold_channel, item, view=view, extra_text=extra)
+        msg = await send_item_card(hold_channel, item, view=view, extra_text=extra,
+                                   destination_status=db.STATUS_ON_HOLD)
 
         db.place_item_on_hold(item["id"], reason=reason, note=note, pre_hold_status=item["status"], actor_id=actor_id)
         db.update_status(item["id"], db.STATUS_ON_HOLD, actor_id=actor_id, new_message_id=msg.id)
@@ -1664,14 +1826,22 @@ class ItemFlow(commands.Cog):
         """
         if item["status"] != db.STATUS_ON_HOLD:
             return False, None
-        pre_status = db.resolve_item_hold(item["id"], actor_id=actor_id)
-        if pre_status is None:
+        hold = db.get_open_hold(item["id"])
+        if hold is None:
             return False, None
+        pre_status = hold["pre_hold_status"]
 
         pallet_id = item["pallet_id"]
         stage, view = _channel_and_view_for_status(item["id"], pre_status)
+        if stage is None:
+            return False, None
         channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, stage))
-        msg = await send_item_card(channel, item, view=view)
+        if channel is None:
+            return False, None
+        # Keep the open hold retryable if Discord rejects the new card. The
+        # destination status is explicit: the source item is still on_hold.
+        msg = await send_item_card(channel, item, view=view, destination_status=pre_status)
+        db.resolve_item_hold(item["id"], actor_id=actor_id)
         db.update_status(item["id"], pre_status, actor_id=actor_id, note="Hold resolved", new_message_id=msg.id)
 
         old_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "hold"))
@@ -1689,6 +1859,8 @@ class ItemFlow(commands.Cog):
         if not await self._require_role(interaction, config.ROLE_QUEUE_REVIEW):
             return
         item = db.get_item(item_id)
+        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_QUEUE_REVIEW):
+            return
         if item["status"] != db.STATUS_QUEUE_REVIEW:
             await interaction.response.send_message(
                 f"This item was already moved on (current status: {item['status']}).", ephemeral=True
@@ -1710,6 +1882,8 @@ class ItemFlow(commands.Cog):
         if not await self._require_role(interaction, config.ROLE_LISTING_MGMT):
             return
         item = db.get_item(item_id)
+        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_AWAITING_LISTING):
+            return
         if item["status"] != db.STATUS_AWAITING_LISTING:
             await interaction.response.send_message(
                 f"This item was already moved on (current status: {item['status']}).", ephemeral=True
@@ -1718,7 +1892,7 @@ class ItemFlow(commands.Cog):
         pallet_id = item["pallet_id"]
         channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
         view = ListedView(item_id)
-        msg = await send_item_card(channel, item, view=view)
+        msg = await send_item_card(channel, item, view=view, destination_status=db.STATUS_LISTED)
         db.update_status(item_id, db.STATUS_LISTED, actor_id=interaction.user.id, new_message_id=msg.id)
         await self._clear_old_card(interaction.message, item_id, "mark listed (other)")
         await interaction.response.send_message(f"Marked listed. See <#{channel.id}>.", ephemeral=True)
@@ -1728,6 +1902,8 @@ class ItemFlow(commands.Cog):
         if not await self._require_role(interaction, config.ROLE_LISTING_MGMT):
             return
         item = db.get_item(item_id)
+        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_LISTED):
+            return
         if item["status"] != db.STATUS_LISTED:
             await interaction.response.send_message(
                 f"This item was already moved on (current status: {item['status']}).", ephemeral=True
@@ -1736,7 +1912,7 @@ class ItemFlow(commands.Cog):
         pallet_id = item["pallet_id"]
         channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "sold"))
         view = ShippedView(item_id)
-        msg = await send_item_card(channel, item, view=view)
+        msg = await send_item_card(channel, item, view=view, destination_status=db.STATUS_SOLD)
         db.update_status(item_id, db.STATUS_SOLD, actor_id=interaction.user.id, new_message_id=msg.id)
         await self._clear_old_card(interaction.message, item_id, "mark sold")
         await interaction.response.send_message(
@@ -1750,19 +1926,43 @@ class ItemFlow(commands.Cog):
         if not await self._require_role(interaction, config.ROLE_LISTING_MGMT):
             return
         item = db.get_item(item_id)
+        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_SOLD):
+            return
         if item["status"] != db.STATUS_SOLD:
             await interaction.response.send_message(
                 f"This item isn't in Sold-awaiting-shipment (current status: {item['status']}).",
                 ephemeral=True,
             )
             return
+        if config.PRESERVE_DISCORD_HISTORY:
+            channel = self.bot.get_channel(db.resolve_channel_id(item["pallet_id"], "sold"))
+            msg = await send_item_card(channel, item, destination_status=db.STATUS_SHIPPED,
+                                       extra_text="Shipped; previous card preserved")
+            db.update_status(item_id, db.STATUS_SHIPPED, actor_id=interaction.user.id,
+                             new_message_id=msg.id)
+            await interaction.response.send_message("Marked shipped. The earlier card was kept.", ephemeral=True)
+            return
         db.update_status(item_id, db.STATUS_SHIPPED, actor_id=interaction.user.id)
         try:
             all_embeds = list(interaction.message.embeds)
-            footer_text = (all_embeds[0].footer.text or "") if all_embeds[0].footer else ""
-            all_embeds[0].set_footer(text=footer_text + " — Shipped ✅")
+            main_embed = all_embeds[0]
+            contract = build_website_contract(
+                item, db.get_ebay_listing_data(item_id), status=db.STATUS_SHIPPED,
+                photo_count=0, sku_prefix=config.WEBSITE_SKU_PREFIX,
+            )
+            # Replace prior contract fields in place. Preserve image/gallery and
+            # the existing persistent button identities until shipment removes
+            # the view, just as the original workflow did.
+            fields = [field for field in main_embed.fields if not field.name.startswith("Website ")]
+            main_embed.clear_fields()
+            for field in fields:
+                main_embed.add_field(name=field.name, value=db.STATUS_SHIPPED if field.name == "Status" else field.value,
+                                     inline=field.inline)
+            for field in contract["fields"]:
+                main_embed.add_field(**field)
+            main_embed.set_footer(text=FOOTER_PREFIX + " | Shipped ✅")
             await interaction.message.edit(embeds=all_embeds, view=None)
-        except (*discord_resilience.TRANSIENT_DISCORD_ERRORS, IndexError):
+        except (*discord_resilience.TRANSIENT_DISCORD_ERRORS, IndexError, KeyError, TypeError, ValueError):
             pass
         await interaction.response.send_message("Marked shipped.", ephemeral=True)
         await finance_utils.refresh_finance_message(self.bot, item["pallet_id"])
@@ -1783,6 +1983,8 @@ class ItemFlow(commands.Cog):
         instead of a silent repeat), and fall back to stripping its buttons
         so at least it can't be clicked again even if it can't be removed.
         """
+        if config.PRESERVE_DISCORD_HISTORY:
+            return
         try:
             await message.delete()
             return
@@ -1811,6 +2013,8 @@ class ItemFlow(commands.Cog):
         # get_stale_listed_items already looks across ALL pallets - the only
         # change here is that the alert now goes to the one shared 10-day-alerts
         # channel (not a per-pallet copy of it), so every ping names the pallet.
+        if config.PRESERVE_DISCORD_HISTORY:
+            return
         stale_items = db.get_stale_listed_items(config.DAYS_BEFORE_STALE_ALERT)
         alert_channel_id = db.get_shared_channel_id("10-day-alerts")
         channel = self.bot.get_channel(alert_channel_id) if alert_channel_id else None

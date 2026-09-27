@@ -1113,3 +1113,16 @@ this scale.
   for eBay/FB Marketplace CSV uploads and nothing else) gets cleaned up.
   Retention is a manual admin action (preview by default, `confirm:True` to
   run), never an automatic background job - same as buyer data retention.
+
+## Optional: publishing to a separate website (combined mode)
+
+`combined_bot.py` is a second, independent entry point in this same repo -
+`python bot.py` (this section's normal entry point, above) is completely
+unaffected by its presence and behaves exactly as documented everywhere
+else in this file. Running `combined_bot.py` instead adds a durable
+review/approval flow (`#website_shop`) for publishing approved items to a
+separate storefront website, using its own isolated database/photo
+storage and a second Discord bot application/token - see
+`COMBINED_BOT_SETUP.md` for the full setup walkthrough (Setup/Check/
+Preview/Start). It only ever runs if someone explicitly sets it up and
+starts it; nothing here turns on by itself.

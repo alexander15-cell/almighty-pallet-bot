@@ -73,6 +73,9 @@ def resolve_role(guild: discord.Guild, role_name: str):
     to matching by name (today's default, and what happens for any role
     that's never been bound).
     """
+    if getattr(config, "COMBINED_MODE", False):
+        role_id = getattr(config, "COMBINED_ROLE_IDS", {}).get(role_name)
+        return guild.get_role(int(role_id)) if role_id else None
     role_id = _role_ids.get(role_name)
     if role_id:
         role = guild.get_role(role_id)
