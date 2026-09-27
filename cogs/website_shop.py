@@ -158,9 +158,12 @@ class WebsiteShop(commands.Cog):
             await interaction.response.send_message("Still starting up - try again in a moment.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        await self.adapter.reconcile()
+        counts = await self.adapter.reconcile()
         await interaction.followup.send(
-            "Checked website reviews. Use #website_shop to enter price and eBay link, then approve.", ephemeral=True
+            f"Checked website reviews: {counts}. If \"posted\" is 0, either nothing new is eligible yet "
+            f"or an item was blocked (check the console for \"Website shop: item ... not posted\"). "
+            f"Use #website_shop to enter price and eBay link, then approve.",
+            ephemeral=True,
         )
 
     @website_group.command(name="hold", description="Put a new-inventory item on hold and queue website removal")
