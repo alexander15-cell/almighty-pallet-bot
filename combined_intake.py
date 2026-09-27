@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import hashlib
 import json
+import logging
 from pathlib import Path
 import re
 import sqlite3
@@ -25,6 +26,8 @@ from shop_approval import Review, ShopApprovalError, _safe_path
 from shop_content import ShopContentError, verify_content
 from shop_discord import ShopReviewView, post_review
 from shop_values import MAX_INTEGER
+
+log = logging.getLogger(__name__)
 
 MIN_NEW_ITEM_ID = 1_000_000_000
 TRACKING_APPLICATION_ID = 0x46474941
@@ -318,8 +321,9 @@ class IntakeAdapter:
                             request_id=self._request(item_id, "refresh", review.revision, verified.digest))
                         counts["refreshed"] += 1
                 counts["posted"] += int(await self._post_if_needed(review, verified.title))
-            except (IntakeAdapterError, ShopContentError, ShopApprovalError, ContractError):
+            except (IntakeAdapterError, ShopContentError, ShopApprovalError, ContractError) as e:
                 counts["blocked"] += 1
+                log.info("Website shop: item %s not posted (%s: %s)", item_id, type(e).__name__, e)
                 # Bad/missing photos, condition or text must cancel an existing
                 # approval. Sender handles the resulting website withdrawal.
                 if (review is not None and review.product_ref == f"intake-{item_id}"
@@ -331,4 +335,5 @@ class IntakeAdapter:
                 # A failed append is retryable next cycle; never approve or delete
                 # a post to make a failed UI send look successful.
                 counts["blocked"] += 1
+                log.exception("Website shop: item %s failed to post unexpectedly", item_id)
         return counts
