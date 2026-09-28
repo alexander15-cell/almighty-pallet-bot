@@ -39,6 +39,7 @@ class _FakeTextChannel:
         self.name = name
         self.id = channel_id
         self.category = category
+        self.mention = f"#{name}"
 
     async def send(self, *args, **kwargs):
         return _FakeMessage()
@@ -66,8 +67,14 @@ class _FakeGuild:
 
 
 class _FakeResponse:
+    def __init__(self):
+        self.messages = []
+
     async def defer(self, ephemeral=True, thinking=True):
         pass
+
+    async def send_message(self, content=None, **kwargs):
+        self.messages.append(content)
 
 
 class _FakeFollowup:
@@ -105,3 +112,24 @@ def test_finance_and_pipeline_channels_land_in_separate_categories(fresh_db):
         assert fresh_db.get_shared_channel_id(stage) is not None
     for stage in config.SHARED_STAGE_CHANNELS:
         assert fresh_db.get_shared_channel_id(stage) is not None
+
+
+def test_rebind_channel_points_a_stage_at_a_new_channel(fresh_db):
+    """
+    Regression guard for a real support scenario: a shared channel (e.g.
+    #awaiting-pallet-charges) gets accidentally deleted in Discord. Simply
+    recreating a channel with the same name does nothing on its own - the
+    bot looks channels up by the numeric id stored in the database, not by
+    name - so /setup rebind-channel must be the way to actually repoint it.
+    """
+    cog = PalletSetup.__new__(PalletSetup)
+    fresh_db.set_shared_channel("awaiting-pallet-charges", 111)  # the old, now-deleted channel
+
+    new_channel = _FakeTextChannel("awaiting-pallet-charges", 222, category=None)
+    stage_choice = discord.app_commands.Choice(name="awaiting-pallet-charges", value="awaiting-pallet-charges")
+    interaction = _FakeInteraction(_FakeGuild())
+
+    asyncio.run(PalletSetup.rebind_channel.callback(cog, interaction, stage_choice, new_channel))
+
+    assert fresh_db.get_shared_channel_id("awaiting-pallet-charges") == 222
+    assert "awaiting-pallet-charges" in interaction.response.messages[-1]

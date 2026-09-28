@@ -32,6 +32,14 @@ import quickbooks
 
 log = logging.getLogger(__name__)
 
+# Every name a shared channel can be known by - the ones /setup
+# shared-channels creates. Excludes "data-entry", which is mapped per
+# pallet (map_channel), not stored here.
+_SHARED_CHANNEL_CHOICES = [
+    app_commands.Choice(name=name, value=name)
+    for name in config.SHARED_STAGE_CHANNELS + config.FINANCE_SHARED_CHANNELS
+]
+
 
 def role_overwrites(guild: discord.Guild, allowed_role_names: list[str]) -> dict:
     """
@@ -307,7 +315,7 @@ class PalletSetup(commands.Cog):
         if not missing:
             await interaction.response.send_message(
                 "Shared pipeline channels already exist. Nothing to do. "
-                "(If you need to move/recreate them, update the channel IDs manually in the database.)",
+                "(If one was deleted and needs to point at a new channel, use `/setup rebind-channel`.)",
                 ephemeral=True,
             )
             return
@@ -404,6 +412,23 @@ class PalletSetup(commands.Cog):
             await channel.send(embed=embed)
 
         await interaction.followup.send(f"✅ Posted the bot guide in {channel.mention}.", ephemeral=True)
+
+    @setup_group.command(
+        name="rebind-channel",
+        description="Point a shared channel at a different Discord channel (e.g. after recreating a deleted one).",
+    )
+    @app_commands.describe(
+        stage="Which shared channel to rebind",
+        channel="The Discord channel it should point to now (create it first, with any name)",
+    )
+    @app_commands.choices(stage=_SHARED_CHANNEL_CHOICES)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def rebind_channel(self, interaction: discord.Interaction, stage: app_commands.Choice[str],
+                              channel: discord.TextChannel):
+        db.set_shared_channel(stage.value, channel.id)
+        await interaction.response.send_message(
+            f"🔗 **{stage.value}** now points to {channel.mention}.", ephemeral=True
+        )
 
 
 async def setup(bot: commands.Bot):
