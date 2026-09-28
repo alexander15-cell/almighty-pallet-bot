@@ -106,16 +106,21 @@ async def _claim_awaiting_charges(interaction: discord.Interaction, pallet_id: i
             continue  # already claimed by someone else in the meantime
         claimed_total += charge["amount"]
 
-        try:
-            await quickbooks.create_expense(
-                config.QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID, charge["amount"], charge["txn_date"],
-                memo=f"{pallet_name} (Pallet #{pallet_id}) - {charge['merchant']}",
-            )
-        except quickbooks.QuickBooksError:
-            log.exception(
-                "Claimed awaiting charge %s locally but failed to push the matching QuickBooks expense",
-                charge["quickbooks_txn_id"],
-            )
+        # A manually-submitted invoice (source='manual') was never a real
+        # QuickBooks transaction - there's nothing to push here, the
+        # accountant enters it into QuickBooks by hand from its
+        # #awaiting-pallet-charges card.
+        if charge.get("source", "quickbooks") == "quickbooks":
+            try:
+                await quickbooks.create_expense(
+                    config.QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID, charge["amount"], charge["txn_date"],
+                    memo=f"{pallet_name} (Pallet #{pallet_id}) - {charge['merchant']}",
+                )
+            except quickbooks.QuickBooksError:
+                log.exception(
+                    "Claimed awaiting charge %s locally but failed to push the matching QuickBooks expense",
+                    charge["quickbooks_txn_id"],
+                )
 
         if not config.PRESERVE_DISCORD_HISTORY and awaiting_channel and charge.get("message_id"):
             try:
@@ -134,8 +139,9 @@ async def _claim_awaiting_charges(interaction: discord.Interaction, pallet_id: i
 class AwaitingChargesSelect(discord.ui.Select):
     """
     Shown right after a new pallet is created, only if there are any
-    QuickBooks credit-card charges sitting in #awaiting-pallet-charges
-    (allocated to "New Pallet (not arrived yet)" before this one existed).
+    charges sitting in #awaiting-pallet-charges - a QuickBooks credit-card
+    charge allocated to "New Pallet (not arrived yet)" before this one
+    existed, or a manually-submitted invoice from #submit-invoices.
     Multi-select since a pallet often has more than one charge to claim at
     once - e.g. the purchase price plus a separate deposit/fee charge.
     """
@@ -143,7 +149,10 @@ class AwaitingChargesSelect(discord.ui.Select):
     def __init__(self, pallet_id: int, pallet_name: str, charges: list):
         options = [
             discord.SelectOption(
-                label=f"{c['merchant'] or 'Unknown merchant'} - ${c['amount']:.2f}"[:100],
+                label=(
+                    f"Invoice - ${c['amount']:.2f}" if c.get("source") == "manual"
+                    else f"{c['merchant'] or 'Unknown merchant'} - ${c['amount']:.2f}"
+                )[:100],
                 description=(c["txn_date"] or "")[:100],
                 value=str(c["id"]),
             )
@@ -306,12 +315,22 @@ class PalletSetup(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         guild = interaction.guild
 
-        category = discord.utils.get(guild.categories, name=config.SHARED_PIPELINE_CATEGORY_NAME)
-        if category is None:
-            category = await guild.create_category(name=config.SHARED_PIPELINE_CATEGORY_NAME)
+        pipeline_category = discord.utils.get(guild.categories, name=config.SHARED_PIPELINE_CATEGORY_NAME)
+        if pipeline_category is None:
+            pipeline_category = await guild.create_category(name=config.SHARED_PIPELINE_CATEGORY_NAME)
+        finance_category = None
 
-        created = []
+        created_by_category = {}
         for stage in missing:
+            if stage in config.FINANCE_SHARED_CHANNELS:
+                if finance_category is None:
+                    finance_category = discord.utils.get(guild.categories, name=config.FINANCE_CATEGORY_NAME)
+                    if finance_category is None:
+                        finance_category = await guild.create_category(name=config.FINANCE_CATEGORY_NAME)
+                category = finance_category
+            else:
+                category = pipeline_category
+
             existing_channel = discord.utils.get(category.channels, name=stage)
             if existing_channel:
                 channel = existing_channel
@@ -329,13 +348,13 @@ class PalletSetup(commands.Cog):
                     except discord_resilience.TRANSIENT_DISCORD_ERRORS:
                         pass
             db.set_shared_channel(stage, channel.id)
-            created.append(channel.name)
+            created_by_category.setdefault(category.name, []).append(channel.name)
 
-        await interaction.followup.send(
-            f"✅ Shared pipeline channels ready under **{category.name}**: "
-            + ", ".join(f"#{c}" for c in created),
-            ephemeral=True,
+        summary = "; ".join(
+            f"**{category_name}**: " + ", ".join(f"#{c}" for c in names)
+            for category_name, names in created_by_category.items()
         )
+        await interaction.followup.send(f"✅ Shared channels ready - {summary}", ephemeral=True)
 
     @setup_group.command(
         name="info-channel",

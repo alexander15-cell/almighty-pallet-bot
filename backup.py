@@ -42,6 +42,7 @@ import config
 # stored under inside the zip.
 _ARCHIVE_DIRS = {
     "photos": lambda: Path(config.PHOTO_DIR),
+    "invoices": lambda: Path(config.INVOICE_DIR),
     "ebay_batch_archive": lambda: Path(config.EBAY_BATCH_ARCHIVE_DIR),
     "fb_marketplace_batch_archive": lambda: Path(config.FB_MARKETPLACE_BATCH_ARCHIVE_DIR),
     "pirate_ship_exports": lambda: Path(config.PIRATE_SHIP_EXPORT_ARCHIVE_DIR),

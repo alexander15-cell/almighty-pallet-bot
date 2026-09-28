@@ -49,8 +49,10 @@ Every command that changes a number refreshes that pallet's pinned live
 status card in #pallet-discussion via finance_utils.
 """
 import logging
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -63,8 +65,23 @@ import finance_utils
 import pirate_ship_import
 import quickbooks
 import runtime_settings
+import shop_values
 
 log = logging.getLogger(__name__)
+
+# Computed absolute at import time (not just Path(config.INVOICE_DIR)) so
+# every saved invoice path is absolute regardless of the process's working
+# directory - config.INVOICE_DIR defaults to a relative path, and a stored
+# relative path silently breaks later reads if the bot is ever launched
+# from a different directory (see the equivalent PHOTO_DIR fix in
+# cogs/item_flow.py for the exact failure this avoids).
+INVOICE_DIR = Path(os.path.abspath(config.INVOICE_DIR))
+
+
+def invoice_dir_for(charge_id: int) -> Path:
+    d = INVOICE_DIR / str(charge_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def _has_role(interaction: discord.Interaction, role_name: str) -> bool:
@@ -265,10 +282,15 @@ async def _mark_charge_message_handled(message: discord.Message, note: str):
         log.warning("Couldn't update charge message %s after allocation", message.id)
 
 
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
 async def _post_awaiting_charge_card(bot: discord.Client, charge: dict):
     """Posts a charge's standing card in #awaiting-pallet-charges once it's
     been filed there (no matching pallet exists yet) - stays up until a new
-    pallet's creation flow claims it (see pallet_setup.py)."""
+    pallet's creation flow claims it (see pallet_setup.py). Covers both a
+    QuickBooks-sourced charge and a manually-submitted invoice (source
+    columns differ - see awaiting_pallet_charges' own CREATE TABLE comment)."""
     channel_id = db.get_shared_channel_id("awaiting-pallet-charges")
     if not channel_id:
         log.warning("No #awaiting-pallet-charges channel configured - run /setup shared-channels.")
@@ -276,13 +298,29 @@ async def _post_awaiting_charge_card(bot: discord.Client, charge: dict):
     channel = bot.get_channel(channel_id)
     if channel is None:
         return
-    embed = discord.Embed(
-        title="📥 Awaiting a pallet",
-        description=f"**{charge['merchant']}**\n${charge['amount']:.2f} on {charge['txn_date']}",
-        color=discord.Color.dark_gold(),
-    )
-    embed.set_footer(text=f"QuickBooks transaction {charge['quickbooks_txn_id']} - claimed automatically when a matching pallet is created")
-    message = await channel.send(embed=embed)
+    if charge.get("source") == "manual":
+        embed = discord.Embed(
+            title="📥 Awaiting a pallet - submitted invoice",
+            description=f"${charge['amount']:.2f}",
+            color=discord.Color.dark_gold(),
+        )
+        embed.set_footer(text="Manually submitted invoice - claimed automatically when a matching pallet is created")
+        file = None
+        photo_path = charge.get("invoice_photo_path")
+        if photo_path and Path(photo_path).is_file():
+            path = Path(photo_path)
+            file = discord.File(path, filename=path.name)
+            if path.suffix.lower() in _IMAGE_EXTENSIONS:
+                embed.set_image(url=f"attachment://{path.name}")
+        message = await channel.send(embed=embed, file=file) if file else await channel.send(embed=embed)
+    else:
+        embed = discord.Embed(
+            title="📥 Awaiting a pallet",
+            description=f"**{charge['merchant']}**\n${charge['amount']:.2f} on {charge['txn_date']}",
+            color=discord.Color.dark_gold(),
+        )
+        embed.set_footer(text=f"QuickBooks transaction {charge['quickbooks_txn_id']} - claimed automatically when a matching pallet is created")
+        message = await channel.send(embed=embed)
     db.set_awaiting_pallet_charge_message(charge["id"], message.id)
 
 
@@ -501,6 +539,75 @@ class Finance(commands.Cog):
 
     def cog_unload(self):
         self.credit_card_poll_loop.cancel()
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """
+        #submit-invoices: one message per invoice - attach the invoice
+        (photo or PDF) and put just the dollar amount in the same message,
+        same idea as Data Entry's "attach photo(s) + note" pattern. Files a
+        manually-submitted awaiting_pallet_charges row and posts the
+        accountant's standing card in #awaiting-pallet-charges, same as a
+        QuickBooks-sourced charge - the QuickBooks API being unavailable
+        means this is the real, working replacement for that automatic
+        path, not a fallback for when it fails.
+        """
+        if message.author.bot:
+            return
+        channel_id = db.get_shared_channel_id("submit-invoices")
+        if not channel_id or message.channel.id != channel_id:
+            return
+
+        admin_role = runtime_settings.resolve_role(message.guild, config.ROLE_ADMIN)
+        purchase_role = runtime_settings.resolve_role(message.guild, config.ROLE_PURCHASE_MGMT)
+        author_roles = message.author.roles
+        if not ((purchase_role and purchase_role in author_roles) or (admin_role and admin_role in author_roles)):
+            await message.reply(
+                f"You need the **{config.ROLE_PURCHASE_MGMT}** role to submit an invoice here.",
+                delete_after=15,
+            )
+            return
+        if not message.attachments:
+            await message.reply(
+                "Attach the invoice (photo or PDF) and put just the dollar amount in the same "
+                "message, e.g. \"125.50\".",
+                delete_after=15,
+            )
+            return
+        try:
+            cents = shop_values.parse_price_cents(message.content or "")
+        except shop_values.ShopValidationError:
+            await message.reply(
+                "Couldn't read a dollar amount from your message - put just the amount, e.g. "
+                "\"125.50\", alongside the attached invoice.",
+                delete_after=15,
+            )
+            return
+
+        amount = cents / 100
+        attachment = message.attachments[0]
+        charge_id = db.create_manual_invoice_charge(amount, message.author.id)
+        ext = Path(attachment.filename).suffix or ".jpg"
+        dest = invoice_dir_for(charge_id) / f"invoice{ext}"
+        await attachment.save(dest)
+        db.set_awaiting_pallet_charge_invoice_photo(charge_id, str(dest))
+
+        charge = db.get_awaiting_pallet_charge(charge_id)
+        try:
+            await _post_awaiting_charge_card(self.bot, charge)
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+            log.exception("Failed to post awaiting-pallet-charges card for manual invoice %s", charge_id)
+
+        if not config.PRESERVE_DISCORD_HISTORY:
+            try:
+                await message.delete()
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                pass
+        await message.channel.send(
+            f"✅ Invoice for ${amount:.2f} logged - it'll show up in #awaiting-pallet-charges "
+            f"until a matching pallet is created.",
+            delete_after=15,
+        )
 
     finance_group = app_commands.Group(name="finance", description="Finance Management commands")
 
@@ -854,7 +961,7 @@ class Finance(commands.Cog):
         cost_lines = []
         if fin["manual_pallet_cost"] is not None:
             cost_lines.append(f"Purchase (`/finance setprice`): ${fin['manual_pallet_cost']:.2f}")
-        cost_type_labels = {"credit_card": "Credit Card", "shipping": "Shipping", "supplies": "Supplies", "misc": "Misc"}
+        cost_type_labels = {"credit_card": "Credit Card", "invoice": "Purchase Invoice", "shipping": "Shipping", "supplies": "Supplies", "misc": "Misc"}
         for cost_type, label in cost_type_labels.items():
             if breakdown.get(cost_type):
                 cost_lines.append(f"{label}: ${breakdown[cost_type]:.2f}")

@@ -7,6 +7,7 @@ existing preference for DB-level tests over full Discord mocking.
 """
 import asyncio
 import os
+from unittest.mock import AsyncMock
 
 os.environ.setdefault("DISCORD_BOT_TOKEN", "test-token")
 
@@ -127,6 +128,46 @@ def test_claim_with_no_selection_does_nothing(pallet, fresh_db):
 
     assert fresh_db.get_pallet_costs(pallet["id"]) == []
     assert "No charges attached" in interaction.followup.messages[-1]
+
+
+def test_create_manual_invoice_charge_generates_unique_synthetic_ids(fresh_db):
+    """
+    Regression guard: quickbooks_txn_id is NOT NULL UNIQUE - a manually
+    submitted invoice has no real QuickBooks transaction to key off of, so
+    create_manual_invoice_charge must generate a synthetic id unique enough
+    that two manual submissions never collide and violate that constraint.
+    """
+    first = fresh_db.create_manual_invoice_charge(10.0, submitted_by=1)
+    second = fresh_db.create_manual_invoice_charge(20.0, submitted_by=1)
+    assert first != second
+    unclaimed = fresh_db.get_unclaimed_pallet_charges()
+    assert len(unclaimed) == 2
+    assert {c["source"] for c in unclaimed} == {"manual"}
+
+
+def test_claim_manual_invoice_never_calls_quickbooks(pallet, fresh_db, monkeypatch):
+    """
+    Regression guard: a manually-submitted invoice (#submit-invoices) was
+    never a real QuickBooks transaction, so claiming it must never attempt
+    a QuickBooks push - unlike a QuickBooks-sourced charge, which does (see
+    test_claim_single_charge_creates_pallet_cost_and_removes_card above).
+    """
+    create_expense = AsyncMock(side_effect=AssertionError("no QuickBooks push"))
+    monkeypatch.setattr(qb, "create_expense", create_expense)
+    monkeypatch.setattr(config, "QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID", "77")
+
+    charge_id = fresh_db.create_manual_invoice_charge(42.50, submitted_by=1)
+
+    interaction = _FakeInteraction(_FakeClient())
+    asyncio.run(_claim_awaiting_charges(interaction, pallet["id"], pallet["name"], [str(charge_id)]))
+
+    create_expense.assert_not_awaited()
+    costs = fresh_db.get_pallet_costs(pallet["id"])
+    assert len(costs) == 1
+    assert costs[0]["amount"] == 42.50
+    assert costs[0]["cost_type"] == "invoice"
+    assert costs[0]["source"] == "manual"
+    assert costs[0]["quickbooks_txn_id"] is None
 
 
 def test_claim_survives_quickbooks_push_failure(pallet, fresh_db, monkeypatch):

@@ -270,6 +270,32 @@ not built without an explicit spec).
   this to a server that already ran that command before this feature
   existed - it only creates whatever's still missing.
 
+### Manually-submitted invoices (`#submit-invoices`) - the practical path without direct QuickBooks API access
+
+Getting a QuickBooks developer app approved for production credentials
+isn't guaranteed (Intuit's own review, outside this bot's control) - this
+is the real, working alternative when it isn't available, not a
+placeholder. Shares the exact same "awaiting a pallet" board and claim flow
+as the credit-card poller above, just filed manually instead of pulled
+automatically from QuickBooks:
+
+- **Purchase Management** posts in `#submit-invoices`: attach the invoice
+  (photo or PDF) and type just the dollar amount (e.g. `125.50`) in the
+  same message, then send. The bot logs it and removes the message.
+- It then shows up in `#awaiting-pallet-charges` with the invoice attached,
+  exactly like a QuickBooks-sourced charge - **Start New Pallet** offers to
+  attach any unclaimed ones (of either kind) to the pallet being created.
+- Unlike a QuickBooks-sourced charge, claiming one never pushes anything to
+  QuickBooks automatically (there's no real transaction to push) - it's
+  filed under the `invoice` cost type in the pallet's cost basis
+  (`/finance pallet-summary`), ready for the accountant to enter into
+  QuickBooks by hand from its card.
+- Both `#credit-card-charges`/`#awaiting-pallet-charges` and
+  `#submit-invoices` now live in their own **Finance** category, separate
+  from the item-pipeline's Shared Pallet Pipeline category - run
+  `/setup shared-channels` again (safe to re-run) to create whatever's
+  missing if you're adding this to an existing server.
+
 ## Important limitation: no Vendoo API, and eBay/FB Marketplace both use CSV batches
 
 Neither eBay nor Facebook Marketplace offer a listing-creation API this bot

@@ -164,19 +164,24 @@ SHARED_STAGE_CHANNELS = [
 ]
 SHARED_PIPELINE_CATEGORY_NAME = "Shared Pallet Pipeline"
 
-# Also created ONCE via /setup shared-channels, alongside the item-pipeline
-# channels above - kept in a SEPARATE list rather than folded into
+# Also created ONCE via /setup shared-channels, in their own Finance
+# category (see FINANCE_CATEGORY_NAME) rather than alongside the
+# item-pipeline channels - kept in a SEPARATE list rather than folded into
 # SHARED_STAGE_CHANNELS since these aren't stages an item moves through
 # (resolve_channel_id/is_shared_channels_setup/pipeline status-counting all
 # assume SHARED_STAGE_CHANNELS entries correspond to an item status). This
 # is where the QuickBooks credit-card-charge -> pallet allocation workflow
-# lives instead (see cogs/finance.py, quickbooks.py) - still stored in the
-# same shared_channels DB table so the bot can look their IDs up at
-# runtime, just outside that item-status list.
+# lives (see cogs/finance.py, quickbooks.py), and - now that direct
+# QuickBooks access isn't available - the manually-submitted-invoice
+# workflow (#submit-invoices) that replaces it - still stored in the same
+# shared_channels DB table so the bot can look their IDs up at runtime,
+# just outside that item-status list.
 FINANCE_SHARED_CHANNELS = [
     "credit-card-charges",
     "awaiting-pallet-charges",
+    "submit-invoices",
 ]
+FINANCE_CATEGORY_NAME = "Finance"
 
 # A read-only orientation channel explaining how this bot works, posted by
 # /setup info-channel (see information_content.py) - created in the same
@@ -220,6 +225,7 @@ CHANNEL_ROLE_PERMISSIONS = {
     "10-day-alerts": [ROLE_LISTING_MGMT, ROLE_FINANCE_MGMT],
     "credit-card-charges": [ROLE_FINANCE_MGMT, ROLE_PURCHASE_MGMT],
     "awaiting-pallet-charges": [ROLE_FINANCE_MGMT, ROLE_PURCHASE_MGMT],
+    "submit-invoices": [ROLE_FINANCE_MGMT, ROLE_PURCHASE_MGMT],
 }
 
 # ---- Onboarding text ----
@@ -310,10 +316,19 @@ CHANNEL_INFO = {
         "into QuickBooks too, so the books and this bot stay in sync."
     ),
     "awaiting-pallet-charges": (
-        "Charges allocated to \"New Pallet (not arrived yet)\" sit here until a "
-        "matching pallet is actually created - Start New Pallet will then offer to "
-        "attach any unclaimed charges shown here to it. Nothing to do here directly; "
-        "this is just a standing board of what's still unclaimed."
+        "Charges allocated to \"New Pallet (not arrived yet)\", and manually-submitted "
+        "invoices from #submit-invoices, sit here until a matching pallet is actually "
+        "created - Start New Pallet will then offer to attach any unclaimed ones shown "
+        "here to it. Nothing to do here directly; this is just a standing board of "
+        "what's still unclaimed."
+    ),
+    "submit-invoices": (
+        "**Purchase Management role** posts here. One message per invoice: attach the "
+        "invoice (photo or PDF) and type just the dollar amount (e.g. \"125.50\") in the "
+        "same message, then send. The bot logs it and removes your message - it then "
+        "shows up in #awaiting-pallet-charges until Start New Pallet attaches it to the "
+        "matching pallet, at which point it's ready for the accountant to enter into "
+        "QuickBooks by hand."
     ),
 }
 
@@ -346,6 +361,9 @@ BACKUP_MAX_AGE_DAYS = int(os.getenv("BACKUP_MAX_AGE_DAYS") or "14")
 
 # ---- Local photo storage (see workflow photo handling in item_flow.py) ----
 PHOTO_DIR = os.getenv("PHOTO_DIR", "data/photos")
+
+# ---- Local invoice storage (see #submit-invoices handling in cogs/finance.py) ----
+INVOICE_DIR = os.getenv("INVOICE_DIR", "data/invoices")
 
 # ---- Single-instance lock (see instance_lock.py) ----
 INSTANCE_LOCK_PATH = os.getenv("INSTANCE_LOCK_PATH", "data/.bot.lock")

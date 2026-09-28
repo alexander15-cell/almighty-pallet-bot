@@ -131,6 +131,14 @@ def _migrate_add_columns(conn):
         # timestamp that means specifically "when this sale was recorded",
         # not "whenever this item was last touched for any reason".
         "ALTER TABLE items ADD COLUMN sale_recorded_at TEXT",
+        # Manually-submitted invoices (see #submit-invoices in
+        # cogs/finance.py) share the awaiting_pallet_charges table with
+        # QuickBooks-sourced charges - 'source' distinguishes the two so
+        # claiming knows whether to push a QuickBooks expense, and
+        # invoice_photo_path holds the local file path to the submitted
+        # invoice image/PDF (only ever set for source='manual').
+        "ALTER TABLE awaiting_pallet_charges ADD COLUMN source TEXT NOT NULL DEFAULT 'quickbooks'",
+        "ALTER TABLE awaiting_pallet_charges ADD COLUMN invoice_photo_path TEXT",
     ]
     for stmt in migrations:
         try:
@@ -357,7 +365,7 @@ def init_db():
             -- copies it into pallet_costs above and marks it claimed here.
             CREATE TABLE IF NOT EXISTS awaiting_pallet_charges (
                 id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-                quickbooks_txn_id  TEXT NOT NULL UNIQUE,
+                quickbooks_txn_id  TEXT NOT NULL UNIQUE,  -- synthetic "manual-<uuid>" for source='manual' rows
                 amount             REAL NOT NULL,
                 merchant           TEXT,
                 txn_date           TEXT,
@@ -366,6 +374,8 @@ def init_db():
                 claimed            INTEGER NOT NULL DEFAULT 0,
                 claimed_pallet_id  INTEGER REFERENCES pallets(id),
                 claimed_at         TEXT,
+                source             TEXT NOT NULL DEFAULT 'quickbooks',  -- 'quickbooks' or 'manual'
+                invoice_photo_path TEXT,               -- local file path, only set for source='manual'
                 created_at         TEXT NOT NULL
             );
 
@@ -1377,22 +1387,55 @@ def has_quickbooks_txn_been_allocated(quickbooks_txn_id: str) -> bool:
 # ------------------------------------------------- awaiting_pallet_charges --
 
 def create_awaiting_pallet_charge(quickbooks_txn_id: str, amount: float, merchant: str,
-                                   txn_date: str, allocated_by: int) -> int:
+                                   txn_date: str, allocated_by: int, source: str = "quickbooks",
+                                   invoice_photo_path: str = None) -> int:
     """A charge allocated to "New Pallet (not arrived yet)" - see
     awaiting_pallet_charges' own CREATE TABLE comment. Returns the new row's id."""
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO awaiting_pallet_charges
-               (quickbooks_txn_id, amount, merchant, txn_date, allocated_by, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (quickbooks_txn_id, amount, merchant, txn_date, allocated_by, _now()),
+               (quickbooks_txn_id, amount, merchant, txn_date, allocated_by, source,
+                invoice_photo_path, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (quickbooks_txn_id, amount, merchant, txn_date, allocated_by, source,
+             invoice_photo_path, _now()),
         )
         return cur.lastrowid
+
+
+def create_manual_invoice_charge(amount: float, submitted_by: int) -> int:
+    """A manually-submitted invoice (see cogs/finance.py's #submit-invoices
+    handler) - the QuickBooks API being unavailable means there's no real
+    QuickBooks transaction to key this off of, so a synthetic, permanently
+    unique reference stands in for quickbooks_txn_id (NOT NULL UNIQUE).
+    Otherwise behaves exactly like a QuickBooks-sourced charge - same
+    "awaiting a pallet" board, same claim-at-pallet-creation flow - just
+    never pushes a QuickBooks expense on claim (see claim_awaiting_pallet_charge)."""
+    import uuid
+    synthetic_id = f"manual-{uuid.uuid4().hex}"
+    return create_awaiting_pallet_charge(
+        synthetic_id, amount, merchant=None, txn_date=_now()[:10],
+        allocated_by=submitted_by, source="manual",
+    )
 
 
 def set_awaiting_pallet_charge_message(charge_id: int, message_id: int):
     with get_conn() as conn:
         conn.execute("UPDATE awaiting_pallet_charges SET message_id = ? WHERE id = ?", (message_id, charge_id))
+
+
+def set_awaiting_pallet_charge_invoice_photo(charge_id: int, invoice_photo_path: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE awaiting_pallet_charges SET invoice_photo_path = ? WHERE id = ?",
+            (invoice_photo_path, charge_id),
+        )
+
+
+def get_awaiting_pallet_charge(charge_id: int):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM awaiting_pallet_charges WHERE id = ?", (charge_id,)).fetchone()
+        return dict(row) if row else None
 
 
 def get_awaiting_pallet_charge_by_txn(quickbooks_txn_id: str):
@@ -1420,11 +1463,12 @@ def get_unclaimed_pallet_charges() -> list:
 def claim_awaiting_pallet_charge(charge_id: int, pallet_id: int, actor_id: int) -> dict:
     """
     Moves an awaiting_pallet_charges row onto a real, just-created pallet:
-    copies it into pallet_costs (cost_type='credit_card', source='quickbooks')
-    and marks the awaiting_pallet_charges row claimed. Returns the charge
-    dict (as it was before claiming) so the caller can push a matching
-    QuickBooks expense with the now-known pallet name, and remove its
-    #awaiting-pallet-charges card.
+    copies it into pallet_costs (cost_type/source matching how the charge
+    got here - 'credit_card'/'quickbooks' or 'invoice'/'manual') and marks
+    the awaiting_pallet_charges row claimed. Returns the charge dict (as it
+    was before claiming) so the caller can push a matching QuickBooks
+    expense (quickbooks-sourced charges only) with the now-known pallet
+    name, and remove its #awaiting-pallet-charges card.
     """
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM awaiting_pallet_charges WHERE id = ?", (charge_id,)).fetchone()
@@ -1432,11 +1476,15 @@ def claim_awaiting_pallet_charge(charge_id: int, pallet_id: int, actor_id: int) 
         if not charge or charge["claimed"]:
             return charge
 
+        is_quickbooks = charge["source"] == "quickbooks"
+        cost_type = "credit_card" if is_quickbooks else "invoice"
+        description = charge["merchant"] or (None if is_quickbooks else "Manually submitted invoice")
         conn.execute(
             """INSERT INTO pallet_costs
                (pallet_id, cost_type, amount, description, source, quickbooks_txn_id, created_by, created_at)
-               VALUES (?, 'credit_card', ?, ?, 'quickbooks', ?, ?, ?)""",
-            (pallet_id, charge["amount"], charge["merchant"], charge["quickbooks_txn_id"], actor_id, _now()),
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (pallet_id, cost_type, charge["amount"], description, charge["source"],
+             charge["quickbooks_txn_id"] if is_quickbooks else None, actor_id, _now()),
         )
         conn.execute(
             "UPDATE awaiting_pallet_charges SET claimed = 1, claimed_pallet_id = ?, claimed_at = ? WHERE id = ?",
