@@ -202,10 +202,28 @@ class NewPalletModal(discord.ui.Modal, title="New Pallet"):
         guild = interaction.guild
         name = self.pallet_name.value.strip()
 
+        # pallets.name is UNIQUE in the database and never freed up, even
+        # for an archived pallet (its Discord category gets deleted, but
+        # the database row - and its reserved name - stays permanently, by
+        # design; see /admin pallet-archive). Checked BEFORE touching
+        # Discord at all, so a collision here never leaves behind an
+        # orphaned category with no matching pallet.
+        existing_pallet = db.get_pallet_by_name(name)
+        if existing_pallet:
+            archived_note = (
+                " (that pallet is archived - its channels were removed, but the name stays reserved)"
+                if existing_pallet["archived"] else ""
+            )
+            await interaction.followup.send(
+                f"A pallet named `{name}` already exists{archived_note}. Pick a unique pallet name.",
+                ephemeral=True,
+            )
+            return
+
         # Discord category names have a 100 char limit and are case-insensitive
         # in the UI but not enforced unique by Discord - we enforce uniqueness ourselves.
-        existing = discord.utils.get(guild.categories, name=name)
-        if existing:
+        existing_category = discord.utils.get(guild.categories, name=name)
+        if existing_category:
             await interaction.followup.send(
                 f"A category named `{name}` already exists. Pick a unique pallet name.",
                 ephemeral=True,
