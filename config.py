@@ -319,8 +319,11 @@ CHANNEL_INFO = {
         "Charges allocated to \"New Pallet (not arrived yet)\", and manually-submitted "
         "invoices from #submit-invoices, sit here until a matching pallet is actually "
         "created - Start New Pallet will then offer to attach any unclaimed ones shown "
-        "here to it. Nothing to do here directly; this is just a standing board of "
-        "what's still unclaimed."
+        "here to it. A submitted invoice's card has a **Confirm logged in QuickBooks** "
+        "button (**Finance Management role**) - once you've entered it into QuickBooks "
+        "by hand, click it to remove the card; it can still be attached to a pallet "
+        "later regardless. QuickBooks-sourced charges don't have this button - those "
+        "get pushed to QuickBooks automatically when claimed."
     ),
     "submit-invoices": (
         "**Purchase Management role** posts here. One message per invoice: attach the "

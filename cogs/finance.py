@@ -285,6 +285,49 @@ async def _mark_charge_message_handled(message: discord.Message, note: str):
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 
+class ConfirmInvoiceLoggedButton(discord.ui.DynamicItem[discord.ui.Button], template=r"invoice_confirmed:(?P<charge_id>\d+)"):
+    """
+    The button on every manually-submitted invoice's #awaiting-pallet-charges
+    card (source='manual' only - a QuickBooks-sourced charge already gets
+    pushed to QuickBooks automatically when claimed, so it never needs
+    this). A DynamicItem (discord.py 2.4+) so it keeps working across bot
+    restarts, same reasoning as AllocateChargeButton - these cards can sit
+    for a while before Finance Management gets to them.
+
+    Clicking it only removes the card - it never touches the underlying
+    awaiting_pallet_charges row or marks it claimed, since a pallet may
+    still be created and claim it later regardless of whether it's already
+    been entered into QuickBooks by hand. The whole point is just "this
+    doesn't need to keep cluttering Discord - it's recorded in QuickBooks
+    now" - see the pallet-creation dropdown (pallet_setup.py) for where a
+    charge/invoice actually gets attached to a pallet's cost basis.
+    """
+
+    def __init__(self, charge_id: int):
+        super().__init__(discord.ui.Button(
+            label="Confirm logged in QuickBooks", style=discord.ButtonStyle.success, emoji="✅",
+            custom_id=f"invoice_confirmed:{charge_id}",
+        ))
+        self.charge_id = charge_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: dict):
+        return cls(int(match["charge_id"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        if not (_has_role(interaction, config.ROLE_FINANCE_MGMT) or _is_admin(interaction)):
+            await interaction.response.send_message(
+                f"You need the **{config.ROLE_FINANCE_MGMT}** role to do that.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await interaction.message.delete()
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+            pass
+        await interaction.followup.send("Confirmed - card removed.", ephemeral=True)
+
+
 async def _post_awaiting_charge_card(bot: discord.Client, charge: dict):
     """Posts a charge's standing card in #awaiting-pallet-charges once it's
     been filed there (no matching pallet exists yet) - stays up until a new
@@ -304,7 +347,10 @@ async def _post_awaiting_charge_card(bot: discord.Client, charge: dict):
             description=f"${charge['amount']:.2f}",
             color=discord.Color.dark_gold(),
         )
-        embed.set_footer(text="Manually submitted invoice - claimed automatically when a matching pallet is created")
+        embed.set_footer(
+            text="Manually submitted invoice - claimed automatically when a matching pallet is created. "
+                 "Once entered into QuickBooks, Finance Management can dismiss this card below."
+        )
         file = None
         photo_path = charge.get("invoice_photo_path")
         if photo_path and Path(photo_path).is_file():
@@ -312,7 +358,12 @@ async def _post_awaiting_charge_card(bot: discord.Client, charge: dict):
             file = discord.File(path, filename=path.name)
             if path.suffix.lower() in _IMAGE_EXTENSIONS:
                 embed.set_image(url=f"attachment://{path.name}")
-        message = await channel.send(embed=embed, file=file) if file else await channel.send(embed=embed)
+        view = discord.ui.View(timeout=None)
+        view.add_item(ConfirmInvoiceLoggedButton(charge["id"]))
+        message = (
+            await channel.send(embed=embed, file=file, view=view) if file
+            else await channel.send(embed=embed, view=view)
+        )
     else:
         embed = discord.Embed(
             title="📥 Awaiting a pallet",
@@ -533,9 +584,10 @@ class Finance(commands.Cog):
         # Registers the (txn_id -> button) template once so every
         # #credit-card-charges card's Allocate button keeps working across
         # bot restarts, not just the ones posted during this process's
-        # lifetime - see AllocateChargeButton.
+        # lifetime - see AllocateChargeButton. Same reasoning for
+        # ConfirmInvoiceLoggedButton on manually-submitted invoice cards.
         if not config.PRESERVE_DISCORD_HISTORY:
-            self.bot.add_dynamic_items(AllocateChargeButton)
+            self.bot.add_dynamic_items(AllocateChargeButton, ConfirmInvoiceLoggedButton)
 
     def cog_unload(self):
         self.credit_card_poll_loop.cancel()

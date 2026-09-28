@@ -290,6 +290,12 @@ automatically from QuickBooks:
   filed under the `invoice` cost type in the pallet's cost basis
   (`/finance pallet-summary`), ready for the accountant to enter into
   QuickBooks by hand from its card.
+- Once **Finance Management** has entered an invoice into QuickBooks by
+  hand, its card in `#awaiting-pallet-charges` has a **Confirm logged in
+  QuickBooks** button - clicking it just removes the card (no Discord
+  trail needed once it's recorded elsewhere). This never touches whether
+  it can still be claimed by a pallet later - that's independent of
+  whether the card exists.
 - Both `#credit-card-charges`/`#awaiting-pallet-charges` and
   `#submit-invoices` now live in their own **Finance** category, separate
   from the item-pipeline's Shared Pallet Pipeline category - run
