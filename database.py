@@ -474,6 +474,44 @@ def archive_pallet(pallet_id: int):
         )
 
 
+def delete_pallet_permanently(pallet_id: int):
+    """
+    Irreversibly erases a pallet and everything tied to it: every item and
+    its full history (item_events, item_holds, ebay_listing_data), and
+    every finance_transactions/pallet_costs row for the pallet or any of
+    its items. Frees pallets.name (UNIQUE) for reuse - unlike
+    archive_pallet, which deliberately keeps every row forever. The only
+    way back after this is a database backup; see cogs/admin_tools.py's
+    /admin pallet-delete for the confirmation step this requires.
+
+    Any awaiting_pallet_charges row claimed by this pallet is NOT deleted -
+    real money already logged there goes back into the unclaimed pool
+    (reverted exactly like an un-claim) for a different pallet to pick up,
+    rather than disappearing along with this one. The caller is
+    responsible for the pallet's Discord category/channels, same division
+    of labor as archive_pallet.
+    """
+    with get_conn() as conn:
+        item_ids = [r["id"] for r in conn.execute(
+            "SELECT id FROM items WHERE pallet_id = ?", (pallet_id,)
+        ).fetchall()]
+        if item_ids:
+            placeholders = ",".join("?" * len(item_ids))
+            conn.execute(f"DELETE FROM item_events WHERE item_id IN ({placeholders})", item_ids)
+            conn.execute(f"DELETE FROM item_holds WHERE item_id IN ({placeholders})", item_ids)
+            conn.execute(f"DELETE FROM ebay_listing_data WHERE item_id IN ({placeholders})", item_ids)
+        conn.execute("DELETE FROM finance_transactions WHERE pallet_id = ?", (pallet_id,))
+        conn.execute("DELETE FROM pallet_costs WHERE pallet_id = ?", (pallet_id,))
+        conn.execute(
+            "UPDATE awaiting_pallet_charges SET claimed = 0, claimed_pallet_id = NULL, claimed_at = NULL "
+            "WHERE claimed_pallet_id = ?",
+            (pallet_id,),
+        )
+        conn.execute("DELETE FROM items WHERE pallet_id = ?", (pallet_id,))
+        conn.execute("DELETE FROM channel_map WHERE pallet_id = ?", (pallet_id,))
+        conn.execute("DELETE FROM pallets WHERE id = ?", (pallet_id,))
+
+
 def map_channel(pallet_id: int, stage: str, channel_id: int):
     with get_conn() as conn:
         conn.execute(

@@ -447,6 +447,59 @@ class AdminTools(commands.Cog):
         except discord_resilience.TRANSIENT_DISCORD_ERRORS:
             pass
 
+    @pallet_group.command(
+        name="delete",
+        description="Permanently erase a pallet and all its data - frees its name for reuse.",
+    )
+    @app_commands.describe(
+        pallet_name="The pallet's exact name",
+        confirm="Set True to actually delete - default is preview-only",
+    )
+    async def pallet_delete(self, interaction: discord.Interaction, pallet_name: str, confirm: bool = False):
+        if await recovery_safety.block_destructive(interaction):
+            return
+        if not await _require_admin(interaction):
+            return
+
+        pallet = db.get_pallet_by_name(pallet_name)
+        if not pallet:
+            await interaction.response.send_message(f"No pallet named `{pallet_name}` found.", ephemeral=True)
+            return
+
+        fin = db.get_pallet_financials(pallet["id"])
+        status_flag = "archived" if pallet["archived"] else "still active"
+        cost_note = f"${fin['cost']:.2f} cost basis" if fin["cost"] is not None else "no cost entered"
+        revenue_note = f"${fin['revenue_so_far']:.2f} revenue recorded" if fin["revenue_so_far"] else "no sales recorded"
+
+        if not confirm:
+            await interaction.response.send_message(
+                f"⚠️ This **permanently deletes** **{pallet['name']}** ({status_flag}, "
+                f"{fin['items_received']} item(s), {cost_note}, {revenue_note}) - every item, its full "
+                f"history, and every cost/sale record tied to it. This cannot be undone except by "
+                f"restoring a database backup. Its Discord channels (if any still exist) are deleted too, "
+                f"and any unclaimed QuickBooks charge/invoice attached to it goes back to unclaimed "
+                f"rather than being lost. Run again with `confirm:True` to actually delete it - this "
+                f"frees `{pallet['name']}` for reuse.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        category = interaction.guild.get_channel(pallet["category_id"])
+        if category:
+            try:
+                for channel in list(category.channels):
+                    await channel.delete(reason=f"Pallet {pallet['name']} permanently deleted")
+                await category.delete(reason=f"Pallet {pallet['name']} permanently deleted")
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
+                await interaction.followup.send(f"Partially failed to delete channels: {e}", ephemeral=True)
+
+        db.delete_pallet_permanently(pallet["id"])
+        await interaction.followup.send(
+            f"🗑️ **{pallet['name']}** permanently deleted. The name is now free to reuse.",
+            ephemeral=True,
+        )
+
     @pallet_group.command(name="list", description="List all pallets and their item counts (admin only).")
     @app_commands.describe(include_archived="Include archived pallets too (default: yes)")
     async def pallet_list(self, interaction: discord.Interaction, include_archived: bool = True):

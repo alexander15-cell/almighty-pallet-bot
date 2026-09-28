@@ -733,6 +733,17 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   pallet's own category is gone.
 - `/pallet list [include_archived]` - shows every pallet with item counts by
   stage and active/archived status.
+- `/pallet delete <pallet_name> [confirm]` - **irreversible** (except by
+  restoring a database backup), unlike `/pallet archive` above. Actually
+  erases the pallet and everything tied to it - every item, its full
+  history, and every cost/sale record - which frees `pallets.name`
+  (unique in the database) for reuse, something archiving alone never
+  does. Works on an active or already-archived pallet by name (doesn't
+  need to be run inside its category, since an archived one has none
+  left); deletes its Discord channels too if they still exist. Preview by
+  default; add `confirm:True` to actually delete. Any unclaimed
+  QuickBooks charge/invoice attached to the pallet goes back to unclaimed
+  rather than being lost.
 - `/admin db-wipe` - **irreversible.** Requires both the Pallet Admin role AND real
   Discord Administrator permission on the server (two independent locks).
   Opens a form requiring you to type `DELETE EVERYTHING` exactly. On
