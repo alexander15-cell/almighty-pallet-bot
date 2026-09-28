@@ -24,6 +24,8 @@ def build_embeds() -> list:
         _ebay_commands_embed(),
         _fb_marketplace_commands_embed(),
         _finance_commands_embed(),
+        _finance_channels_embed(),
+        _website_shop_embed(),
         _shipping_commands_embed(),
         _pallet_item_commands_embed(),
         _admin_setup_commands_embed(),
@@ -45,7 +47,10 @@ def _overview_embed() -> discord.Embed:
             "more pallets come in. Every item's card always shows which pallet it "
             "belongs to, so nothing gets lost in the shared channels.\n\n"
             "To start tracking a new pallet, click **Start New Pallet** in "
-            "#new-pallet-tracking."
+            "#new-pallet-tracking.\n\n"
+            "A separate **Finance** category handles pallet costs (see the Finance "
+            "Channels section below), and an optional **Website Shop** (#website_shop) "
+            "can publish select items to a separate storefront website."
         ),
         color=COLOR,
     )
@@ -131,7 +136,7 @@ def _roles_embed() -> discord.Embed:
     embed.add_field(name="Data Entry", value="Posts new items in #data-entry.", inline=True)
     embed.add_field(name="Queue Review", value="Approves/edits/rejects items in #queue-review.", inline=True)
     embed.add_field(name="Listing Management", value="Lists approved items in #awaiting-listing; runs `/ebay`, `/fb-marketplace`, and `/pirate-ship` commands.", inline=True)
-    embed.add_field(name="Purchase Management", value="Sets a pallet's total cost with `/finance setprice`.", inline=True)
+    embed.add_field(name="Purchase Management", value="Sets a pallet's total cost with `/finance setprice`; submits invoices in #submit-invoices.", inline=True)
     embed.add_field(name="Finance Management", value="Records sales, refunds, expenses, shipping info - everything under `/finance`.", inline=True)
     embed.add_field(name="Pallet Admin", value="Full access everywhere, plus `/admin`, `/item`, `/pallet`, and `/setup` commands.", inline=True)
     return embed
@@ -175,6 +180,74 @@ def _finance_commands_embed() -> discord.Embed:
     return embed
 
 
+def _finance_channels_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="💰 Finance Channels",
+        description="Live in their own **Finance** category, separate from the item pipeline.",
+        color=COLOR,
+    )
+    embed.add_field(
+        name="#submit-invoices",
+        value=(
+            "**Purchase Management role** posts here. One message per invoice: attach the invoice "
+            "(photo or PDF) and type just the dollar amount (e.g. \"125.50\") in the same message, "
+            "then send. The bot logs it and removes the message - the practical way to track a "
+            "purchase when there's no direct QuickBooks connection."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="#awaiting-pallet-charges",
+        value=(
+            "Submitted invoices and QuickBooks credit-card charges allocated to \"New Pallet (not "
+            "arrived yet)\" sit here until a matching pallet is created - Start New Pallet then "
+            "offers to attach any unclaimed ones to it. A submitted invoice's card has a **Confirm "
+            "logged in QuickBooks** button (**Finance Management role**) - click it once you've "
+            "entered it into QuickBooks by hand to remove the card; it can still be attached to a "
+            "pallet later either way."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="#credit-card-charges",
+        value="New QuickBooks credit-card charges show up here automatically, if QuickBooks is connected (`/finance connect-quickbooks`).",
+        inline=False,
+    )
+    return embed
+
+
+def _website_shop_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🌐 Website Shop (optional)",
+        description=(
+            "If turned on, publishes new items to a separate storefront website through an "
+            "approval flow in **#website_shop**. Only items created after this feature was "
+            "turned on are ever eligible - it never adopts pre-existing inventory."
+        ),
+        color=COLOR,
+    )
+    embed.add_field(
+        name="How it works",
+        value=(
+            "Once an eligible item is Listed, it's automatically posted as a review card in "
+            "#website_shop. Approving/editing a card there is restricted to the specific staff "
+            "configured for it (not a role) - ask a Pallet Admin if you need access. Enter the "
+            "selling price and full eBay item link, then tap **Confirm** to approve it for the "
+            "website, or **Enter price and eBay link** to send it back for changes - nothing "
+            "publishes without that explicit approval."
+        ),
+        inline=False,
+    )
+    embed.add_field(name="/website status", value="**Listing Management role.** Check publishing mode and delivery counts.", inline=False)
+    embed.add_field(name="/website review", value="**Listing Management role.** Force-check for new items to review right now.", inline=False)
+    embed.add_field(
+        name="/website hold <item_id>",
+        value="**Listing Management role.** Put a website-listed item on hold and queue its removal from the site.",
+        inline=False,
+    )
+    return embed
+
+
 def _shipping_commands_embed() -> discord.Embed:
     embed = discord.Embed(title="💬 Commands - Shipping (`/pirate-ship ...`)", color=COLOR)
     embed.add_field(
@@ -195,6 +268,11 @@ def _pallet_item_commands_embed() -> discord.Embed:
     embed = discord.Embed(title="💬 Commands - Pallets & Items", color=COLOR)
     embed.add_field(name="/pallet list [include_archived]", value="List all pallets with item counts and status.", inline=False)
     embed.add_field(name="/pallet archive", value="Close out a finished pallet: deletes its Discord channels, keeps all data.", inline=False)
+    embed.add_field(
+        name="/pallet delete <pallet_name> [confirm]",
+        value="⚠️ Irreversible - actually erases a pallet and everything tied to it (items, history, cost/sale records), freeing its name for reuse. Unlike archive, which keeps every record forever. Preview by default; `confirm:True` to actually delete.",
+        inline=False,
+    )
     embed.add_field(name="/item delete <item_number>", value="Delete a single item by its number (admin only).", inline=False)
     embed.add_field(
         name="/item duplicate <item_number> <count>",
@@ -216,5 +294,10 @@ def _admin_setup_commands_embed() -> discord.Embed:
     embed.add_field(name="/admin purge-old-photos [days] [confirm]", value="Preview/delete R2 photo copies for items sold past the retention window (local copies untouched).", inline=False)
     embed.add_field(name="/admin db-wipe", value="⚠️ Irreversible - permanently erases all pallet/item data, and R2 photos too if configured.", inline=False)
     embed.add_field(name="/setup shared-channels / hub / info-channel", value="One-time server setup commands (this channel included).", inline=False)
+    embed.add_field(
+        name="/setup rebind-channel <stage> <channel>",
+        value="Point a shared channel (e.g. #awaiting-pallet-charges) at a different Discord channel - for after accidentally deleting and recreating one, since a same-named replacement doesn't fix itself.",
+        inline=False,
+    )
     embed.set_footer(text="All /admin and /pallet, /setup commands (and /item delete, /item duplicate) require the Pallet Admin role - /item hold is the one exception, see Pallets & Items.")
     return embed
