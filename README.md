@@ -1116,16 +1116,12 @@ this scale.
 
 ## Optional: publishing to a separate website
 
-There are two independent ways to add a `#website_shop` approval flow that
-publishes items to a separate storefront website - pick one, don't run both
-against the same website connection.
-
-### Integrated (cogs/website_shop.py) - recommended
-
-Runs inside this same `bot.py`, using your real database and your existing
-Discord bot token - no second bot application, no separate channels to set
-up for old pallets vs. new ones. Off by default
-(`WEBSITE_SHOP_ENABLED=false` in `.env`); turning it on adds a cog that:
+`cogs/website_shop.py` adds a `#website_shop` approval flow that publishes
+items to a separate storefront website. Runs inside this same `bot.py`,
+using your real database and your existing Discord bot token - no second
+bot application, no separate channels to set up for old pallets vs. new
+ones. Off by default (`WEBSITE_SHOP_ENABLED=false` in `.env`); turning it
+on adds a cog that:
 
 - Only ever manages items created *after* it's turned on (a fixed safety
   floor - see `config.WEBSITE_SHOP_ITEM_ID_FLOOR`'s comment) - it never
@@ -1133,27 +1129,13 @@ up for old pallets vs. new ones. Off by default
   new item belongs to.
 - Posts a review card to one dedicated `#website_shop` channel
   (`WEBSITE_SHOP_CHANNEL_ID`) for staff (`WEBSITE_SHOP_OPERATOR_IDS`) to
-  enter the price/eBay link and approve, exactly like `combined_bot.py`'s
-  flow below - same reused `shop_discord.py`/`shop_approval.py`/
-  `combined_intake.py`/`combined_delivery.py`/`publisher/` modules.
+  enter the price/eBay link and approve - using the reused
+  `shop_discord.py`/`shop_approval.py`/`combined_intake.py`/
+  `combined_delivery.py`/`publisher/` modules.
 - Backs up its own two sqlite stores (`shop_approval.sqlite`,
   `website_journal.sqlite`) alongside the main database automatically
   (`backup.py`).
 
 See `.env.example`'s "integrated website-shop publishing" section for every
-setting it needs.
-
-### Standalone (combined_bot.py)
-
-A second, fully independent entry point in this same repo -
-`python bot.py` is completely unaffected by its presence and behaves
-exactly as documented everywhere else in this file. Running
-`combined_bot.py` instead adds the same review/approval flow, but using its
-own isolated database/photo storage and a *second* Discord bot application/
-token, entirely separate from your main bot - see `COMBINED_BOT_SETUP.md`
-for the full setup walkthrough (Setup/Check/Preview/Start). Useful if you
-want the website-publishing workflow to run as a genuinely separate
-process/deployment rather than folded into your main bot.
-
-Either way, it only ever runs if someone explicitly sets it up and turns it
-on; nothing here activates by itself.
+setting it needs. It only ever runs if this is explicitly turned on;
+nothing here activates by itself.

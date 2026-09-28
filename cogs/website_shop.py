@@ -1,9 +1,7 @@
 """
 Website-publishing "#website_shop" approval flow, integrated directly into
 this bot - same process, same database, same Discord token as every other
-cog here. See config.WEBSITE_SHOP_ENABLED's own comment for why this exists
-alongside combined_bot.py (a separate, isolated deployment of the same
-underlying modules) rather than replacing it.
+cog here.
 
 Off by default: bot.py only adds this cog's module to its COGS list when
 config.WEBSITE_SHOP_ENABLED is true, so nothing here runs, nothing here is
@@ -11,11 +9,11 @@ even imported, unless that's explicitly turned on.
 
 Reuses combined_intake.py (the "which items are eligible, in what state"
 adapter) and combined_delivery.py (the durable approval -> website delivery
-bridge) completely unchanged from the separate combined_bot.py deployment -
-see those modules' own docstrings for the safety invariants they enforce
-(only items at/above config.WEBSITE_SHOP_ITEM_ID_FLOOR are ever considered,
-so nothing here can adopt or touch a pre-existing item). shop_discord.py's
-views/embeds and shop_approval.py's durable store are likewise reused as-is.
+bridge) - see those modules' own docstrings for the safety invariants they
+enforce (only items at/above config.WEBSITE_SHOP_ITEM_ID_FLOOR are ever
+considered, so nothing here can adopt or touch a pre-existing item).
+shop_discord.py's views/embeds and shop_approval.py's durable store are
+likewise reused as-is.
 """
 import logging
 from pathlib import Path

@@ -47,10 +47,9 @@ def record(fresh_db, status=db.STATUS_LISTED):
 
 
 def test_real_default_is_unprotected_and_bad_switch_fails(tmp_path):
-    # The standalone bot's real default is UNprotected (matches its behavior
-    # before this recovery mode existed) - combined_bot.py's own settings
-    # loader (combined_settings.activate_intake) turns protection on
-    # explicitly for itself, rather than depending on this default.
+    # The bot's real default is UNprotected (matches its behavior before
+    # this recovery mode existed) - set PRESERVE_DISCORD_HISTORY=true
+    # explicitly to turn protection on for a recovery deployment.
     env = {**os.environ, "PYTHON_DOTENV_DISABLED": "1"}
     env.pop("PRESERVE_DISCORD_HISTORY", None)
     result = subprocess.run([sys.executable, "-c", "import config; assert not config.PRESERVE_DISCORD_HISTORY"],
@@ -70,9 +69,7 @@ def test_old_card_cleanup_has_zero_discord_writes():
     message.edit.assert_not_awaited()
 
 
-def test_startup_does_not_start_loops_or_sync_commands(monkeypatch):
-    import combined_bot as entry
-    import discord
+def test_startup_does_not_start_loops(monkeypatch):
     for loop in (flow.ItemFlow.stale_check_loop, finance.Finance.credit_card_poll_loop,
                  admin.AdminTools.backup_loop):
         monkeypatch.setattr(loop, "start", Mock(side_effect=AssertionError("no timer")))
@@ -82,27 +79,6 @@ def test_startup_does_not_start_loops_or_sync_commands(monkeypatch):
         finance.Finance(fake)
         admin.AdminTools(fake)
     asyncio.run(run())
-    # The guarded package no longer constructs a global client on import.
-    # Its ordinary entry point performs offline checking only; a connection
-    # and this application's command sync each require explicit CLI switches.
-    assert not hasattr(entry, "bot")
-    checked_settings = object()
-    loader = Mock(return_value=checked_settings)
-    checker = Mock()
-    activate = Mock(side_effect=AssertionError("no runtime activation"))
-    start = AsyncMock(side_effect=AssertionError("no connection"))
-    monkeypatch.setattr(entry, "load_settings", loader)
-    monkeypatch.setattr(entry, "check_state", checker)
-    monkeypatch.setattr(entry, "activate_intake", activate)
-    monkeypatch.setattr(discord.Client, "start", start)
-    monkeypatch.setattr(sys, "argv", ["combined_bot.py"])
-    entry.main()
-    assert loader.call_args.kwargs == {"connect": False, "send": False}
-    checker.assert_called_once_with(checked_settings)
-    activate.assert_not_called()
-    start.assert_not_awaited()
-    fake.tree.copy_global_to.assert_not_called()
-    fake.tree.sync.assert_not_called()
 
 
 def test_resubmission_retains_original_discord_and_photo(fresh_db, tmp_path, monkeypatch):

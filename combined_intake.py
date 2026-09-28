@@ -50,15 +50,19 @@ def _canonical(value):
 
 class IntakeAdapter:
     def __init__(self, bot, settings, store):
-        # Import only after the guarded entry point has configured isolated
-        # intake paths. Importing combined_intake itself never loads dotenv.
+        # Import only after config's own module-level setup has run.
+        # Importing combined_intake itself never loads dotenv.
         import config
         import database
 
-        # Two callers construct this: combined_bot.py's isolated deployment
-        # (COMBINED_MODE + PRESERVE_DISCORD_HISTORY, unchanged) and this
-        # repo's own bot.py, integrated via cogs/website_shop.py
+        # Constructed by bot.py, integrated via cogs/website_shop.py
         # (config.WEBSITE_SHOP_ENABLED) - see that config constant's comment.
+        # combined_scope (COMBINED_MODE + PRESERVE_DISCORD_HISTORY) is
+        # permanently False now that the separate standalone deployment
+        # that used to set COMBINED_MODE was removed - kept here rather
+        # than deleted since this file's own tests still exercise it as a
+        # documented security invariant (an ordinary card must never carry
+        # website markers when COMBINED_MODE is set).
         combined_scope = getattr(config, "COMBINED_MODE", False) and config.PRESERVE_DISCORD_HISTORY
         integrated_scope = getattr(config, "WEBSITE_SHOP_ENABLED", False)
         if (not (combined_scope or integrated_scope)
@@ -145,13 +149,15 @@ class IntakeAdapter:
         if item is None:
             return None
         pallet_id = item.get("pallet_id")
-        # "data-entry" is only checked when present in settings.channels - the
-        # isolated combined_bot.py deployment has exactly one such channel to
-        # verify against; this repo's own integrated bot.py (see
-        # cogs/website_shop.py) has one per pallet, so identity here isn't a
-        # meaningful safety boundary for it - the item_id_floor check above
-        # already ensures only items created after this feature was turned on
-        # are ever considered, regardless of which pallet they belong to.
+        # "data-entry" is only checked when present in settings.channels.
+        # bot.py (see cogs/website_shop.py's _AdapterSettings) never
+        # supplies that key - it has one data-entry channel per pallet, not
+        # one fixed channel, so identity here isn't a meaningful safety
+        # boundary for it - the item_id_floor check above already ensures
+        # only items created after this feature was turned on are ever
+        # considered, regardless of which pallet they belong to. This
+        # branch is effectively dead with only that one caller remaining,
+        # kept as-is since it's shared, tested code.
         if (item.get("id") != number or type(pallet_id) is not int or pallet_id <= 0
                 or type(item.get("item_number")) is not int or item["item_number"] <= 0
                 or ("data-entry" in self.settings.channels

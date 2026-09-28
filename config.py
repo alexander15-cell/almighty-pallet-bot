@@ -6,10 +6,12 @@ import os
 import re
 from dotenv import load_dotenv
 
-# The combined website-publishing entry point (combined_bot.py) sets this
-# before importing config, and supplies every setting itself (via
-# combined_settings.activate_intake) instead of a .env file - see that
-# module's docstring.
+# FOUR_GUYS_COMBINED is never set by anything in this repo anymore (the
+# separate standalone combined_bot.py deployment that used to set it before
+# importing config was removed - see cogs/website_shop.py for the
+# integrated website-shop feature that replaced it). COMBINED_MODE stays
+# permanently False here; combined_intake.py's own COMBINED_MODE branch is
+# effectively dead but left in place since it's shared, tested code.
 if os.environ.get("FOUR_GUYS_COMBINED") != "1":
     load_dotenv()
 
@@ -25,12 +27,12 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")  # optional - only used by th
 # the bot at startup with a ValueError instead of using the default.
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID") or "0")  # your server's ID
 
-# Recovery/combined deployment: keep every existing Discord message
-# unchanged - edits post a new card instead of editing/deleting the old
-# one, background loops that would otherwise touch old cards don't start,
-# and destructive admin commands refuse to run (see recovery_safety.py).
-# Defaults OFF so the standalone bot's behavior is unchanged - combined_bot.py
-# (combined_settings.activate_intake) turns this on explicitly for itself.
+# Recovery deployment: keep every existing Discord message unchanged -
+# edits post a new card instead of editing/deleting the old one, background
+# loops that would otherwise touch old cards don't start, and destructive
+# admin commands refuse to run (see recovery_safety.py). Defaults OFF so
+# the bot's normal behavior is unchanged; set to true only when recovering
+# an installation that needs its existing message history preserved.
 _history_setting = os.getenv("PRESERVE_DISCORD_HISTORY", "false").strip().lower()
 if _history_setting not in {"true", "false"}:
     raise ValueError("PRESERVE_DISCORD_HISTORY must be true or false")
@@ -56,29 +58,26 @@ WEBSITE_MARKERS_ENABLED = os.getenv("WEBSITE_MARKERS_ENABLED", "false").strip().
 # database, same Discord token - for publishing items to a separate
 # storefront website, reusing the website's existing Publisher contract/
 # transport/durable journal (see publisher/). Defaults OFF; every setting
-# below is required only once this is turned on. This reuses
-# combined_intake.py/combined_delivery.py, originally built for the
-# separate combined_bot.py deployment - see that module's own comments for
-# why it only ever manages items at/above WEBSITE_SHOP_ITEM_ID_FLOOR
-# (never adopts historical inventory) and always uses the fixed "FGNEW-"
-# SKU prefix.
+# below is required only once this is turned on. combined_intake.py/
+# combined_delivery.py (see their own comments) enforce that this only ever
+# manages items at/above WEBSITE_SHOP_ITEM_ID_FLOOR (never adopts
+# historical inventory) and always uses the fixed "FGNEW-" SKU prefix.
 WEBSITE_SHOP_ENABLED = os.getenv("WEBSITE_SHOP_ENABLED", "false").strip().lower() == "true"
 WEBSITE_SHOP_ITEM_ID_FLOOR = 1_000_000_000
 WEBSITE_SHOP_SKU_PREFIX = "FGNEW-"
 WEBSITE_SHOP_CHANNEL_ID = int(os.getenv("WEBSITE_SHOP_CHANNEL_ID") or "0")
 # Discord user IDs allowed to act in #website_shop (comma-separated) - this
-# module's approval store checks a fixed staff list, not a role, since it's
-# reused unchanged from the separate deployment it was built for.
+# module's approval store checks a fixed staff list, not a role.
 WEBSITE_SHOP_OPERATOR_IDS = tuple(
     v.strip() for v in (os.getenv("WEBSITE_SHOP_OPERATOR_IDS") or "").split(",") if v.strip()
 )
 WEBSITE_URL = os.getenv("WEBSITE_URL", "")
 WEBSITE_SOURCE_ID = os.getenv("WEBSITE_SOURCE_ID", "")
 WEBSITE_SECRET = os.getenv("WEBSITE_SECRET", "")
-# Separate from WEBSITE_SHOP_ENABLED, same staged-rollout reasoning as
-# combined_bot.py's publishEnabled: turn the shop review flow on first
-# (WEBSITE_SHOP_ENABLED), confirm it behaves, THEN also turn this on once
-# ready to actually send approved items to the real website.
+# Separate from WEBSITE_SHOP_ENABLED for a staged rollout: turn the shop
+# review flow on first (WEBSITE_SHOP_ENABLED), confirm it behaves, THEN
+# also turn this on once ready to actually send approved items to the real
+# website.
 WEBSITE_PUBLISH_ENABLED = os.getenv("WEBSITE_PUBLISH_ENABLED", "false").strip().lower() == "true"
 WEBSITE_SHOP_POLL_SECONDS = int(os.getenv("WEBSITE_SHOP_POLL_SECONDS") or "30")
 

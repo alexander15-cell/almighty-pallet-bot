@@ -10,27 +10,6 @@ import pytest
 from website_contract import build_website_contract, FOOTER_PREFIX
 
 
-def test_local_intake_does_not_subscribe_to_direct_messages():
-    from combined_runtime import GuardedBot
-    settings = SimpleNamespace(application_id="100000000000000001", guild_id="100000000000000002",
-        operator_ids=("100000000000000003",), channels={"data-entry": "100000000000000004"},
-        item_id_floor=1000000000)
-    async def check():
-        bot = GuardedBot(settings)
-        try:
-            assert bot.intents.guild_messages
-            assert bot.intents.message_content
-            assert not bot.intents.dm_messages
-            assert not bot.intents.dm_reactions
-            assert not bot.intents.dm_typing
-            assert not bot.intents.members
-            assert not bot.intents.presences
-            assert not bot.combined_guard.ready
-        finally:
-            await bot.close()
-    asyncio.run(check())
-
-
 def example():
     return ({"id": 12, "pallet_id": 3, "item_number": 2, "status": "awaiting_listing",
              "ai_title": "Unapproved AI title", "ai_description": "Approved description.",

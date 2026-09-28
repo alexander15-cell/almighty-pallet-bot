@@ -1,12 +1,12 @@
 """
 The website-shop feature integrated directly into this bot's own process
 (cogs/website_shop.py) - as opposed to tests/test_combined_intake.py, which
-covers the separate, isolated combined_bot.py deployment of the same
-underlying combined_intake.py/combined_delivery.py modules.
+unit-tests combined_intake.py/combined_delivery.py's own COMBINED_MODE code
+path directly, independent of any particular bot process.
 
 Covers the three actual code changes this integration needed:
 - combined_intake.IntakeAdapter accepting config.WEBSITE_SHOP_ENABLED as an
-  alternative to combined_bot.py's COMBINED_MODE + PRESERVE_DISCORD_HISTORY.
+  alternative to COMBINED_MODE + PRESERVE_DISCORD_HISTORY.
 - IntakeAdapter._owned_item() skipping the data-entry channel-identity check
   when "data-entry" isn't a key in settings.channels at all (this bot has one
   such channel per pallet, not one for the whole server).
@@ -52,8 +52,9 @@ def integrated_case(fresh_db, tmp_path, monkeypatch):
     fresh_db.set_shared_channel("sold", int(SOLD))
 
     # Two DIFFERENT pallets, each with its OWN distinct data-entry channel -
-    # unlike combined_bot.py's isolated deployment (always exactly one
-    # pallet/data-entry channel), this bot has many.
+    # this bot has one per pallet, not a single fixed channel, which is why
+    # IntakeAdapter._owned_item() only checks "data-entry" identity when
+    # that key is actually present in settings.channels.
     pallet_a = fresh_db.create_pallet("Pallet A", category_id=111, created_by=int(USER))
     fresh_db.map_channel(pallet_a, "data-entry", 200000000000000001)
     pallet_b = fresh_db.create_pallet("Pallet B", category_id=112, created_by=int(USER))
@@ -181,8 +182,8 @@ def test_item_flow_saves_absolute_photo_paths_even_when_config_path_is_relative(
     ("data/photos" in production), and cogs/item_flow.py used to compute its
     own PHOTO_DIR constant as `Path(config.PHOTO_DIR)` unchanged - so every
     photo path saved into an item's photo_urls was a relative string.
-    combined_intake.py's _photos() (reused unchanged from combined_bot.py)
-    requires every stored path to be absolute - a real security boundary,
+    combined_intake.py's _photos() requires every stored path to be
+    absolute - a real security boundary,
     not something to loosen - so every real item created through the normal
     Data Entry flow was silently rejected from #website_shop with
     "invalid_intake_photos", the very first time any item ever reached that
