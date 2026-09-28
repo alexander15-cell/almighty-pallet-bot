@@ -50,7 +50,10 @@ def _overview_embed() -> discord.Embed:
             "#new-pallet-tracking.\n\n"
             "A separate **Finance** category handles pallet costs (see the Finance "
             "Channels section below), and an optional **Website Shop** (#website_shop) "
-            "can publish select items to a separate storefront website."
+            "can publish select items to a separate storefront website.\n\n"
+            "Not sure which command you need? Run **/help** and describe what you're "
+            "trying to do (e.g. `/help query:submit invoice`) and it'll point you at "
+            "the right command, button, or channel."
         ),
         color=COLOR,
     )

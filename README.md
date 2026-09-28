@@ -428,6 +428,16 @@ Safe to re-run any time - it clears its own previous guide messages first
 (anything anyone else posted is left alone) and reposts fresh, so running it
 again after a feature change keeps the guide accurate.
 
+### The `/help` command
+
+For anyone who doesn't want to read the whole guide - `/help query:<what
+you're trying to do>` searches a curated list of commands/buttons/channels
+by plain-language keywords (`help_content.py`) and replies ephemerally with
+the best matches, e.g. `/help query:submit invoice` or
+`/help query:delete a pallet`. Running `/help` with no query just points
+back at `#information` and shows an example. Keep `help_content.py`'s
+`ENTRIES` in sync with `information_content.py` when adding a new command.
+
 ### Running without AI review
 
 Leave `ANTHROPIC_API_KEY` blank in `.env` (and leave `AI_REVIEW_BACKEND` at

@@ -31,6 +31,7 @@ COGS = [
     "cogs.ebay",
     "cogs.fb_marketplace",
     "cogs.pirate_ship",
+    "cogs.help",
 ]
 if config.WEBSITE_SHOP_ENABLED:
     # Off by default (see config.WEBSITE_SHOP_ENABLED) - the module isn't
