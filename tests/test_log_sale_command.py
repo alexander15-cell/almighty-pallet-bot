@@ -196,6 +196,55 @@ def test_modal_pre_fills_one_line_per_item_for_a_bundle(fresh_db, cog):
     assert "Pallet A#2: cost 0.00, cogs 0.00" in modal.entries.default
 
 
+def test_modal_prefills_manifest_cost_for_a_matched_single_item(fresh_db, cog):
+    pallet_id = fresh_db.create_pallet("Pallet A", category_id=1, created_by=1)
+    item_id = fresh_db.create_item(pallet_id, "Widget", [], 1)
+    charge_id = fresh_db.create_manual_invoice_charge(100.0, submitted_by=1)
+    lot_id = fresh_db.upsert_manifest_lot(charge_id, 100.0, 200.0, "m.csv", 1, [
+        {"sku": "A1", "product": "Widget", "retail_price": 150.0},
+    ])
+    lines = fresh_db.get_manifest_lines(lot_id)
+    fresh_db.match_manifest_line(lines[0]["id"], item_id)
+
+    interaction = _interaction()
+    asyncio.run(Finance.log_sale.callback(cog, interaction, "Pallet A#1", 10.0, "eBay"))
+
+    # cost = (invoice_amount / total_retail_value) * item retail price = (100/200)*150 = 75.00
+    assert interaction.response.modal.entries.default == "cost 75.00, cogs 75.00"
+
+
+def test_modal_prefills_manifest_cost_per_item_in_a_bundle(fresh_db, cog):
+    pallet_id = fresh_db.create_pallet("Pallet A", category_id=1, created_by=1)
+    matched_item_id = fresh_db.create_item(pallet_id, "Widget", [], 1)
+    fresh_db.create_item(pallet_id, "Gadget", [], 1)
+    charge_id = fresh_db.create_manual_invoice_charge(100.0, submitted_by=1)
+    lot_id = fresh_db.upsert_manifest_lot(charge_id, 100.0, 200.0, "m.csv", 1, [
+        {"sku": "A1", "product": "Widget", "retail_price": 150.0},
+    ])
+    lines = fresh_db.get_manifest_lines(lot_id)
+    fresh_db.match_manifest_line(lines[0]["id"], matched_item_id)
+
+    interaction = _interaction()
+    asyncio.run(Finance.log_sale.callback(cog, interaction, "Pallet A#1, Pallet A#2", 10.0, "eBay"))
+
+    default = interaction.response.modal.entries.default
+    assert "Pallet A#1: cost 75.00, cogs 75.00" in default
+    assert "Pallet A#2: cost 0.00, cogs 0.00" in default
+
+
+def test_modal_flags_manifest_unmatched_item_instead_of_a_plain_blank(fresh_db, cog):
+    pallet_id = fresh_db.create_pallet("Pallet A", category_id=1, created_by=1)
+    item_id = fresh_db.create_item(pallet_id, "Widget", [], 1)
+    fresh_db.mark_item_manifest_unmatched(item_id)
+
+    interaction = _interaction()
+    asyncio.run(Finance.log_sale.callback(cog, interaction, "Pallet A#1", 10.0, "eBay"))
+
+    default = interaction.response.modal.entries.default
+    assert "no manifest match" in default
+    assert "cost 0.00, cogs 0.00" in default
+
+
 # ---------------------------------------------------------------- cogs modal
 
 

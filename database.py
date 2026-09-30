@@ -139,6 +139,16 @@ def _migrate_add_columns(conn):
         # invoice image/PDF (only ever set for source='manual').
         "ALTER TABLE awaiting_pallet_charges ADD COLUMN source TEXT NOT NULL DEFAULT 'quickbooks'",
         "ALTER TABLE awaiting_pallet_charges ADD COLUMN invoice_photo_path TEXT",
+        # Reverse pointer to manifest_lines.matched_item_id (set together,
+        # see database.match_manifest_line) - lets an item's own row answer
+        # "which manifest line am I" without a join. manifest_unmatched is
+        # set only via an explicit "No match" in Queue Review (never
+        # inferred) - see database.mark_item_manifest_unmatched - and stays
+        # a permanent flag through every later stage, since an item that
+        # couldn't be matched still needs a visible note that its COGS will
+        # have to be entered manually at sale time.
+        "ALTER TABLE items ADD COLUMN manifest_line_id INTEGER",
+        "ALTER TABLE items ADD COLUMN manifest_unmatched INTEGER DEFAULT 0",
     ]
     for stmt in migrations:
         try:
@@ -455,6 +465,49 @@ def init_db():
                 purchase_price   REAL NOT NULL,
                 cogs_amount      REAL NOT NULL
             );
+
+            -- One row per manifest spreadsheet attached in #submit-invoices
+            -- (see manifest_import.py) - a manifest arrives keyed to an
+            -- awaiting_pallet_charges row (the invoice), since the pallet
+            -- itself doesn't exist yet. pallet_id is filled in once a real
+            -- pallet claims that charge (see database.claim_manifest_lot).
+            -- invoice_amount/total_retail_value are exactly what
+            -- get_item_manifest_cost's proportional COGS formula needs:
+            -- item cost = (invoice_amount / total_retail_value) * that
+            -- item's manifest_lines.retail_price - confirmed by the user as
+            -- how a liquidation lot's true per-item cost is estimated when
+            -- only a manifest's RETAIL values, not real per-item costs, are
+            -- known. awaiting_charge_id is UNIQUE so re-uploading a
+            -- corrected manifest for the same invoice replaces this row's
+            -- lines in place rather than creating a second, competing lot.
+            CREATE TABLE IF NOT EXISTS manifest_lots (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                awaiting_charge_id   INTEGER UNIQUE REFERENCES awaiting_pallet_charges(id),
+                pallet_id            INTEGER REFERENCES pallets(id),
+                invoice_amount       REAL NOT NULL,
+                total_retail_value   REAL NOT NULL,
+                manifest_filename    TEXT,
+                submitted_by         INTEGER,
+                created_at           TEXT NOT NULL
+            );
+
+            -- One row per physical unit exploded out of a manifest's
+            -- rows/quantities at import time (see manifest_import.py) - NOT
+            -- a 1:1 copy of the spreadsheet's raw rows, since a liquidator's
+            -- manifest can list the same SKU multiple times or bundle a
+            -- quantity into one row. matched_item_id is set once Queue
+            -- Review confirms which real item this manifest line is (see
+            -- items.manifest_line_id, the reverse pointer) - stays NULL for
+            -- a line nobody's matched to an item yet.
+            CREATE TABLE IF NOT EXISTS manifest_lines (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                manifest_lot_id  INTEGER NOT NULL REFERENCES manifest_lots(id),
+                sku              TEXT,
+                product          TEXT,
+                retail_price     REAL NOT NULL,
+                matched_item_id  INTEGER REFERENCES items(id),
+                created_at       TEXT NOT NULL
+            );
             """
         )
         _migrate_add_columns(conn)
@@ -558,6 +611,18 @@ def delete_pallet_permanently(pallet_id: int):
             conn.execute(f"DELETE FROM item_holds WHERE item_id IN ({placeholders})", item_ids)
             conn.execute(f"DELETE FROM ebay_listing_data WHERE item_id IN ({placeholders})", item_ids)
             conn.execute(f"DELETE FROM sale_items WHERE item_id IN ({placeholders})", item_ids)
+        # manifest_lines.matched_item_id references items(id) - must go
+        # before the items themselves. This pallet's own manifest_lot (if
+        # any was ever claimed for it) is deleted outright along with it,
+        # same "irreversibly erases everything tied to it" rule as the rest
+        # of this function - an un-claimed manifest still sitting under its
+        # #submit-invoices charge (pallet_id still NULL) is untouched.
+        conn.execute(
+            "DELETE FROM manifest_lines WHERE manifest_lot_id IN "
+            "(SELECT id FROM manifest_lots WHERE pallet_id = ?)",
+            (pallet_id,),
+        )
+        conn.execute("DELETE FROM manifest_lots WHERE pallet_id = ?", (pallet_id,))
         conn.execute("DELETE FROM finance_transactions WHERE pallet_id = ?", (pallet_id,))
         conn.execute("DELETE FROM pallet_costs WHERE pallet_id = ?", (pallet_id,))
         conn.execute(
@@ -1649,6 +1714,27 @@ def create_manual_invoice_charge(amount: float, submitted_by: int) -> int:
     )
 
 
+def get_latest_unclaimed_manual_charge_for_user(user_id: int):
+    """
+    The most recent still-unclaimed #submit-invoices charge this person
+    submitted - what a manifest sent as its own follow-up message (no
+    dollar amount, see cogs/finance.py's on_message) attaches itself to,
+    since at that point there's no charge_id in the message to key off of.
+    Deliberately not restricted to charges with no manifest yet - sending a
+    corrected manifest after a bad one is exactly the same "just send the
+    file again" flow (see database.upsert_manifest_lot's replace-in-place
+    behavior).
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            """SELECT * FROM awaiting_pallet_charges
+               WHERE source = 'manual' AND claimed = 0 AND allocated_by = ?
+               ORDER BY created_at DESC LIMIT 1""",
+            (user_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def set_awaiting_pallet_charge_message(charge_id: int, message_id: int):
     with get_conn() as conn:
         conn.execute("UPDATE awaiting_pallet_charges SET message_id = ? WHERE id = ?", (message_id, charge_id))
@@ -1721,6 +1807,166 @@ def claim_awaiting_pallet_charge(charge_id: int, pallet_id: int, actor_id: int) 
             (pallet_id, _now(), charge_id),
         )
     return charge
+
+
+# --------------------------------------------------------------- manifest --
+
+def upsert_manifest_lot(awaiting_charge_id: int, invoice_amount: float, total_retail_value: float,
+                         manifest_filename: str, submitted_by: int, lines: list) -> int:
+    """
+    Parses to a manifest_lots row + its manifest_lines (see manifest_import.py
+    for what `lines` looks like - one dict per exploded physical unit, each
+    with sku/product/retail_price). awaiting_charge_id is UNIQUE, so
+    re-uploading a corrected manifest for the same #submit-invoices charge
+    REPLACES the previous lot's lines in place (deleting any prior match
+    links - safe, since a lot can only be re-uploaded before it's ever
+    claimed by a real pallet, long before Queue Review could have matched
+    anything to it) rather than creating a second, competing lot.
+    """
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT id FROM manifest_lots WHERE awaiting_charge_id = ?", (awaiting_charge_id,)
+        ).fetchone()
+        if existing:
+            lot_id = existing["id"]
+            conn.execute(
+                """UPDATE manifest_lots SET invoice_amount = ?, total_retail_value = ?,
+                   manifest_filename = ?, submitted_by = ? WHERE id = ?""",
+                (invoice_amount, total_retail_value, manifest_filename, submitted_by, lot_id),
+            )
+            conn.execute("DELETE FROM manifest_lines WHERE manifest_lot_id = ?", (lot_id,))
+        else:
+            cur = conn.execute(
+                """INSERT INTO manifest_lots
+                   (awaiting_charge_id, invoice_amount, total_retail_value, manifest_filename,
+                    submitted_by, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (awaiting_charge_id, invoice_amount, total_retail_value, manifest_filename,
+                 submitted_by, _now()),
+            )
+            lot_id = cur.lastrowid
+
+        now = _now()
+        conn.executemany(
+            """INSERT INTO manifest_lines (manifest_lot_id, sku, product, retail_price, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            [(lot_id, line.get("sku"), line.get("product"), line["retail_price"], now) for line in lines],
+        )
+        return lot_id
+
+
+def get_manifest_lot(lot_id: int):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM manifest_lots WHERE id = ?", (lot_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_manifest_lot_by_charge(awaiting_charge_id: int):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM manifest_lots WHERE awaiting_charge_id = ?", (awaiting_charge_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_manifest_lot_for_pallet(pallet_id: int):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM manifest_lots WHERE pallet_id = ?", (pallet_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def set_manifest_lot_pallet(lot_id: int, pallet_id: int):
+    """Called once a real pallet claims this lot's awaiting_pallet_charges
+    row (see cogs/pallet_setup.py) - links the manifest to the pallet whose
+    items Queue Review will match its lines against."""
+    with get_conn() as conn:
+        conn.execute("UPDATE manifest_lots SET pallet_id = ? WHERE id = ?", (pallet_id, lot_id))
+
+
+def get_manifest_lines(lot_id: int) -> list:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM manifest_lines WHERE manifest_lot_id = ? ORDER BY id ASC", (lot_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_unmatched_manifest_lines_for_pallet(pallet_id: int) -> list:
+    """Every manifest line for this pallet's lot not yet linked to a real
+    item - what Queue Review's manifest-match step scores an item against
+    and offers as "choose different" options."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT ml.* FROM manifest_lines ml
+               JOIN manifest_lots mt ON mt.id = ml.manifest_lot_id
+               WHERE mt.pallet_id = ? AND ml.matched_item_id IS NULL
+               ORDER BY ml.id ASC""",
+            (pallet_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def match_manifest_line(line_id: int, item_id: int):
+    """Links a manifest line to the real item it turned out to be - sets
+    both sides (manifest_lines.matched_item_id and its reverse pointer
+    items.manifest_line_id) so either row can answer the question directly,
+    and clears any previous manifest_unmatched flag on this item (a
+    re-match after Re-review is possible via Queue Review's Edit/Re-review
+    buttons)."""
+    with get_conn() as conn:
+        conn.execute("UPDATE manifest_lines SET matched_item_id = ? WHERE id = ?", (item_id, line_id))
+        conn.execute(
+            "UPDATE items SET manifest_line_id = ?, manifest_unmatched = 0 WHERE id = ?",
+            (line_id, item_id),
+        )
+
+
+def mark_item_manifest_unmatched(item_id: int):
+    """Set only by an explicit "No match" in Queue Review's manifest-match
+    step (never inferred) - a permanent, visible flag (see send_item_card)
+    that this item's COGS can't come from the manifest and must be entered
+    by hand at sale time."""
+    with get_conn() as conn:
+        conn.execute("UPDATE items SET manifest_unmatched = 1 WHERE id = ?", (item_id,))
+
+
+def get_item_manifest_cost(item_id: int):
+    """
+    The proportional COGS formula confirmed by the user: this item's cost =
+    (what was paid for the whole lot / the manifest's total retail value) *
+    this item's own retail price on the manifest. Returns None if the item
+    has no manifest match (manifest_line_id is NULL) or its line/lot has
+    since been removed - callers fall back to a blank manual entry in that
+    case, same as an item with no manifest at all.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            """SELECT ml.retail_price AS retail_price,
+                      mt.invoice_amount AS invoice_amount,
+                      mt.total_retail_value AS total_retail_value
+               FROM items i
+               JOIN manifest_lines ml ON ml.id = i.manifest_line_id
+               JOIN manifest_lots mt ON mt.id = ml.manifest_lot_id
+               WHERE i.id = ?""",
+            (item_id,),
+        ).fetchone()
+        if not row or not row["total_retail_value"]:
+            return None
+        return (row["invoice_amount"] / row["total_retail_value"]) * row["retail_price"]
+
+
+def get_ready_manifested_charges() -> list:
+    """Unclaimed #submit-invoices charges that already have a parsed
+    manifest attached - the packages "Start New Pallet" offers to pick from
+    once creation is gated on having one ready (see cogs/pallet_setup.py)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT c.* FROM awaiting_pallet_charges c
+               JOIN manifest_lots m ON m.awaiting_charge_id = c.id
+               WHERE c.claimed = 0
+               ORDER BY c.created_at ASC"""
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 # ------------------------------------------------------------ quickbooks --

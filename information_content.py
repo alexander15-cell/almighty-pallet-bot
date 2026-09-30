@@ -47,7 +47,9 @@ def _overview_embed() -> discord.Embed:
             "more pallets come in. Every item's card always shows which pallet it "
             "belongs to, so nothing gets lost in the shared channels.\n\n"
             "To start tracking a new pallet, click **Start New Pallet** in "
-            "#new-pallet-tracking.\n\n"
+            "#new-pallet-tracking - this requires an invoice and its manifest to already be "
+            "submitted in #submit-invoices (a Pallet Admin can override this for a lot that "
+            "genuinely has no manifest).\n\n"
             "A separate **Finance** category handles pallet costs (see the Finance "
             "Channels section below), and an optional **Website Shop** (#website_shop) "
             "can publish select items to a separate storefront website.\n\n"
@@ -198,7 +200,14 @@ def _finance_channels_embed() -> discord.Embed:
             "**Purchase Management role** posts here. One message per invoice: attach the invoice "
             "(photo or PDF) and type just the dollar amount (e.g. \"125.50\") in the same message, "
             "then send. The bot logs it and removes the message - the practical way to track a "
-            "purchase when there's no direct QuickBooks connection."
+            "purchase when there's no direct QuickBooks connection.\n\n"
+            "If you have a manifest (CSV or XLSX) for the lot, attach it alongside the invoice or "
+            "send it afterward on its own - the bot reads it (flexibly - different suppliers use "
+            "different column names/formats) and replies with what it parsed (units, total retail "
+            "value) so you can catch a bad file before it's used. **Start New Pallet** requires this "
+            "manifest to exist first, so Queue Review can match each item to it and auto-calculate "
+            "its cost of goods sold as (price paid for the lot / total retail value on the manifest) "
+            "× that item's own retail price - no more guessing per-item cost by hand."
         ),
         inline=False,
     )

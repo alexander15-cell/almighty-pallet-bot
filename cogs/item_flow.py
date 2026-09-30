@@ -177,6 +177,17 @@ async def send_item_card(channel: discord.TextChannel, item: dict, view: discord
     main_embed.add_field(name="Status", value=status, inline=True)
     if flags and flags not in ("[]", None, ""):
         main_embed.add_field(name="⚠️ Flags", value=str(flags)[:300], inline=False)
+    if item.get("manifest_unmatched"):
+        # Set only by an explicit "No match" during Queue Review's manifest
+        # match step (see database.mark_item_manifest_unmatched) - a
+        # permanent, visible note that this item's COGS can't come from the
+        # manifest, carried through every later stage since send_item_card
+        # is the one function every stage's card goes through.
+        main_embed.add_field(
+            name="⚠️ No manifest match",
+            value="COGS must be entered manually at sale time.",
+            inline=False,
+        )
     if contract:
         for field in contract["fields"]:
             main_embed.add_field(**field)
@@ -228,6 +239,145 @@ async def send_website_hold_notice(channel: discord.TextChannel, item: dict):
     contract["description"] = "This item is on hold and is not available on the website."
     embed = discord.Embed.from_dict(contract)
     return await channel.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
+
+
+_MANIFEST_MATCH_STOPWORDS = {
+    "the", "a", "an", "of", "and", "or", "for", "with", "in", "on", "new", "brand", "item",
+}
+
+
+def _manifest_tokenize(text: str) -> set:
+    return {
+        word for word in re.findall(r"[a-z0-9]+", (text or "").lower())
+        if len(word) >= 3 and word not in _MANIFEST_MATCH_STOPWORDS
+    }
+
+
+def _score_manifest_line(item: dict, line: dict) -> int:
+    """
+    Rough keyword-overlap score between an item's description and one
+    manifest line's product text - "AI suggests, human confirms" (see
+    EbayCategoryPickView for the same philosophy), never auto-applied. A
+    manifest line's SKU showing up verbatim in the item's own text (rare -
+    Data Entry doesn't usually copy SKUs - but a strong signal when it
+    happens) outweighs any amount of keyword overlap.
+    """
+    item_text = " ".join(filter(None, [item.get("ai_title"), item.get("ai_description"), item.get("raw_description")]))
+    score = len(_manifest_tokenize(item_text) & _manifest_tokenize(line.get("product")))
+    sku = (line.get("sku") or "").strip()
+    if sku and sku in item_text:
+        score += 10
+    return score
+
+
+def suggest_manifest_matches(item: dict, lines: list) -> list:
+    """Every candidate line, best guess first - ties broken by manifest
+    line id (stable, oldest first) so results are deterministic."""
+    return sorted(lines, key=lambda line: (-_score_manifest_line(item, line), line["id"]))
+
+
+def _manifest_match_prompt(item: dict, source_message_id=None):
+    """
+    Returns None if this item has nothing to match (already matched/flagged,
+    its pallet has no manifest at all, or every manifest line is already
+    spoken for) - the normal, no-manifest path through Approve is
+    unaffected either way. Otherwise returns the AI-suggested best guess
+    (or, with exactly one manifest line left for the whole pallet, an
+    explicitly-labeled process-of-elimination guess - see the user's own
+    design for this fallback) plus the confirm/choose-different/no-match
+    view.
+    """
+    if item.get("manifest_line_id") or item.get("manifest_unmatched"):
+        return None
+    if not db.get_manifest_lot_for_pallet(item["pallet_id"]):
+        return None
+    unmatched = db.get_unmatched_manifest_lines_for_pallet(item["pallet_id"])
+    if not unmatched:
+        return None
+
+    ranked = suggest_manifest_matches(item, unmatched)
+    top_line = ranked[0]
+    is_elimination = len(unmatched) == 1
+    description = (
+        f"**{top_line['product'] or '(no description on manifest)'}** "
+        f"(SKU {top_line['sku'] or '—'}, ${top_line['retail_price']:.2f} retail)"
+    )
+    if is_elimination:
+        content = (
+            f"📋 Only one manifest line is still unmatched for this pallet - by process of "
+            f"elimination, this item is probably:\n{description}\n"
+            f"This is a guess from elimination, not a content match - confirm it, pick a "
+            f"different line below, or mark no match if it's genuinely not this."
+        )
+    else:
+        content = (
+            f"📋 Best manifest match guess:\n{description}\n"
+            f"Confirm, pick a different manifest line below, or mark no match if this item "
+            f"truly isn't on the manifest (its COGS will need to be entered manually at sale time)."
+        )
+    return content, ManifestMatchView(item["id"], top_line, unmatched, source_message_id=source_message_id)
+
+
+def _condition_select_prompt(item_id: int, source_message_id=None):
+    return (
+        "Select this item's eBay condition to continue approving - you'll pick a "
+        "category and format (fixed price/auction), then enter title/price/specifics next.",
+        EbayConditionSelectView(item_id, source_message_id=source_message_id),
+    )
+
+
+async def _continue_past_manifest_match(interaction: discord.Interaction, item_id: int, source_message_id=None):
+    content, view = _condition_select_prompt(item_id, source_message_id=source_message_id)
+    await interaction.response.edit_message(content=content, view=view)
+
+
+class ManifestMatchChooseDifferentSelect(discord.ui.Select):
+    """The "choose a different manifest line" dropdown on ManifestMatchView
+    - every still-unmatched line for this pallet (capped at Discord's
+    25-option limit), not just ones plausible enough to auto-rank highly,
+    since the AI's guess can simply be wrong."""
+
+    def __init__(self, item_id: int, unmatched_lines: list, source_message_id=None):
+        self.item_id = item_id
+        self.source_message_id = source_message_id
+        options = [
+            discord.SelectOption(
+                label=(line["product"] or "(no description)")[:100],
+                description=f"SKU {line['sku'] or '—'} - ${line['retail_price']:.2f} retail"[:100],
+                value=str(line["id"]),
+            )
+            for line in unmatched_lines[:25]
+        ]
+        super().__init__(placeholder="...or pick a different manifest line", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        db.match_manifest_line(int(self.values[0]), self.item_id)
+        await _continue_past_manifest_match(interaction, self.item_id, source_message_id=self.source_message_id)
+
+
+class ManifestMatchView(discord.ui.View):
+    """Shown as the first step of Approve when the item's pallet has an
+    attached manifest with lines still unmatched - AI suggests a best
+    guess (or a process-of-elimination fallback), a human confirms/
+    redirects/rejects it, exactly like EbayCategoryPickView's
+    suggest-then-confirm pattern."""
+
+    def __init__(self, item_id: int, top_line: dict, unmatched_lines: list, source_message_id=None):
+        super().__init__(timeout=300)
+        self.item_id = item_id
+        self.top_line = top_line
+        self.source_message_id = source_message_id
+        self.add_item(ManifestMatchChooseDifferentSelect(item_id, unmatched_lines, source_message_id=source_message_id))
+
+    @discord.ui.button(label="Confirm match", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        db.match_manifest_line(self.top_line["id"], self.item_id)
+        await _continue_past_manifest_match(interaction, self.item_id, source_message_id=self.source_message_id)
+
+    @discord.ui.button(label="No match", style=discord.ButtonStyle.danger, emoji="🚫")
+    async def no_match(self, interaction: discord.Interaction, button: discord.ui.Button):
+        db.mark_item_manifest_unmatched(self.item_id)
+        await _continue_past_manifest_match(interaction, self.item_id, source_message_id=self.source_message_id)
 
 
 class EditDescriptionModal(discord.ui.Modal, title="Edit Listing Description"):
@@ -1514,7 +1664,8 @@ class ItemFlow(commands.Cog):
     # ------------------------------------------------------------ movement --
 
     async def prompt_ebay_condition(self, interaction: discord.Interaction, item_id: int):
-        """Step 1 of Approve: role/status checks, then the condition select."""
+        """Step 1 of Approve: role/status checks, an optional manifest-match
+        step (see _manifest_match_prompt), then the condition select."""
         if not await self._require_role(interaction, config.ROLE_QUEUE_REVIEW):
             return
         item = db.get_item(item_id)
@@ -1526,12 +1677,16 @@ class ItemFlow(commands.Cog):
                 f"Someone likely clicked at the same time as you.", ephemeral=True
             )
             return
-        await interaction.response.send_message(
-            "Select this item's eBay condition to continue approving - you'll pick a "
-            "category and format (fixed price/auction), then enter title/price/specifics next.",
-            view=EbayConditionSelectView(item_id, source_message_id=getattr(interaction.message, "id", None)),
-            ephemeral=True,
-        )
+
+        source_message_id = getattr(interaction.message, "id", None)
+        match_prompt = _manifest_match_prompt(item, source_message_id=source_message_id)
+        if match_prompt:
+            content, view = match_prompt
+            await interaction.response.send_message(content, view=view, ephemeral=True)
+            return
+
+        content, view = _condition_select_prompt(item_id, source_message_id=source_message_id)
+        await interaction.response.send_message(content, view=view, ephemeral=True)
 
     async def finalize_ebay_approval(self, interaction: discord.Interaction, item_id: int, condition_id: str,
                                       category_id: str, title: str, price: float, specifics: dict,

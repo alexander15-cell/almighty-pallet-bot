@@ -63,6 +63,7 @@ import config
 import database as db
 import discord_resilience
 import finance_utils
+import manifest_import
 import pirate_ship_import
 import quickbooks
 import runtime_settings
@@ -83,6 +84,63 @@ def invoice_dir_for(charge_id: int) -> Path:
     d = INVOICE_DIR / str(charge_id)
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# A manifest spreadsheet is told apart from the invoice photo/PDF purely by
+# extension - liquidators send these as CSV or XLSX (see manifest_import.py),
+# never as an image, so this never collides with the actual invoice file.
+_MANIFEST_EXTENSIONS = (".csv", ".xlsx", ".xlsm")
+
+
+def _find_manifest_attachment(message: discord.Message):
+    for attachment in message.attachments:
+        if Path(attachment.filename).suffix.lower() in _MANIFEST_EXTENSIONS:
+            return attachment
+    return None
+
+
+def _find_invoice_attachment(message: discord.Message):
+    for attachment in message.attachments:
+        if Path(attachment.filename).suffix.lower() not in _MANIFEST_EXTENSIONS:
+            return attachment
+    return None
+
+
+async def _attach_manifest(charge_id: int, attachment: discord.Attachment, submitted_by: int) -> str:
+    """
+    Downloads, parses (manifest_import.parse_manifest), and stores a
+    manifest against an existing #submit-invoices charge - shared by both
+    ways a manifest can arrive (same message as the invoice, or as its own
+    follow-up message). Returns one line summarizing what was parsed (or
+    exactly what's wrong, per the user's explicit "I don't want to have to
+    change it later if the file is incorrect" requirement) to show right
+    away rather than silently accepting a possibly-wrong file.
+    """
+    raw = await attachment.read()
+    result = manifest_import.parse_manifest(raw, attachment.filename)
+    if not result["ok"]:
+        return (
+            f"⚠️ Manifest **{attachment.filename}** couldn't be read: {result['error']} "
+            f"Fix the file and send it again (just the file, no need to repeat the amount)."
+        )
+
+    charge = db.get_awaiting_pallet_charge(charge_id)
+    invoice_amount = charge["amount"] if charge else 0.0
+    db.upsert_manifest_lot(
+        charge_id, invoice_amount, result["total_retail_value"], attachment.filename,
+        submitted_by, result["lines"],
+    )
+    columns = result["columns_used"]
+    column_summary = ", ".join(
+        f"{field.replace('_', ' ')} = \"{columns[field]}\""
+        for field in ("sku", "product", "quantity", "retail_price") if field in columns
+    )
+    warning_text = "".join(f"\n⚠️ {w}" for w in result["warnings"])
+    return (
+        f"📋 Manifest **{attachment.filename}** parsed: {result['total_units']} unit(s), "
+        f"${result['total_retail_value']:,.2f} total retail value (columns used - {column_summary}). "
+        f"If that doesn't look right, just send the corrected file again.{warning_text}"
+    )
 
 
 def _has_role(interaction: discord.Interaction, role_name: str) -> bool:
@@ -778,6 +836,28 @@ def _parse_cogs_entry(text: str, references: list, resolved_items: list) -> dict
     return result
 
 
+def _cogs_default_line(item: dict, prefix: str = "") -> str:
+    """
+    One item's pre-filled default line for LogSaleCogsModal below. A
+    manifest-matched item pre-fills the real proportional cost (see
+    database.get_item_manifest_cost - the formula confirmed by the user:
+    (price paid for the lot / its manifest's total retail value) * this
+    item's own retail price) for BOTH cost and COGS, instead of an
+    all-zero placeholder that looks the same whether or not real data was
+    available. An item explicitly flagged manifest_unmatched (see Queue
+    Review's manifest-match step) keeps the blank default but says so
+    visibly, rather than looking like an ordinary "nothing known yet" item -
+    the trailing note is plain text after the numbers the cost/COGS parser
+    (_COST_COGS_RE) looks for, so it doesn't interfere with parsing.
+    """
+    manifest_cost = db.get_item_manifest_cost(item["id"])
+    if manifest_cost is not None:
+        return f"{prefix}cost {manifest_cost:.2f}, cogs {manifest_cost:.2f}"
+    if item.get("manifest_unmatched"):
+        return f"{prefix}cost 0.00, cogs 0.00  (no manifest match - enter manually)"
+    return f"{prefix}cost 0.00, cogs 0.00"
+
+
 class LogSaleCogsModal(discord.ui.Modal, title="Enter cost + COGS"):
     entries = discord.ui.TextInput(
         label="Cost & COGS - see pre-filled text for format",
@@ -795,9 +875,11 @@ class LogSaleCogsModal(discord.ui.Modal, title="Enter cost + COGS"):
         self.already_deposited = already_deposited
         self.sale_date = sale_date
         if len(references) == 1:
-            self.entries.default = "cost 0.00, cogs 0.00"
+            self.entries.default = _cogs_default_line(resolved_items[0])
         else:
-            self.entries.default = "\n".join(f"{ref}: cost 0.00, cogs 0.00" for ref in references)
+            self.entries.default = "\n".join(
+                _cogs_default_line(item, prefix=f"{ref}: ") for ref, item in zip(references, resolved_items)
+            )
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -1020,6 +1102,15 @@ class Finance(commands.Cog):
         QuickBooks-sourced charge - the QuickBooks API being unavailable
         means this is the real, working replacement for that automatic
         path, not a fallback for when it fails.
+
+        A manifest spreadsheet (see manifest_import.py) for the same lot can
+        ride along as a second attachment on that same message, OR arrive
+        as its own later message containing ONLY a manifest file and no
+        dollar amount - attached to whichever unclaimed invoice this same
+        person most recently submitted (see
+        database.get_latest_unclaimed_manual_charge_for_user), so a
+        manifest that isn't ready yet, or needs re-uploading after a
+        rejection, never has to repeat the invoice photo/amount.
         """
         if message.author.bot:
             return
@@ -1039,7 +1130,52 @@ class Finance(commands.Cog):
         if not message.attachments:
             await message.reply(
                 "Attach the invoice (photo or PDF) and put just the dollar amount in the same "
-                "message, e.g. \"125.50\".",
+                "message, e.g. \"125.50\". If you have a manifest (CSV/XLSX) for this lot, attach "
+                "it alongside the invoice, or send it on its own afterward.",
+                delete_after=15,
+            )
+            return
+
+        manifest_attachment = _find_manifest_attachment(message)
+        invoice_attachment = _find_invoice_attachment(message)
+
+        # Manifest-only follow-up: no real invoice attachment here, and no
+        # dollar amount typed - this is a manifest riding solo, meant for
+        # whatever invoice this person most recently submitted.
+        if manifest_attachment and not invoice_attachment:
+            try:
+                shop_values.parse_price_cents(message.content or "")
+                has_amount = True
+            except shop_values.ShopValidationError:
+                has_amount = False
+            if not has_amount:
+                charge = db.get_latest_unclaimed_manual_charge_for_user(message.author.id)
+                if not charge:
+                    await message.reply(
+                        "No unclaimed invoice from you to attach this manifest to - submit the "
+                        "invoice (photo/PDF + dollar amount) first, then send the manifest.",
+                        delete_after=20,
+                    )
+                    return
+                summary = await _attach_manifest(charge["id"], manifest_attachment, message.author.id)
+                if not config.PRESERVE_DISCORD_HISTORY:
+                    try:
+                        await message.delete()
+                    except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                        pass
+                await message.channel.send(summary, delete_after=30)
+                return
+            await message.reply(
+                "That looks like a manifest file, not an invoice - attach the actual invoice "
+                "(photo/PDF) too, or send just the manifest with no dollar amount if the invoice's "
+                "already logged.",
+                delete_after=20,
+            )
+            return
+
+        if not invoice_attachment:
+            await message.reply(
+                "Attach the invoice (photo or PDF) and put just the dollar amount in the same message.",
                 delete_after=15,
             )
             return
@@ -1054,12 +1190,15 @@ class Finance(commands.Cog):
             return
 
         amount = cents / 100
-        attachment = message.attachments[0]
         charge_id = db.create_manual_invoice_charge(amount, message.author.id)
-        ext = Path(attachment.filename).suffix or ".jpg"
+        ext = Path(invoice_attachment.filename).suffix or ".jpg"
         dest = invoice_dir_for(charge_id) / f"invoice{ext}"
-        await attachment.save(dest)
+        await invoice_attachment.save(dest)
         db.set_awaiting_pallet_charge_invoice_photo(charge_id, str(dest))
+
+        manifest_summary = None
+        if manifest_attachment:
+            manifest_summary = await _attach_manifest(charge_id, manifest_attachment, message.author.id)
 
         charge = db.get_awaiting_pallet_charge(charge_id)
         try:
@@ -1072,11 +1211,18 @@ class Finance(commands.Cog):
                 await message.delete()
             except discord_resilience.TRANSIENT_DISCORD_ERRORS:
                 pass
-        await message.channel.send(
+        confirmation = (
             f"✅ Invoice for ${amount:.2f} logged - it'll show up in #awaiting-pallet-charges "
-            f"until a matching pallet is created.",
-            delete_after=15,
+            f"until a matching pallet is created."
         )
+        if manifest_summary:
+            confirmation += f"\n{manifest_summary}"
+        else:
+            confirmation += (
+                "\nNo manifest attached yet - send one (CSV/XLSX) here whenever it's ready, so "
+                "Queue Review can match items to it for accurate per-item COGS."
+            )
+        await message.channel.send(confirmation, delete_after=30)
 
     finance_group = app_commands.Group(name="finance", description="Finance Management commands")
 

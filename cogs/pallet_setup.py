@@ -29,6 +29,7 @@ import discord_resilience
 import finance_utils
 import information_content
 import quickbooks
+import runtime_settings
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +83,11 @@ def everyone_viewable_overwrites(guild: discord.Guild) -> dict:
     return overwrites
 
 
+def _is_admin(interaction: discord.Interaction) -> bool:
+    role = runtime_settings.resolve_role(interaction.guild, config.ROLE_ADMIN)
+    return bool(role and role in interaction.user.roles)
+
+
 class NewPalletView(discord.ui.View):
     """Persistent view (survives bot restarts) holding the 'Start New Pallet' button."""
 
@@ -102,32 +108,100 @@ class NewPalletView(discord.ui.View):
                 ephemeral=True,
             )
             return
+
+        # A new pallet is gated on having a ready invoice+manifest package
+        # from #submit-invoices (the user's own design: "I'm thinking we
+        # also only allow a new pallet to be created once that step is
+        # completed") - a pallet created any other way has no COGS source
+        # for Queue Review to match items against, which would only ever
+        # surface as a confusing blank later. Pallet Admin gets an escape
+        # hatch for a lot that genuinely has no manifest, since blocking
+        # that case entirely would be an operational dead end.
+        is_admin = _is_admin(interaction)
+        ready = db.get_ready_manifested_charges()
+        if not ready:
+            if is_admin:
+                await interaction.response.send_modal(NewPalletModal())
+                return
+            await interaction.response.send_message(
+                "No ready invoice + manifest package to start a pallet from yet - submit the "
+                "invoice and its manifest (CSV/XLSX) in #submit-invoices first, then come back "
+                "here. (A Pallet Admin can override this if a lot genuinely has no manifest.)",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            "Pick the invoice + manifest package this new pallet is for:",
+            view=ReadyPackageView(ready, allow_admin_skip=is_admin),
+            ephemeral=True,
+        )
+
+
+class ReadyPackageSelect(discord.ui.Select):
+    """The invoice+manifest packages "Start New Pallet" gates creation on -
+    picking one carries its charge_id into NewPalletModal so pallet
+    creation can auto-claim it (into pallet_costs, same as
+    AwaitingChargesSelect) and link its manifest to the new pallet in one
+    step, instead of a second manual "attach charges" pass afterward."""
+
+    def __init__(self, charges: list):
+        options = []
+        for charge in charges:
+            lot = db.get_manifest_lot_by_charge(charge["id"])
+            unit_count = len(db.get_manifest_lines(lot["id"])) if lot else 0
+            options.append(discord.SelectOption(
+                label=f"${charge['amount']:.2f} invoice - {unit_count} manifest unit(s)"[:100],
+                description=(charge["txn_date"] or "")[:100],
+                value=str(charge["id"]),
+            ))
+        super().__init__(placeholder="Pick the invoice + manifest package...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(NewPalletModal(charge_id=int(self.values[0])))
+
+
+class ReadyPackageView(discord.ui.View):
+    def __init__(self, charges: list, allow_admin_skip: bool):
+        super().__init__(timeout=300)
+        self.add_item(ReadyPackageSelect(charges[:25]))
+        if allow_admin_skip:
+            skip_button = discord.ui.Button(
+                label="Create without a manifest (Admin)", style=discord.ButtonStyle.secondary,
+            )
+            skip_button.callback = self._on_skip
+            self.add_item(skip_button)
+
+    async def _on_skip(self, interaction: discord.Interaction):
         await interaction.response.send_modal(NewPalletModal())
 
 
-async def _claim_awaiting_charges(interaction: discord.Interaction, pallet_id: int, pallet_name: str, charge_ids: list):
+async def _claim_charges_for_pallet(client: discord.Client, pallet_id: int, pallet_name: str,
+                                     charge_ids: list, actor_id: int) -> float:
     """
     Moves each selected awaiting_pallet_charges row onto the just-created
-    pallet (into pallet_costs) and pushes a matching QuickBooks expense
-    tagged with the pallet's name/id. Pulled out of
-    AwaitingChargesSelect.callback so it can be exercised directly in
-    tests without fighting discord.py's Select/Interaction internals - see
-    cogs/finance.py's _handle_allocation_choice for the same pattern.
+    pallet (into pallet_costs), links any manifest attached to it to this
+    pallet (see database.set_manifest_lot_pallet), and pushes a matching
+    QuickBooks expense tagged with the pallet's name/id. No
+    interaction.response/followup handling here - callers already
+    mid-interaction (NewPalletModal.on_submit, which defers up front) call
+    this directly instead of double-deferring; _claim_awaiting_charges below
+    is the version that owns its own interaction response, for
+    AwaitingChargesSelect's separate "attach more charges" step.
     """
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    if not charge_ids:
-        await interaction.followup.send("No charges attached.", ephemeral=True)
-        return
-
     awaiting_channel_id = db.get_shared_channel_id("awaiting-pallet-charges")
-    awaiting_channel = interaction.client.get_channel(awaiting_channel_id) if awaiting_channel_id else None
+    awaiting_channel = client.get_channel(awaiting_channel_id) if awaiting_channel_id else None
 
     claimed_total = 0.0
     for value in charge_ids:
-        charge = db.claim_awaiting_pallet_charge(int(value), pallet_id, interaction.user.id)
+        charge = db.claim_awaiting_pallet_charge(int(value), pallet_id, actor_id)
         if not charge or charge["claimed"]:
             continue  # already claimed by someone else in the meantime
         claimed_total += charge["amount"]
+
+        lot = db.get_manifest_lot_by_charge(charge["id"])
+        if lot:
+            db.set_manifest_lot_pallet(lot["id"], pallet_id)
 
         # A manually-submitted invoice (source='manual') was never a real
         # QuickBooks transaction - there's nothing to push here, the
@@ -146,7 +220,7 @@ async def _claim_awaiting_charges(interaction: discord.Interaction, pallet_id: i
                 )
             else:
                 await finance_utils.post_to_finance_audit_log(
-                    interaction.client,
+                    client,
                     f"💳 **{pallet_name}**: ${charge['amount']:.2f} charge from **{charge['merchant']}** "
                     f"claimed from #awaiting-pallet-charges.",
                 )
@@ -158,7 +232,26 @@ async def _claim_awaiting_charges(interaction: discord.Interaction, pallet_id: i
             except discord_resilience.TRANSIENT_DISCORD_ERRORS:
                 pass
 
-    await finance_utils.refresh_finance_message(interaction.client, pallet_id)
+    await finance_utils.refresh_finance_message(client, pallet_id)
+    return claimed_total
+
+
+async def _claim_awaiting_charges(interaction: discord.Interaction, pallet_id: int, pallet_name: str, charge_ids: list):
+    """
+    Owns its own interaction response/followup around _claim_charges_for_pallet
+    above - pulled out of AwaitingChargesSelect.callback so it can be
+    exercised directly in tests without fighting discord.py's
+    Select/Interaction internals - see cogs/finance.py's
+    _handle_allocation_choice for the same pattern.
+    """
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    if not charge_ids:
+        await interaction.followup.send("No charges attached.", ephemeral=True)
+        return
+
+    claimed_total = await _claim_charges_for_pallet(
+        interaction.client, pallet_id, pallet_name, charge_ids, interaction.user.id,
+    )
     await interaction.followup.send(
         f"🧾 Attached {len(charge_ids)} charge(s) totaling ${claimed_total:.2f} to **{pallet_name}**.",
         ephemeral=True,
@@ -217,6 +310,15 @@ class NewPalletModal(discord.ui.Modal, title="New Pallet"):
         max_length=300,
         style=discord.TextStyle.paragraph,
     )
+
+    def __init__(self, charge_id: int = None):
+        super().__init__()
+        # Set via ReadyPackageSelect (the gated "Start New Pallet" flow) -
+        # None for the Admin escape-hatch path, which still uses this same
+        # modal for the name/notes fields. getattr with a default is used
+        # everywhere this is read below, since existing tests construct
+        # this modal directly without going through __init__.
+        self.charge_id = charge_id
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -283,9 +385,24 @@ class NewPalletModal(discord.ui.Modal, title="New Pallet"):
         # pins float above chat regardless of send order, so this is fine).
         await finance_utils.post_initial_finance_message(interaction.client, pallet_id, discussion_channel)
 
+        # Auto-claim the invoice+manifest package this pallet was gated on
+        # (see NewPalletView.start_new_pallet / ReadyPackageSelect) - not
+        # set at all for a pallet created via the Admin escape hatch.
+        claimed_note = ""
+        charge_id = getattr(self, "charge_id", None)
+        if charge_id:
+            claimed_total = await _claim_charges_for_pallet(
+                interaction.client, pallet_id, name, [str(charge_id)], interaction.user.id,
+            )
+            claimed_note = (
+                f" Its ${claimed_total:.2f} invoice is now attached, and its manifest (if any) is "
+                f"linked for Queue Review to match items against."
+            )
+
         await interaction.followup.send(
-            f"✅ Created pallet **{name}**. Data entry can start in <#{data_entry_channel.id}>. "
-            f"Everything from Automated Review onward happens in the shared pipeline channels.",
+            f"✅ Created pallet **{name}**.{claimed_note} Data entry can start in "
+            f"<#{data_entry_channel.id}>. Everything from Automated Review onward happens in the "
+            f"shared pipeline channels.",
             ephemeral=True,
         )
 
