@@ -157,6 +157,21 @@ ENTRIES = (
         ("accounting channel", "cogs channel", "log cogs"),
     ),
     HelpEntry(
+        "#finance-audit-log",
+        "Read-only, visible to everyone: a permanent record of every completed QuickBooks transaction this bot has posted.",
+        ("audit log", "transaction history", "what was logged", "finance history channel"),
+    ),
+    HelpEntry(
+        "#finance-dashboard",
+        "Read-only, visible to everyone: a pinned message with live account balances and business position, updated automatically.",
+        ("dashboard", "business position", "account balances", "our position", "financial summary"),
+    ),
+    HelpEntry(
+        "Categorize credit-card expense",
+        "After allocating a credit-card charge to a pallet, an optional second dropdown lets you pick a specific QuickBooks expense/COGS account for it.",
+        ("categorize expense", "expense account", "assign account", "credit card category"),
+    ),
+    HelpEntry(
         "/finance refund",
         "Log a refund against an item's sale.",
         ("refund",),

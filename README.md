@@ -238,12 +238,15 @@ not built without an explicit spec).
   the bot checks the ONE configured `QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID`
   account for new charges and posts each one to `#credit-card-charges`
   with an **Allocate to a pallet** button - pick an active pallet (adds the
-  charge to that pallet's cost basis and pushes a matching categorized
-  expense back into QuickBooks, tagged with the pallet's name for
-  traceability) or **New Pallet (not arrived yet)** (files it in
-  `#awaiting-pallet-charges` until a real pallet is created, at which point
-  its creation flow offers to attach any unclaimed charges - more than one
-  at once, e.g. the purchase price plus a separate deposit/fee).
+  charge to that pallet's cost basis and pushes a matching expense back into
+  QuickBooks, tagged with the pallet's name for traceability) or **New
+  Pallet (not arrived yet)** (files it in `#awaiting-pallet-charges` until a
+  real pallet is created, at which point its creation flow offers to attach
+  any unclaimed charges - more than one at once, e.g. the purchase price
+  plus a separate deposit/fee). After picking a pallet, an optional second
+  step lets you categorize the pushed expense under a specific QuickBooks
+  expense/COGS account instead of just its own default - pick "Don't
+  categorize" to skip it.
 - **Cost basis is additive**: a pallet's total cost is `/finance setprice`'s
   manual lump sum PLUS every itemized charge/shipping cost allocated
   through this integration (`pallet_costs` table, one row per cost,
@@ -354,6 +357,31 @@ tracked anywhere in this bot.
   documented in `config.py` and default to the real values already set up
   in the connected company - override in `.env` only if that QuickBooks
   setup changes.
+
+### `#finance-audit-log` and `#finance-dashboard` - visible to everyone
+
+Two read-only channels (view access for `@everyone`, only Pallet Admin can
+post - same as `#information`) for whole-team visibility into the money side
+without needing a finance-specific role:
+
+- **`#finance-audit-log`** - a permanent, plain-text line for every
+  completed QuickBooks transaction: a logged sale (`/finance log-sale` or
+  `/finance retry-sale`, with its Sales Receipt/Journal Entry numbers), an
+  allocated credit-card charge (including which account it was categorized
+  under, if any), and a charge claimed from `#awaiting-pallet-charges` at
+  pallet creation. Nothing here is ephemeral, unlike the confirmation
+  messages those commands also send to whoever ran them.
+- **`#finance-dashboard`** - a single pinned message the bot keeps updated
+  automatically: live QuickBooks balances (Cash, Undeposited Funds,
+  Inventory, and the configured credit card), month-to-date revenue/spend,
+  total COGS logged, and pallets in progress vs. fully sold out. Refreshes
+  itself every time `finance_utils.refresh_finance_message` runs for any
+  pallet - i.e. after any cost/sale/expense/allocation change anywhere, not
+  just here - so there's nothing to run to keep it current.
+
+Both are created by `/setup shared-channels` like every other shared
+channel; the dashboard also gets its first pinned snapshot posted
+automatically the moment the channel is created.
 
 ## Important limitation: no Vendoo API, and eBay/FB Marketplace both use CSV batches
 

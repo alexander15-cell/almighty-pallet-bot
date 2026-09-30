@@ -104,6 +104,27 @@ def test_claim_single_charge_creates_pallet_cost_and_removes_card(pallet, fresh_
     assert awaiting_msg.deleted is True
 
 
+def test_claim_posts_to_the_audit_log(pallet, fresh_db, monkeypatch):
+    async def fake_create_expense(*args, **kwargs):
+        return {"id": "qb-2"}
+    monkeypatch.setattr(qb, "create_expense", fake_create_expense)
+    monkeypatch.setattr(config, "QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID", "77")
+
+    charge_id = fresh_db.create_awaiting_pallet_charge("txn-b", 20.0, "Freight Co", "2026-09-10", allocated_by=1)
+    fresh_db.set_shared_channel("finance-audit-log", 999)
+    audit_channel = _FakeAwaitingChannel()
+    audit_channel.sent = []
+    async def fake_send(*args, **kwargs):
+        audit_channel.sent.append(args)
+    audit_channel.send = fake_send
+
+    interaction = _FakeInteraction(_FakeClient(channels={999: audit_channel}))
+    asyncio.run(_claim_awaiting_charges(interaction, pallet["id"], pallet["name"], [str(charge_id)]))
+
+    assert len(audit_channel.sent) == 1
+    assert "Freight Co" in audit_channel.sent[0][0]
+
+
 def test_claim_multiple_charges_sums_total(pallet, fresh_db, monkeypatch):
     async def fake_create_expense(*args, **kwargs):
         return {"id": "qb-1"}

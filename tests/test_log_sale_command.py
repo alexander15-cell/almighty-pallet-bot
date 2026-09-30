@@ -81,15 +81,23 @@ class _FakeFollowup:
         self.content = content
 
 
-def _interaction(roles=(_FINANCE_ROLE,), message=None):
+def _interaction(roles=(_FINANCE_ROLE,), message=None, client=None):
     return SimpleNamespace(
         guild=object(),
         user=SimpleNamespace(id=1, roles=list(roles)),
         response=_FakeResponse(),
         followup=_FakeFollowup(),
         message=message or _FakeMessage(),
-        client=SimpleNamespace(),
+        client=client or SimpleNamespace(),
     )
+
+
+class _FakeAuditChannel:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, *args, **kwargs):
+        self.sent.append(args)
 
 
 @pytest.fixture
@@ -254,6 +262,41 @@ def test_confirm_writes_sale_and_updates_item_price(fresh_db, monkeypatch):
     assert "JE-1" in interaction.followup.content
 
 
+def test_confirm_posts_to_the_audit_log_on_success(fresh_db, monkeypatch):
+    pallet_id = fresh_db.create_pallet("Pallet A", category_id=1, created_by=1)
+    item = fresh_db.get_item(fresh_db.create_item(pallet_id, "Widget", [], 1))
+    fresh_db.set_shared_channel("finance-audit-log", 777)
+    audit_channel = _FakeAuditChannel()
+    client = SimpleNamespace(get_channel=lambda cid: audit_channel if cid == 777 else None)
+
+    monkeypatch.setattr(qb, "create_sales_receipt", AsyncMock(return_value={"id": "sr-1", "doc_number": "1001"}))
+    monkeypatch.setattr(qb, "create_journal_entry", AsyncMock(return_value={"id": "je-1", "doc_number": "JE-1"}))
+
+    view = LogSaleConfirmView([item], {item["id"]: (4.0, 4.0)}, "eBay", 10.0, False, "2026-09-30")
+    interaction = _interaction(client=client)
+    asyncio.run(view.confirm.callback(interaction))
+
+    assert len(audit_channel.sent) == 1
+    assert "1001" in audit_channel.sent[0][0]
+    assert "JE-1" in audit_channel.sent[0][0]
+
+
+def test_confirm_does_not_post_to_the_audit_log_on_quickbooks_failure(fresh_db, monkeypatch):
+    pallet_id = fresh_db.create_pallet("Pallet A", category_id=1, created_by=1)
+    item = fresh_db.get_item(fresh_db.create_item(pallet_id, "Widget", [], 1))
+    fresh_db.set_shared_channel("finance-audit-log", 777)
+    audit_channel = _FakeAuditChannel()
+    client = SimpleNamespace(get_channel=lambda cid: audit_channel if cid == 777 else None)
+
+    monkeypatch.setattr(qb, "create_sales_receipt", AsyncMock(side_effect=qb.QuickBooksError("boom")))
+
+    view = LogSaleConfirmView([item], {item["id"]: (4.0, 4.0)}, "eBay", 10.0, False, "2026-09-30")
+    interaction = _interaction(client=client)
+    asyncio.run(view.confirm.callback(interaction))
+
+    assert audit_channel.sent == []
+
+
 def test_confirm_splits_price_evenly_across_a_bundle(fresh_db, monkeypatch):
     pallet_id = fresh_db.create_pallet("Pallet A", category_id=1, created_by=1)
     item1 = fresh_db.get_item(fresh_db.create_item(pallet_id, "Widget", [], 1))
@@ -391,6 +434,25 @@ def test_retry_sale_skips_an_already_created_receipt(fresh_db, cog, monkeypatch)
     receipt_mock.assert_not_awaited()
     assert "JE-1" in interaction.followup.content
     assert fresh_db.get_sale(sale_id)["cogs_logged_at"] is not None
+
+
+def test_retry_sale_posts_to_the_audit_log_on_success(fresh_db, cog, monkeypatch):
+    pallet_id = fresh_db.create_pallet("Pallet A", category_id=1, created_by=1)
+    item = fresh_db.get_item(fresh_db.create_item(pallet_id, "Widget", [], 1))
+    sale_id = fresh_db.create_sale("eBay", "2026-09-30", 10.0, False, created_by=1)
+    fresh_db.add_sale_item(sale_id, item["id"], 10.0, 4.0, 4.0)
+    fresh_db.set_shared_channel("finance-audit-log", 777)
+    audit_channel = _FakeAuditChannel()
+    client = SimpleNamespace(get_channel=lambda cid: audit_channel if cid == 777 else None)
+
+    monkeypatch.setattr(qb, "create_sales_receipt", AsyncMock(return_value={"id": "sr-1", "doc_number": "1001"}))
+    monkeypatch.setattr(qb, "create_journal_entry", AsyncMock(return_value={"id": "je-1", "doc_number": "JE-1"}))
+
+    interaction = _interaction(client=client)
+    asyncio.run(Finance.retry_sale.callback(cog, interaction, sale_id))
+
+    assert len(audit_channel.sent) == 1
+    assert "retry-sale" in audit_channel.sent[0][0]
 
 
 def test_retry_sale_reports_a_continued_failure(fresh_db, cog, monkeypatch):

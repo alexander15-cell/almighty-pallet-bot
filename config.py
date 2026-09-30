@@ -181,8 +181,18 @@ FINANCE_SHARED_CHANNELS = [
     "awaiting-pallet-charges",
     "submit-invoices",
     "accounting",
+    "finance-audit-log",
+    "finance-dashboard",
 ]
 FINANCE_CATEGORY_NAME = "Finance"
+
+# Shared channels that are visible to @everyone (read-only - only Pallet
+# Admin can post; the bot posts freely regardless, same as #information)
+# rather than gated to specific roles via CHANNEL_ROLE_PERMISSIONS below -
+# for content the whole team should be able to see without needing a
+# finance-specific role, per the original ask ("so everyone is aware of
+# our position").
+EVERYONE_VIEWABLE_CHANNELS = ["finance-audit-log", "finance-dashboard"]
 
 # A read-only orientation channel explaining how this bot works, posted by
 # /setup info-channel (see information_content.py) - created in the same
@@ -342,6 +352,16 @@ CHANNEL_INFO = {
         "QuickBooks - a Sales Receipt for Facebook/in-person/other sales (QuickBooks' own "
         "Automated Sales Tax adds the tax), plus a Cost of Goods Sold journal entry either "
         "way."
+    ),
+    "finance-audit-log": (
+        "Read-only record of every completed QuickBooks transaction this bot has posted - "
+        "logged sales (Sales Receipt + COGS journal entry numbers) and allocated credit-card "
+        "charges. Visible to everyone; only the bot posts here."
+    ),
+    "finance-dashboard": (
+        "A single pinned message the bot keeps updated automatically - current account "
+        "balances, month-to-date revenue/spend, and pallets in progress vs. sold out. "
+        "Visible to everyone; refreshes itself whenever a sale, expense, or cost changes."
     ),
 }
 

@@ -378,14 +378,18 @@ async def _post_awaiting_charge_card(bot: discord.Client, charge: dict):
 
 async def _handle_allocation_choice(interaction: discord.Interaction, txn_id: str, amount: float,
                                      merchant: str, txn_date: str, original_message: discord.Message,
-                                     choice: str):
+                                     choice: str, expense_account_ref: str = None,
+                                     expense_account_name: str = None):
     """
     The actual allocation logic behind PalletAllocateSelect - pulled out of
     the discord.ui.Select subclass so it can be exercised directly in tests
     without fighting discord.py's internal Select/Interaction state, since
     this is the money-affecting half of the credit-card workflow (it's the
     only place a pallet_costs row or an awaiting_pallet_charges row actually
-    gets created from a QuickBooks charge).
+    gets created from a QuickBooks charge). expense_account_ref/_name are
+    only ever set for a direct pallet allocation (see ExpenseAccountSelect) -
+    optionally categorizes the pushed QuickBooks expense under a specific
+    account instead of just its own default.
     """
     await interaction.response.defer(ephemeral=True, thinking=True)
 
@@ -408,6 +412,11 @@ async def _handle_allocation_choice(interaction: discord.Interaction, txn_id: st
         await interaction.followup.send(
             "Filed under #awaiting-pallet-charges until a matching pallet is created.", ephemeral=True
         )
+        await finance_utils.post_to_finance_audit_log(
+            interaction.client,
+            f"📥 ${amount:.2f} credit-card charge from **{merchant}** filed under #awaiting-pallet-charges "
+            f"(no pallet yet).",
+        )
         return
 
     pallet_id = int(choice)
@@ -426,13 +435,64 @@ async def _handle_allocation_choice(interaction: discord.Interaction, txn_id: st
         await quickbooks.create_expense(
             config.QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID, amount, txn_date,
             memo=f"{pallet['name']} (Pallet #{pallet_id}) - {merchant}",
+            expense_account_ref=expense_account_ref,
         )
     except quickbooks.QuickBooksError as e:
         qb_note = f"\n⚠️ Allocated here, but pushing the matching expense back to QuickBooks failed: {e}"
+    else:
+        category_note = f" categorized under **{expense_account_name}**" if expense_account_name else ""
+        await finance_utils.post_to_finance_audit_log(
+            interaction.client,
+            f"💳 **{pallet['name']}**: ${amount:.2f} charge from **{merchant}** allocated{category_note}.",
+        )
 
     await finance_utils.refresh_finance_message(interaction.client, pallet_id)
     await _mark_charge_message_handled(original_message, f"✅ Allocated to **{pallet['name']}** by {interaction.user.mention}.")
     await interaction.followup.send(f"💳 Allocated ${amount:.2f} to **{pallet['name']}**.{qb_note}", ephemeral=True)
+
+
+class ExpenseAccountSelect(discord.ui.Select):
+    """
+    Second step after picking a pallet (see PalletAllocateSelect) - lets
+    someone optionally categorize this charge under a specific QuickBooks
+    expense/COGS account instead of just accepting QuickBooks' own default
+    categorization. Built fresh from whatever expense accounts currently
+    exist (never persisted, the chart of accounts can change) - "Don't
+    categorize" is always the first option, since picking one is optional.
+    """
+
+    def __init__(self, txn_id: str, amount: float, merchant: str, txn_date: str,
+                 original_message: discord.Message, pallet_id: int, accounts: list):
+        options = [discord.SelectOption(label="Don't categorize (use QuickBooks default)", value="__none__")]
+        options += [
+            discord.SelectOption(label=f"{a['name']} ({a['type']})"[:100], value=a["id"])
+            for a in accounts[:24]
+        ]
+        super().__init__(placeholder="Optionally categorize this expense under...", options=options, min_values=1, max_values=1)
+        self.txn_id = txn_id
+        self.amount = amount
+        self.merchant = merchant
+        self.txn_date = txn_date
+        self.original_message = original_message
+        self.pallet_id = pallet_id
+        self._account_names = {a["id"]: a["name"] for a in accounts}
+
+    async def callback(self, interaction: discord.Interaction):
+        chosen = self.values[0]
+        account_ref = None if chosen == "__none__" else chosen
+        account_name = self._account_names.get(chosen)
+        await _handle_allocation_choice(
+            interaction, self.txn_id, self.amount, self.merchant, self.txn_date,
+            self.original_message, str(self.pallet_id),
+            expense_account_ref=account_ref, expense_account_name=account_name,
+        )
+
+
+class ExpenseAccountSelectView(discord.ui.View):
+    def __init__(self, txn_id: str, amount: float, merchant: str, txn_date: str,
+                 original_message: discord.Message, pallet_id: int, accounts: list):
+        super().__init__(timeout=300)
+        self.add_item(ExpenseAccountSelect(txn_id, amount, merchant, txn_date, original_message, pallet_id, accounts))
 
 
 class PalletAllocateSelect(discord.ui.Select):
@@ -456,9 +516,24 @@ class PalletAllocateSelect(discord.ui.Select):
         self.original_message = original_message
 
     async def callback(self, interaction: discord.Interaction):
-        await _handle_allocation_choice(
-            interaction, self.txn_id, self.amount, self.merchant, self.txn_date,
-            self.original_message, self.values[0],
+        choice = self.values[0]
+        if choice == "__new_pallet__":
+            await _handle_allocation_choice(
+                interaction, self.txn_id, self.amount, self.merchant, self.txn_date,
+                self.original_message, choice,
+            )
+            return
+
+        try:
+            accounts = await quickbooks.list_accounts(["Expense", "Cost of Goods Sold"])
+        except quickbooks.QuickBooksError:
+            accounts = []
+        await interaction.response.edit_message(
+            content="Optionally categorize this expense under a specific QuickBooks account...",
+            view=ExpenseAccountSelectView(
+                self.txn_id, self.amount, self.merchant, self.txn_date,
+                self.original_message, int(choice), accounts,
+            ),
         )
 
 
@@ -893,15 +968,20 @@ async def _finalize_log_sale(interaction: discord.Interaction, resolved_items: l
         await finance_utils.refresh_finance_message(interaction.client, pallet_id)
 
     result = await _post_sale_to_quickbooks(sale_id, platform, total_price, already_deposited, sale_date, je_lines)
+    item_list = ", ".join(
+        f"{db.get_pallet(item['pallet_id'])['name']}#{item['item_number']}" for item in resolved_items
+    )
 
     if result["ok"]:
-        item_list = ", ".join(
-            f"{db.get_pallet(item['pallet_id'])['name']}#{item['item_number']}" for item in resolved_items
-        )
         message = (
             f"✅ Logged sale #{sale_id} ({item_list}) via **{platform}**.\n"
             f"Sales Receipt: `{result['sales_receipt_doc']}`\n"
             f"Journal Entry: `{result['journal_entry_doc']}`"
+        )
+        await finance_utils.post_to_finance_audit_log(
+            interaction.client,
+            f"💰 **Sale #{sale_id}** ({item_list}) via **{platform}** - ${total_price:.2f} "
+            f"(Sales Receipt `{result['sales_receipt_doc']}`, Journal Entry `{result['journal_entry_doc']}`)",
         )
     else:
         message = (
@@ -1189,6 +1269,13 @@ class Finance(commands.Cog):
                 f"✅ Sale #{sale_id} logged. Sales Receipt: `{result['sales_receipt_doc']}`, "
                 f"Journal Entry: `{result['journal_entry_doc']}`.",
                 ephemeral=True,
+            )
+            item_list = ", ".join(f"{si['pallet_name']}#{si['item_number']}" for si in sale_items)
+            await finance_utils.post_to_finance_audit_log(
+                interaction.client,
+                f"💰 **Sale #{sale_id}** ({item_list}) via **{sale['platform']}** - ${sale['total_price']:.2f} "
+                f"(Sales Receipt `{result['sales_receipt_doc']}`, Journal Entry `{result['journal_entry_doc']}`) "
+                f"- via retry-sale",
             )
         else:
             await interaction.followup.send(f"⚠️ Still failing: {result['error']}", ephemeral=True)

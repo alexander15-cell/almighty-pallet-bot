@@ -16,23 +16,33 @@ import pytest
 
 import config
 import database as db
+import finance_utils
 import quickbooks as qb
 from cogs.finance import (
     _handle_allocation_choice,
     _post_credit_card_charge,
     _post_awaiting_charge_card,
+    PalletAllocateSelect,
+    ExpenseAccountSelect,
+    ExpenseAccountSelectView,
 )
 
 
 class _FakeResponse:
     def __init__(self):
         self.deferred = False
+        self.edited_content = None
+        self.edited_view = None
 
     async def defer(self, ephemeral=True, thinking=True):
         self.deferred = True
 
     async def send_message(self, *args, **kwargs):
         pass
+
+    async def edit_message(self, content=None, view=None, **kwargs):
+        self.edited_content = content
+        self.edited_view = view
 
 
 class _FakeFollowup:
@@ -63,9 +73,11 @@ class _FakeChannel:
     def __init__(self, channel_id=555):
         self.id = channel_id
         self.sent = []
+        self.sent_args = []
 
-    async def send(self, **kwargs):
+    async def send(self, *args, **kwargs):
         self.sent.append(kwargs)
+        self.sent_args.append(args)
         return _FakeMessage(msg_id=9999)
 
 
@@ -254,3 +266,122 @@ def test_post_credit_card_charge_sends_embed_with_allocate_button(fresh_db):
     view = channel.sent[0]["view"]
     assert len(view.children) == 1
     assert view.children[0].item.custom_id == "qb_allocate:t2"
+
+
+# ------------------------------------------------------- expense account picker
+
+
+def test_choosing_a_real_pallet_shows_the_account_picker_not_immediate_allocation(fresh_db, pallet, monkeypatch):
+    async def fake_list_accounts(account_types):
+        assert account_types == ["Expense", "Cost of Goods Sold"]
+        return [{"id": "10", "name": "Office Supplies", "type": "Expense", "balance": 0.0}]
+    monkeypatch.setattr(qb, "list_accounts", fake_list_accounts)
+
+    select = PalletAllocateSelect("txn-8", 15.0, "Staples", "2026-09-20", _FakeMessage(), [pallet])
+    monkeypatch.setattr(type(select), "values", property(lambda self: [str(pallet["id"])]))
+    interaction = _FakeInteraction(_FakeClient())
+
+    asyncio.run(select.callback(interaction))
+
+    assert isinstance(interaction.response.edited_view, ExpenseAccountSelectView)
+    # Nothing allocated yet - only picking an account (or "don't categorize") finishes it.
+    assert fresh_db.get_pallet_costs(pallet["id"]) == []
+
+
+def test_choosing_new_pallet_skips_the_account_picker(fresh_db, monkeypatch):
+    select = PalletAllocateSelect("txn-9", 15.0, "Staples", "2026-09-20", _FakeMessage(), [])
+    monkeypatch.setattr(type(select), "values", property(lambda self: ["__new_pallet__"]))
+    interaction = _FakeInteraction(_FakeClient())
+
+    asyncio.run(select.callback(interaction))
+
+    assert interaction.response.edited_view is None  # went straight to allocation
+    assert len(fresh_db.get_unclaimed_pallet_charges()) == 1
+
+
+def test_account_picker_falls_back_to_no_accounts_on_quickbooks_error(fresh_db, pallet, monkeypatch):
+    async def fake_list_accounts(account_types):
+        raise qb.QuickBooksError("down")
+    monkeypatch.setattr(qb, "list_accounts", fake_list_accounts)
+
+    select = PalletAllocateSelect("txn-10", 15.0, "Staples", "2026-09-20", _FakeMessage(), [pallet])
+    monkeypatch.setattr(type(select), "values", property(lambda self: [str(pallet["id"])]))
+    interaction = _FakeInteraction(_FakeClient())
+
+    asyncio.run(select.callback(interaction))  # must not raise
+
+    view = interaction.response.edited_view
+    assert isinstance(view, ExpenseAccountSelectView)
+
+
+def test_picking_dont_categorize_allocates_with_no_account_ref(pallet, fresh_db, monkeypatch):
+    calls = []
+    async def fake_create_expense(*args, **kwargs):
+        calls.append(kwargs)
+        return {"id": "x"}
+    monkeypatch.setattr(qb, "create_expense", fake_create_expense)
+    monkeypatch.setattr(config, "QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID", "77")
+
+    account_select = ExpenseAccountSelect(
+        "txn-11", 20.0, "Staples", "2026-09-20", _FakeMessage(), pallet["id"], accounts=[],
+    )
+    monkeypatch.setattr(type(account_select), "values", property(lambda self: ["__none__"]))
+    interaction = _FakeInteraction(_FakeClient())
+
+    asyncio.run(account_select.callback(interaction))
+
+    assert calls[0]["expense_account_ref"] is None
+    assert len(fresh_db.get_pallet_costs(pallet["id"])) == 1
+
+
+def test_picking_a_specific_account_passes_its_id_to_quickbooks(pallet, fresh_db, monkeypatch):
+    calls = []
+    async def fake_create_expense(*args, **kwargs):
+        calls.append(kwargs)
+        return {"id": "x"}
+    monkeypatch.setattr(qb, "create_expense", fake_create_expense)
+    monkeypatch.setattr(config, "QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID", "77")
+
+    accounts = [{"id": "55", "name": "Shipping Supplies", "type": "Expense", "balance": 0.0}]
+    account_select = ExpenseAccountSelect(
+        "txn-12", 20.0, "Staples", "2026-09-20", _FakeMessage(), pallet["id"], accounts=accounts,
+    )
+    monkeypatch.setattr(type(account_select), "values", property(lambda self: ["55"]))
+    interaction = _FakeInteraction(_FakeClient())
+
+    asyncio.run(account_select.callback(interaction))
+
+    assert calls[0]["expense_account_ref"] == "55"
+
+
+# --------------------------------------------------------------- audit log
+
+
+def test_allocating_to_a_pallet_posts_to_the_audit_log(pallet, fresh_db, monkeypatch):
+    async def fake_create_expense(*args, **kwargs):
+        return {"id": "x"}
+    monkeypatch.setattr(qb, "create_expense", fake_create_expense)
+    monkeypatch.setattr(config, "QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID", "77")
+    audit_channel = _FakeChannel(channel_id=444)
+    fresh_db.set_shared_channel("finance-audit-log", 444)
+    client = _FakeClient(channels={444: audit_channel})
+
+    asyncio.run(_handle_allocation_choice(
+        _FakeInteraction(client), "txn-13", 12.0, "Staples", "2026-09-20", _FakeMessage(), str(pallet["id"]),
+        expense_account_ref="55", expense_account_name="Shipping Supplies",
+    ))
+
+    assert len(audit_channel.sent_args) == 1
+    assert "Shipping Supplies" in audit_channel.sent_args[0][0]
+
+
+def test_filing_under_new_pallet_posts_to_the_audit_log(fresh_db):
+    audit_channel = _FakeChannel(channel_id=445)
+    fresh_db.set_shared_channel("finance-audit-log", 445)
+    client = _FakeClient(channels={445: audit_channel})
+
+    asyncio.run(_handle_allocation_choice(
+        _FakeInteraction(client), "txn-14", 8.0, "U-Haul", "2026-09-20", _FakeMessage(), "__new_pallet__",
+    ))
+
+    assert len(audit_channel.sent) == 1

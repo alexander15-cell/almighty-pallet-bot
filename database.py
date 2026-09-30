@@ -406,6 +406,15 @@ def init_db():
                 updated_at               TEXT NOT NULL
             );
 
+            -- The single pinned business-wide dashboard message (see
+            -- finance_utils.py's build_dashboard_embed/refresh_dashboard_message)
+            -- in #finance-dashboard - id is always 1, same single-row
+            -- pattern as quickbooks_connection above.
+            CREATE TABLE IF NOT EXISTS dashboard_message (
+                id          INTEGER PRIMARY KEY CHECK (id = 1),
+                message_id  INTEGER NOT NULL
+            );
+
             -- One row per real-world sale transaction, which can cover one
             -- item or a bundle sold together (possibly across different
             -- pallets - e.g. a buyer checking out with items from two
@@ -589,6 +598,17 @@ def get_all_shared_channels() -> dict:
     with get_conn() as conn:
         rows = conn.execute("SELECT stage, channel_id FROM shared_channels").fetchall()
         return {r["stage"]: r["channel_id"] for r in rows}
+
+
+def get_dashboard_message_id():
+    with get_conn() as conn:
+        row = conn.execute("SELECT message_id FROM dashboard_message WHERE id = 1").fetchone()
+        return row["message_id"] if row else None
+
+
+def set_dashboard_message_id(message_id: int):
+    with get_conn() as conn:
+        conn.execute("INSERT OR REPLACE INTO dashboard_message (id, message_id) VALUES (1, ?)", (message_id,))
 
 
 def ensure_items_autoincrement_floor(floor: int) -> bool:
@@ -1572,6 +1592,14 @@ def get_pallet_cogs_logged_total(pallet_id: int) -> float:
             "JOIN items i ON i.id = si.item_id WHERE i.pallet_id = ?",
             (pallet_id,),
         ).fetchone()
+        return row["total"] or 0.0
+
+
+def get_total_cogs_logged() -> float:
+    """Business-wide sum of sale_items.cogs_amount - the dashboard's
+    equivalent of get_pallet_cogs_logged_total, across every pallet."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT COALESCE(SUM(cogs_amount), 0) AS total FROM sale_items").fetchone()
         return row["total"] or 0.0
 
 

@@ -23,6 +23,9 @@ class _FakeRole:
 
 
 class _FakeMessage:
+    def __init__(self, message_id=9999):
+        self.id = message_id
+
     async def pin(self, reason=None):
         pass
 
@@ -35,11 +38,12 @@ class _FakeCategory:
 
 
 class _FakeTextChannel:
-    def __init__(self, name, channel_id, category):
+    def __init__(self, name, channel_id, category, overwrites=None):
         self.name = name
         self.id = channel_id
         self.category = category
         self.mention = f"#{name}"
+        self.overwrites = overwrites or {}
 
     async def send(self, *args, **kwargs):
         return _FakeMessage()
@@ -60,7 +64,7 @@ class _FakeGuild:
         return cat
 
     async def create_text_channel(self, name, category, overwrites=None, topic=None):
-        ch = _FakeTextChannel(name, self._next_channel_id, category)
+        ch = _FakeTextChannel(name, self._next_channel_id, category, overwrites=overwrites)
         self._next_channel_id += 1
         category.channels.append(ch)
         return ch
@@ -90,6 +94,7 @@ class _FakeInteraction:
         self.guild = guild
         self.response = _FakeResponse()
         self.followup = _FakeFollowup()
+        self.client = object()
 
 
 def test_finance_and_pipeline_channels_land_in_separate_categories(fresh_db):
@@ -107,6 +112,33 @@ def test_finance_and_pipeline_channels_land_in_separate_categories(fresh_db):
     pipeline_channel_names = {ch.name for ch in pipeline_category.channels}
     assert finance_channel_names == set(config.FINANCE_SHARED_CHANNELS)
     assert pipeline_channel_names == set(config.SHARED_STAGE_CHANNELS)
+
+
+def test_audit_log_and_dashboard_are_visible_to_everyone_but_credit_card_charges_is_not(fresh_db):
+    cog = PalletSetup.__new__(PalletSetup)
+    guild = _FakeGuild()
+    interaction = _FakeInteraction(guild)
+
+    asyncio.run(PalletSetup.setup_shared_channels.callback(cog, interaction))
+
+    finance_category = next(c for c in guild.categories if c.name == config.FINANCE_CATEGORY_NAME)
+    by_name = {ch.name: ch for ch in finance_category.channels}
+
+    for everyone_viewable in config.EVERYONE_VIEWABLE_CHANNELS:
+        assert by_name[everyone_viewable].overwrites[guild.default_role].view_channel is True
+        assert by_name[everyone_viewable].overwrites[guild.default_role].send_messages is False
+
+    assert by_name["credit-card-charges"].overwrites[guild.default_role].view_channel is False
+
+
+def test_finance_dashboard_gets_its_initial_pinned_message(fresh_db):
+    cog = PalletSetup.__new__(PalletSetup)
+    guild = _FakeGuild()
+    interaction = _FakeInteraction(guild)
+
+    asyncio.run(PalletSetup.setup_shared_channels.callback(cog, interaction))
+
+    assert fresh_db.get_dashboard_message_id() is not None
 
     for stage in config.FINANCE_SHARED_CHANNELS:
         assert fresh_db.get_shared_channel_id(stage) is not None

@@ -67,6 +67,21 @@ def role_overwrites(guild: discord.Guild, allowed_role_names: list[str]) -> dict
     return overwrites
 
 
+def everyone_viewable_overwrites(guild: discord.Guild) -> dict:
+    """Visible to everyone (read-only) - only Pallet Admin (and the bot
+    itself) can post. Same shape as #information's own overwrite dict, for
+    channels in config.EVERYONE_VIEWABLE_CHANNELS."""
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+    }
+    admin_role = discord.utils.get(guild.roles, name=config.ROLE_ADMIN)
+    if admin_role:
+        overwrites[admin_role] = discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, manage_messages=True
+        )
+    return overwrites
+
+
 class NewPalletView(discord.ui.View):
     """Persistent view (survives bot restarts) holding the 'Start New Pallet' button."""
 
@@ -128,6 +143,12 @@ async def _claim_awaiting_charges(interaction: discord.Interaction, pallet_id: i
                 log.exception(
                     "Claimed awaiting charge %s locally but failed to push the matching QuickBooks expense",
                     charge["quickbooks_txn_id"],
+                )
+            else:
+                await finance_utils.post_to_finance_audit_log(
+                    interaction.client,
+                    f"💳 **{pallet_name}**: ${charge['amount']:.2f} charge from **{charge['merchant']}** "
+                    f"claimed from #awaiting-pallet-charges.",
                 )
 
         if not config.PRESERVE_DISCORD_HISTORY and awaiting_channel and charge.get("message_id"):
@@ -361,7 +382,10 @@ class PalletSetup(commands.Cog):
             if existing_channel:
                 channel = existing_channel
             else:
-                overwrites = role_overwrites(guild, config.CHANNEL_ROLE_PERMISSIONS.get(stage, []))
+                if stage in config.EVERYONE_VIEWABLE_CHANNELS:
+                    overwrites = everyone_viewable_overwrites(guild)
+                else:
+                    overwrites = role_overwrites(guild, config.CHANNEL_ROLE_PERMISSIONS.get(stage, []))
                 channel = await guild.create_text_channel(
                     name=stage, category=category, overwrites=overwrites,
                     topic=config.CHANNEL_INFO.get(stage, ""),
@@ -373,6 +397,8 @@ class PalletSetup(commands.Cog):
                         await info_msg.pin(reason="Channel usage info")
                     except discord_resilience.TRANSIENT_DISCORD_ERRORS:
                         pass
+                if stage == "finance-dashboard":
+                    await finance_utils.post_initial_dashboard_message(interaction.client, channel)
             db.set_shared_channel(stage, channel.id)
             created_by_category.setdefault(category.name, []).append(channel.name)
 

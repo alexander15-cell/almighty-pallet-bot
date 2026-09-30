@@ -229,6 +229,23 @@ def _finance_channels_embed() -> discord.Embed:
         value="New QuickBooks credit-card charges show up here automatically, if QuickBooks is connected (`/finance connect-quickbooks`).",
         inline=False,
     )
+    embed.add_field(
+        name="#finance-audit-log (everyone can see)",
+        value=(
+            "Read-only permanent record of every completed QuickBooks transaction this bot has posted - "
+            "logged sales, allocated credit-card charges, claimed charges. Only the bot posts here."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="#finance-dashboard (everyone can see)",
+        value=(
+            "A single pinned message the bot keeps updated automatically - live account balances, "
+            "month-to-date revenue/spend, total COGS logged, and pallet progress. Refreshes itself "
+            "whenever a sale, expense, or cost changes anywhere."
+        ),
+        inline=False,
+    )
     return embed
 
 
