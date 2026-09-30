@@ -222,6 +222,31 @@ def _quote_query_string(value: str) -> str:
     return value.replace("'", "\\'")
 
 
+async def list_accounts(account_types: list = None, max_results: int = 100) -> list:
+    """
+    Every Account in the connected QuickBooks company, optionally filtered
+    to one or more AccountType values (e.g. ["Bank", "Credit Card"] - the
+    only two types a Purchase transaction can post against, which is all
+    the credit-card poller/list_recent_transactions ever actually watches).
+    Returns [{id, name, type, balance}], sorted by name - lets
+    /finance list-accounts find an account's numeric Id (needed for
+    QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID) without digging through QuickBooks'
+    own UI/URL.
+    """
+    query = "SELECT Id, Name, AccountType, CurrentBalance FROM Account"
+    if account_types:
+        clause = " OR ".join(f"AccountType = '{_quote_query_string(t)}'" for t in account_types)
+        query += f" WHERE {clause}"
+    query += f" ORDERBY Name MAXRESULTS {int(max_results)}"
+
+    result = await _request("GET", "query", params={"query": query})
+    rows = result.get("QueryResponse", {}).get("Account", [])
+    return [
+        {"id": row["Id"], "name": row.get("Name"), "type": row.get("AccountType"), "balance": row.get("CurrentBalance", 0.0)}
+        for row in rows
+    ]
+
+
 async def get_account_balance(account_id: str) -> dict:
     """Current balance of one account (e.g. the configured credit card
     account) - {'id', 'name', 'balance'}."""

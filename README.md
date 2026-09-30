@@ -227,6 +227,13 @@ not built without an explicit spec).
   the page failing to load after you approve access is expected). The
   refresh token is persisted in the database and auto-refreshed before
   every ~1 hour access-token expiry.
+- **Finding your account ID**: `/finance list-accounts` (Pallet Admin, once
+  connected) lists every Bank/Credit Card account in the connected
+  QuickBooks company with its name, balance, and numeric ID - the practical
+  way to get the value for `QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID` below without
+  digging through QuickBooks' own Chart of Accounts URL. Pass
+  `account_type: All account types` to include every account type instead
+  of just Bank/Credit Card.
 - **Credit card tracking**: every `QUICKBOOKS_POLL_MINUTES` (default 20),
   the bot checks the ONE configured `QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID`
   account for new charges and posts each one to `#credit-card-charges`

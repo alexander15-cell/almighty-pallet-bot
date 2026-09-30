@@ -226,6 +226,44 @@ def test_get_account_balance_raises_when_account_missing(fresh_db, monkeypatch):
         asyncio.run(qb.get_account_balance("missing"))
 
 
+def test_list_accounts_filters_by_type_and_parses_rows(fresh_db, monkeypatch):
+    _connected(fresh_db, monkeypatch)
+    seen_queries = []
+
+    def responder(method, url, params):
+        seen_queries.append(params["query"])
+        return 200, {"QueryResponse": {"Account": [
+            {"Id": "77", "Name": "Business Card", "AccountType": "Credit Card", "CurrentBalance": 123.45},
+            {"Id": "12", "Name": "Checking", "AccountType": "Bank", "CurrentBalance": 500.0},
+        ]}}
+
+    _install_fake_session(monkeypatch, responder)
+
+    accounts = asyncio.run(qb.list_accounts(["Bank", "Credit Card"]))
+
+    assert accounts == [
+        {"id": "77", "name": "Business Card", "type": "Credit Card", "balance": 123.45},
+        {"id": "12", "name": "Checking", "type": "Bank", "balance": 500.0},
+    ]
+    assert "AccountType = 'Bank' OR AccountType = 'Credit Card'" in seen_queries[0]
+
+
+def test_list_accounts_with_no_type_filter_omits_where_clause(fresh_db, monkeypatch):
+    _connected(fresh_db, monkeypatch)
+    seen_queries = []
+
+    def responder(method, url, params):
+        seen_queries.append(params["query"])
+        return 200, {"QueryResponse": {"Account": []}}
+
+    _install_fake_session(monkeypatch, responder)
+
+    accounts = asyncio.run(qb.list_accounts(None))
+
+    assert accounts == []
+    assert "WHERE" not in seen_queries[0]
+
+
 def test_list_recent_transactions_parses_purchase_rows(fresh_db, monkeypatch):
     _connected(fresh_db, monkeypatch)
 

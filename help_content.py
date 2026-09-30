@@ -192,6 +192,11 @@ ENTRIES = (
         ("connect quickbooks", "link quickbooks", "quickbooks setup"),
     ),
     HelpEntry(
+        "/finance list-accounts",
+        "Admin: list QuickBooks accounts and their IDs, for setting QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID.",
+        ("quickbooks account id", "find account id", "list quickbooks accounts", "credit card account id"),
+    ),
+    HelpEntry(
         "/finance import-pirateship <csv>",
         "Admin: import a Pirate Ship shipping export and allocate its costs to pallets/items.",
         ("import pirate ship", "allocate shipping cost"),

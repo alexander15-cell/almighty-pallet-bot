@@ -179,6 +179,7 @@ def _finance_commands_embed() -> discord.Embed:
     embed.add_field(name="pallet-summary [pallet_name]", value="Full cost breakdown by type (purchase/credit card/shipping/etc), revenue, and margin for a pallet.", inline=False)
     embed.add_field(name="overview", value="Business-wide snapshot: QuickBooks balance, month-to-date spend/revenue, pallets in progress vs sold out.", inline=False)
     embed.add_field(name="connect-quickbooks", value="Admin: link QuickBooks Online for automatic credit-card charge tracking. See #credit-card-charges.", inline=False)
+    embed.add_field(name="list-accounts", value="Admin: list QuickBooks accounts and their IDs, for setting QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID.", inline=False)
     embed.add_field(name="import-pirateship <csv>", value="Admin: import a Pirate Ship shipping export and allocate its costs to pallets/items.", inline=False)
     return embed
 

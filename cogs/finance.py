@@ -1125,6 +1125,55 @@ class Finance(commands.Cog):
             await interaction.response.send_message(message, view=view, ephemeral=True)
 
     @finance_group.command(
+        name="list-accounts",
+        description="Admin: list QuickBooks accounts and their IDs, for QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID.",
+    )
+    @app_commands.describe(account_type="Which account types to show (default: Bank and Credit Card - the only types this bot watches)")
+    @app_commands.choices(account_type=[
+        app_commands.Choice(name="Bank and Credit Card (default)", value="bank_and_credit_card"),
+        app_commands.Choice(name="All account types", value="all"),
+    ])
+    async def list_accounts(self, interaction: discord.Interaction, account_type: app_commands.Choice[str] = None):
+        if not _is_admin(interaction):
+            await interaction.response.send_message("You need **Pallet Admin** to do that.", ephemeral=True)
+            return
+        if not quickbooks.is_connected():
+            await interaction.response.send_message(
+                "QuickBooks isn't connected yet - run `/finance connect-quickbooks` first.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        types = None if (account_type and account_type.value == "all") else ["Bank", "Credit Card"]
+        try:
+            accounts = await quickbooks.list_accounts(types)
+        except quickbooks.QuickBooksError as e:
+            await interaction.followup.send(f"⚠️ Couldn't fetch accounts: {e}", ephemeral=True)
+            return
+
+        if not accounts:
+            await interaction.followup.send(
+                "No matching accounts found. If you haven't linked a card/bank account inside "
+                "QuickBooks yet (Banking → Link account), do that first - this only lists accounts "
+                "that already exist there.",
+                ephemeral=True,
+            )
+            return
+
+        lines = [f"**{a['name']}** ({a['type']}) - ID `{a['id']}` - ${a['balance']:.2f}" for a in accounts]
+        description = "\n".join(lines)
+        if len(description) > 4096:
+            description = description[:4090] + "\n..."
+        embed = discord.Embed(
+            title="🏦 QuickBooks Accounts",
+            description=description,
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text="Copy the ID of the account you want watched into QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID in .env, then restart the bot.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @finance_group.command(
         name="import-pirateship",
         description="Admin: import a Pirate Ship shipping export CSV and allocate its costs to pallets.",
     )
