@@ -178,6 +178,47 @@ def test_pallet_delete_confirmed_deletes_pallet_and_discord_channels(fresh_db, f
     assert "permanently deleted" in interaction.followup.messages[-1]
 
 
+class _FollowupThatFailsOnceTheChannelIsGone:
+    """Reproduces the real crash: an interaction's ephemeral followup can't
+    be delivered once the channel it was invoked in no longer exists (a
+    genuine Discord 404 "Unknown Message", confirmed from a production
+    crash log) - so a followup.send() called AFTER the invoking pallet's
+    own category/channels are torn down must raise, while one sent before
+    still succeeds."""
+
+    def __init__(self, category):
+        self.messages = []
+        self._category = category
+
+    async def send(self, content=None, **kwargs):
+        if self._category.deleted:
+            import discord
+            raise discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), {"code": 10008, "message": "Unknown Message"})
+        self.messages.append(content)
+
+
+def test_pallet_delete_confirms_before_tearing_down_its_own_invoking_channel(fresh_db, full_history_pallet):
+    # Regression test for a real production crash: running /pallet delete
+    # from inside one of that pallet's own channels deleted the channel the
+    # interaction needed to deliver its final confirmation to, so the
+    # confirmation itself 404'd (NotFound: Unknown Message) even though the
+    # deletion had fully succeeded. Confirming BEFORE deleting channels
+    # fixes it - this proves the ordering, not just that deletion works.
+    pallet_id, item_id, charge_id = full_history_pallet
+    channel = _FakeChannel()
+    category = _FakeCategory([channel])
+    cog = AdminTools.__new__(AdminTools)
+    guild = _FakeGuild(category)
+    interaction = _FakeInteraction(guild)
+    interaction.followup = _FollowupThatFailsOnceTheChannelIsGone(category)
+
+    asyncio.run(AdminTools.pallet_delete.callback(cog, interaction, "History Pallet", confirm=True))
+
+    assert fresh_db.get_pallet(pallet_id) is None
+    assert category.deleted is True
+    assert "permanently deleted" in interaction.followup.messages[-1]
+
+
 def test_pallet_delete_unknown_name_is_rejected(fresh_db):
     cog = AdminTools.__new__(AdminTools)
     interaction = _FakeInteraction(_FakeGuild(category=None))

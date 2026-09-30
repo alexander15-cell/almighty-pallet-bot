@@ -485,20 +485,31 @@ class AdminTools(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
-        category = interaction.guild.get_channel(pallet["category_id"])
-        if category:
-            try:
-                for channel in list(category.channels):
-                    await channel.delete(reason=f"Pallet {pallet['name']} permanently deleted")
-                await category.delete(reason=f"Pallet {pallet['name']} permanently deleted")
-            except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
-                await interaction.followup.send(f"Partially failed to delete channels: {e}", ephemeral=True)
 
         db.delete_pallet_permanently(pallet["id"])
         await interaction.followup.send(
             f"🗑️ **{pallet['name']}** permanently deleted. The name is now free to reuse.",
             ephemeral=True,
         )
+
+        # Deleting Discord channels/category happens LAST, after the
+        # confirmation above - if this command is run from inside one of
+        # this pallet's own channels (the natural place to run it), deleting
+        # that channel first would delete the interaction's own followup
+        # webhook target, so the confirmation itself would 404 with "Unknown
+        # Message" even though the deletion fully succeeded (confirmed via a
+        # real crash log). Any failure past this point is cosmetic cleanup
+        # the user has already been told the outcome for, so it's logged
+        # rather than reported back through an interaction that may itself
+        # no longer have a channel to deliver to.
+        category = interaction.guild.get_channel(pallet["category_id"])
+        if category:
+            try:
+                for channel in list(category.channels):
+                    await channel.delete(reason=f"Pallet {pallet['name']} permanently deleted")
+                await category.delete(reason=f"Pallet {pallet['name']} permanently deleted")
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                log.exception(f"Failed to fully delete Discord channels for permanently-deleted pallet {pallet['name']!r}")
 
     @pallet_group.command(name="list", description="List all pallets and their item counts (admin only).")
     @app_commands.describe(include_archived="Include archived pallets too (default: yes)")
