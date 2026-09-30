@@ -39,6 +39,9 @@ def full_history_pallet(fresh_db):
     charge_id = fresh_db.create_awaiting_pallet_charge("txn-history", 40.0, "Freight Co", "2026-09-10", allocated_by=1)
     fresh_db.claim_awaiting_pallet_charge(charge_id, pallet_id, actor_id=1)
 
+    sale_id = fresh_db.create_sale("eBay", "2026-09-29", 25.0, False, created_by=1)
+    fresh_db.add_sale_item(sale_id, item_id, 25.0, 5.0, 5.0)
+
     return pallet_id, item_id, charge_id
 
 
@@ -51,6 +54,7 @@ def test_delete_pallet_permanently_erases_every_related_row(fresh_db, full_histo
         assert conn.execute("SELECT COUNT(*) FROM ebay_listing_data WHERE item_id = ?", (item_id,)).fetchone()[0] > 0
         assert conn.execute("SELECT COUNT(*) FROM finance_transactions WHERE pallet_id = ?", (pallet_id,)).fetchone()[0] > 0
         assert conn.execute("SELECT COUNT(*) FROM pallet_costs WHERE pallet_id = ?", (pallet_id,)).fetchone()[0] > 0
+        assert conn.execute("SELECT COUNT(*) FROM sale_items WHERE item_id = ?", (item_id,)).fetchone()[0] > 0
 
     fresh_db.delete_pallet_permanently(pallet_id)
 
@@ -63,12 +67,40 @@ def test_delete_pallet_permanently_erases_every_related_row(fresh_db, full_histo
         assert conn.execute("SELECT COUNT(*) FROM finance_transactions WHERE pallet_id = ?", (pallet_id,)).fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM pallet_costs WHERE pallet_id = ?", (pallet_id,)).fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM channel_map WHERE pallet_id = ?", (pallet_id,)).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM sale_items WHERE item_id = ?", (item_id,)).fetchone()[0] == 0
 
     # The claimed charge's money isn't lost - it's back in the unclaimed pool.
     charge = fresh_db.get_awaiting_pallet_charge(charge_id)
     assert charge["claimed"] == 0
     assert charge["claimed_pallet_id"] is None
     assert charge in fresh_db.get_unclaimed_pallet_charges()
+
+
+def test_delete_pallet_permanently_leaves_a_cross_pallet_sale_intact(fresh_db):
+    # Regression test for a real production crash: deleting a pallet with
+    # an item that had gone through /finance log-sale raised
+    # sqlite3.IntegrityError (FOREIGN KEY constraint failed) on
+    # DELETE FROM items, since sale_items.item_id REFERENCES items(id) and
+    # nothing cleared that row first. A bundle sale can span other pallets'
+    # items too, so only THIS pallet's own sale_items row should go -
+    # the sales row itself, and the other pallet's sale_items row, must
+    # survive untouched.
+    p1 = fresh_db.create_pallet("Pallet One", category_id=1, created_by=1)
+    p2 = fresh_db.create_pallet("Pallet Two", category_id=2, created_by=1)
+    item1 = fresh_db.create_item(p1, "Widget", [], 1)
+    item2 = fresh_db.create_item(p2, "Gadget", [], 1)
+    sale_id = fresh_db.create_sale("In Person", "2026-09-29", 20.0, False, created_by=1)
+    fresh_db.add_sale_item(sale_id, item1, 10.0, 3.0, 3.0)
+    fresh_db.add_sale_item(sale_id, item2, 10.0, 4.0, 4.0)
+
+    fresh_db.delete_pallet_permanently(p1)  # must not raise
+
+    assert fresh_db.get_pallet(p1) is None
+    assert fresh_db.get_item_sale(item1) is None
+    sale = fresh_db.get_sale(sale_id)
+    assert sale is not None  # the sale itself survives - item2 is still in it
+    remaining = fresh_db.get_sale_items(sale_id)
+    assert [i["item_id"] for i in remaining] == [item2]
 
 
 def test_delete_pallet_permanently_frees_the_name_for_reuse(fresh_db, full_history_pallet):

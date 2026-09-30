@@ -531,6 +531,13 @@ def delete_pallet_permanently(pallet_id: int):
     rather than disappearing along with this one. The caller is
     responsible for the pallet's Discord category/channels, same division
     of labor as archive_pallet.
+
+    A sale_items row for one of this pallet's items is deleted outright
+    (not un-claimed) - unlike awaiting_pallet_charges, there's no "put it
+    back in a pool" state for a QuickBooks Sales Receipt/Journal Entry that
+    already posted for real. The parent sales row is left alone even then,
+    since /finance log-sale's bundles can span other pallets' items too -
+    only ever this pallet's own sale_items rows are touched.
     """
     with get_conn() as conn:
         item_ids = [r["id"] for r in conn.execute(
@@ -541,6 +548,7 @@ def delete_pallet_permanently(pallet_id: int):
             conn.execute(f"DELETE FROM item_events WHERE item_id IN ({placeholders})", item_ids)
             conn.execute(f"DELETE FROM item_holds WHERE item_id IN ({placeholders})", item_ids)
             conn.execute(f"DELETE FROM ebay_listing_data WHERE item_id IN ({placeholders})", item_ids)
+            conn.execute(f"DELETE FROM sale_items WHERE item_id IN ({placeholders})", item_ids)
         conn.execute("DELETE FROM finance_transactions WHERE pallet_id = ?", (pallet_id,))
         conn.execute("DELETE FROM pallet_costs WHERE pallet_id = ?", (pallet_id,))
         conn.execute(
