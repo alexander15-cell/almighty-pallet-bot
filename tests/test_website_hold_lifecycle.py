@@ -124,7 +124,7 @@ def test_listed_hold_release_sale_shipment_keep_public_contract_order(lifecycle)
     assert not notice.deleted  # retained for cold reconciliation of stale older cards
     assert case.db.get_open_hold(case.item_id) is None
 
-    asyncio.run(case.cog.move_to_sold(interaction(released), case.item_id))
+    asyncio.run(case.cog.finish_move_to_sold(interaction(released), case.item_id, "eBay", released))
     sold = case.channels["sold"].messages[-1]
     assert sold.id > released.id
     assert fields(sold)["Website status"] == "sold"
@@ -179,7 +179,7 @@ def test_failed_resolution_preserves_open_hold_for_retry(lifecycle):
 
 def test_sold_hold_and_resolution_stay_sold(lifecycle):
     case = lifecycle
-    asyncio.run(case.cog.move_to_sold(interaction(case.old), case.item_id))
+    asyncio.run(case.cog.finish_move_to_sold(interaction(case.old), case.item_id, "eBay", case.old))
     assert place_hold(case)
     assert len(case.channels["listed"].messages) == 1  # no new listed/held event for sold
     assert asyncio.run(case.cog.resolve_item_hold(case.db.get_item(case.item_id), actor_id=42)) == (True, "sold")

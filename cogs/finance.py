@@ -50,6 +50,7 @@ status card in #pallet-discussion via finance_utils.
 """
 import logging
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -574,6 +575,342 @@ class UnmatchedShippingSelect(discord.ui.Select):
         await _handle_unmatched_shipping_assignment(interaction, self.row_label, self.amount, self.values[0])
 
 
+# --------------------------------------------------------------- log-sale --
+# /finance log-sale (below) - logs a sale (single item or a bundle, possibly
+# across different pallets) and books it to QuickBooks: a Sales Receipt
+# (taxable for everything except eBay, which already collects/remits tax -
+# still gets a non-taxable receipt posted to the eBay Sales account so every
+# channel's revenue shows up in the books consistently) plus a Cost of Goods
+# Sold Journal Entry either way. Purchase price and COGS are always entered
+# fresh by a partner here - never pulled from any stored/default value.
+
+_COST_COGS_RE = re.compile(
+    r"cost\s*[:=]?\s*\$?\s*([\d]+(?:\.\d+)?).*?cogs\s*[:=]?\s*\$?\s*([\d]+(?:\.\d+)?)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _parse_combined_line(line: str):
+    match = _COST_COGS_RE.search(line)
+    if not match:
+        return None
+    try:
+        return float(match.group(1)), float(match.group(2))
+    except ValueError:
+        return None
+
+
+def _parse_item_references(text: str):
+    """
+    Parses /finance log-sale's `items` parameter - comma-separated
+    "PalletName#ItemNumber" references, e.g. "Pallet-2026-014#3,
+    Pallet-2026-009#7" (a bundle can span different pallets - see
+    database.py's sales/sale_items tables). Returns (resolved_items,
+    references, errors): resolved_items/references are same-length,
+    same-order lists for everything that matched a real item; errors is a
+    list of human-readable messages for anything that didn't - rejected
+    with a clear error rather than guessed at (per the original spec).
+    """
+    resolved_items = []
+    references = []
+    errors = []
+    for raw in text.split(","):
+        ref = raw.strip()
+        if not ref:
+            continue
+        if "#" not in ref:
+            errors.append(f'"{ref}" - expected the format PalletName#ItemNumber')
+            continue
+        pallet_name, _, number_text = ref.rpartition("#")
+        pallet_name = pallet_name.strip()
+        number_text = number_text.strip()
+        if not number_text.isdigit():
+            errors.append(f'"{ref}" - item number must be a whole number')
+            continue
+        pallet = db.get_pallet_by_name(pallet_name)
+        if not pallet:
+            errors.append(f'"{ref}" - no pallet named "{pallet_name}"')
+            continue
+        item = db.get_item_by_pallet_and_number(pallet["id"], int(number_text))
+        if not item:
+            errors.append(f'"{ref}" - no item #{number_text} in "{pallet_name}"')
+            continue
+        resolved_items.append(item)
+        references.append(ref)
+    return resolved_items, references, errors
+
+
+def _split_evenly(total: float, n: int) -> list:
+    """Splits `total` into n amounts rounded to cents that sum EXACTLY to
+    round(total, 2) - the rounding remainder goes on the last share(s), so
+    a $10.00 bundle of 3 items is $3.33/$3.33/$3.34, not three $3.33s that
+    silently lose a cent."""
+    total_cents = round(total * 100)
+    base = total_cents // n
+    remainder = total_cents - base * n
+    shares = [base] * n
+    for i in range(remainder):
+        shares[-(i + 1)] += 1
+    return [s / 100 for s in shares]
+
+
+def _parse_cogs_entry(text: str, references: list, resolved_items: list) -> dict:
+    """
+    Parses the cost/COGS modal's free-text entry - either ONE combined line
+    (cost/COGS split evenly across every item in the sale) or exactly one
+    line per item, each starting with that item's own reference - never a
+    mix (the original spec's "all-or-nothing" requirement, so a sale can
+    never end up itemized for some items and combined for others). Returns
+    {item_id: (purchase_price, cogs_amount)}; raises ValueError with a
+    user-facing message on anything malformed, rather than guessing.
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("Nothing entered - type at least one line.")
+
+    starts_with_a_reference = any(lines[0].lower().startswith(ref.lower() + ":") for ref in references)
+    if len(lines) == 1 and not starts_with_a_reference:
+        parsed = _parse_combined_line(lines[0])
+        if not parsed:
+            raise ValueError(f'Couldn\'t read a cost/COGS pair from "{lines[0]}" - expected e.g. "cost 10.00, cogs 10.00".')
+        cost, cogs = parsed
+        n = len(resolved_items)
+        cost_shares = _split_evenly(cost, n)
+        cogs_shares = _split_evenly(cogs, n)
+        return {item["id"]: (cost_shares[i], cogs_shares[i]) for i, item in enumerate(resolved_items)}
+
+    if len(lines) != len(resolved_items):
+        raise ValueError(
+            f"Got {len(lines)} line(s) but this sale has {len(resolved_items)} item(s) - enter either "
+            "ONE combined line, or exactly one line per item, never a mix."
+        )
+
+    result = {}
+    remaining = list(zip(references, resolved_items))
+    for line in lines:
+        match = next((pair for pair in remaining if line.lower().startswith(pair[0].lower() + ":")), None)
+        if not match:
+            raise ValueError(
+                f'Couldn\'t match line "{line}" to one of this sale\'s items - start each line with the '
+                f'item reference, e.g. "{references[0]}: cost 10.00, cogs 10.00".'
+            )
+        ref, item = match
+        remaining.remove(match)
+        parsed = _parse_combined_line(line)
+        if not parsed:
+            raise ValueError(f'Couldn\'t read a cost/COGS pair from "{line}" - expected e.g. "{ref}: cost 10.00, cogs 10.00".')
+        result[item["id"]] = parsed
+    return result
+
+
+class LogSaleCogsModal(discord.ui.Modal, title="Enter cost + COGS"):
+    entries = discord.ui.TextInput(
+        label="Cost & COGS - see pre-filled text for format",
+        style=discord.TextStyle.paragraph,
+        max_length=4000,
+    )
+
+    def __init__(self, resolved_items: list, references: list, platform: str, total_price: float,
+                 already_deposited: bool, sale_date: str):
+        super().__init__()
+        self.resolved_items = resolved_items
+        self.references = references
+        self.platform = platform
+        self.total_price = total_price
+        self.already_deposited = already_deposited
+        self.sale_date = sale_date
+        if len(references) == 1:
+            self.entries.default = "cost 0.00, cogs 0.00"
+        else:
+            self.entries.default = "\n".join(f"{ref}: cost 0.00, cogs 0.00" for ref in references)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            parsed = _parse_cogs_entry(self.entries.value, self.references, self.resolved_items)
+        except ValueError as e:
+            await interaction.response.send_message(f"⚠️ {e}", ephemeral=True)
+            return
+        await _show_log_sale_confirmation(
+            interaction, self.resolved_items, parsed, self.platform,
+            self.total_price, self.already_deposited, self.sale_date,
+        )
+
+
+async def _show_log_sale_confirmation(interaction: discord.Interaction, resolved_items: list, parsed: dict,
+                                       platform: str, total_price: float, already_deposited: bool, sale_date: str):
+    n = len(resolved_items)
+    allocated_shares = _split_evenly(total_price, n)
+    lines = []
+    total_cost = 0.0
+    total_cogs = 0.0
+    for i, item in enumerate(resolved_items):
+        pallet = db.get_pallet(item["pallet_id"])
+        purchase_price, cogs_amount = parsed[item["id"]]
+        total_cost += purchase_price
+        total_cogs += cogs_amount
+        lines.append(
+            f"**{pallet['name']}#{item['item_number']}** - sale ${allocated_shares[i]:.2f}, "
+            f"cost ${purchase_price:.2f}, COGS ${cogs_amount:.2f}"
+        )
+
+    is_ebay = platform.strip().lower() == "ebay"
+    tax_note = (
+        "Non-taxable Sales Receipt posted to the eBay Sales account (eBay already collects/remits tax)."
+        if is_ebay else
+        "Taxable Sales Receipt - QuickBooks Automated Sales Tax will calculate and add the tax automatically."
+    )
+    deposit_note = "Already deposited" if already_deposited else "Undeposited Funds"
+
+    embed = discord.Embed(title="Confirm sale + COGS", color=discord.Color.gold())
+    embed.add_field(name=f"{n} item(s) - {platform}", value="\n".join(lines), inline=False)
+    embed.add_field(name="Total Sale Price (pre-tax)", value=f"${total_price:.2f}", inline=True)
+    embed.add_field(name="Total COGS", value=f"${total_cogs:.2f}", inline=True)
+    embed.add_field(name="Deposit To", value=deposit_note, inline=True)
+    embed.add_field(name="Sales Tax", value=tax_note, inline=False)
+    embed.set_footer(text="Nothing is sent to QuickBooks until you confirm.")
+
+    view = LogSaleConfirmView(resolved_items, parsed, platform, total_price, already_deposited, sale_date)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class LogSaleConfirmView(discord.ui.View):
+    def __init__(self, resolved_items: list, parsed: dict, platform: str, total_price: float,
+                 already_deposited: bool, sale_date: str):
+        super().__init__(timeout=300)
+        self.resolved_items = resolved_items
+        self.parsed = parsed
+        self.platform = platform
+        self.total_price = total_price
+        self.already_deposited = already_deposited
+        self.sale_date = sale_date
+
+    @discord.ui.button(label="Confirm & log to QuickBooks", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _finalize_log_sale(
+            interaction, self.resolved_items, self.parsed, self.platform,
+            self.total_price, self.already_deposited, self.sale_date,
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, emoji="❌")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Cancelled - nothing was logged.", embed=None, view=None)
+
+
+async def _post_sale_to_quickbooks(sale_id: int, platform: str, total_price: float, already_deposited: bool,
+                                    sale_date: str, je_lines: list) -> dict:
+    """
+    Creates the Sales Receipt (taxable unless platform is eBay) and the COGS
+    Journal Entry for one sale, in that order - shared by _finalize_log_sale
+    and /finance retry-sale so a QuickBooks failure is only ever handled one
+    way. Idempotent against a partial prior attempt: skips creating another
+    Sales Receipt if one's already saved on this sale (see
+    database.set_sale_receipt_id) - so retrying after a Journal Entry
+    failure never double-books revenue.
+
+    Returns {'ok': True, 'sales_receipt_doc', 'journal_entry_doc'} on
+    success, or {'ok': False, 'error'} - never raises, so a QuickBooks
+    outage never loses the already-saved sale/sale_items rows.
+    """
+    sale = db.get_sale(sale_id)
+    is_ebay = platform.strip().lower() == "ebay"
+    sales_receipt_doc = "(already created)" if sale["quickbooks_sales_receipt_id"] else None
+
+    if not sale["quickbooks_sales_receipt_id"]:
+        income_account = config.QUICKBOOKS_EBAY_SALES_ACCOUNT_ID if is_ebay else config.QUICKBOOKS_SALES_INCOME_ACCOUNT_ID
+        deposit_account = (
+            config.QUICKBOOKS_BANK_ACCOUNT_ID if already_deposited else config.QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID
+        )
+        memo = f"Sale #{sale_id} via {platform} on {sale_date}"
+        try:
+            receipt = await quickbooks.create_sales_receipt(
+                customer_id=config.QUICKBOOKS_CASH_SALES_CUSTOMER_ID,
+                item_id=config.QUICKBOOKS_CASH_SALES_ITEM_ID,
+                income_account_id=income_account,
+                deposit_account_id=deposit_account,
+                amount=total_price, date=sale_date, memo=memo,
+                taxable=not is_ebay,
+            )
+        except quickbooks.QuickBooksError as e:
+            return {"ok": False, "error": f"Sales Receipt failed: {e}"}
+        db.set_sale_receipt_id(sale_id, receipt["id"])
+        sales_receipt_doc = receipt.get("doc_number") or receipt["id"]
+
+    je_memo = f"COGS for sale #{sale_id} via {platform} on {sale_date} (Sales Receipt {sales_receipt_doc})"
+    try:
+        je = await quickbooks.create_journal_entry(
+            debit_account_id=config.QUICKBOOKS_COGS_ACCOUNT_ID,
+            credit_account_id=config.QUICKBOOKS_INVENTORY_ACCOUNT_ID,
+            lines=je_lines, date=sale_date, memo=je_memo,
+        )
+    except quickbooks.QuickBooksError as e:
+        return {"ok": False, "error": f"Journal Entry failed: {e}"}
+
+    db.mark_sale_logged(sale_id, je["id"])
+    return {"ok": True, "sales_receipt_doc": sales_receipt_doc, "journal_entry_doc": je.get("doc_number") or je["id"]}
+
+
+async def _finalize_log_sale(interaction: discord.Interaction, resolved_items: list, parsed: dict, platform: str,
+                              total_price: float, already_deposited: bool, sale_date: str):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        await interaction.message.edit(view=None)
+    except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+        pass
+
+    # Re-checked here, not just when /finance log-sale was first run - the
+    # confirmation step can sit for minutes, and another sale could have
+    # claimed one of these items in the meantime (the actual idempotency
+    # guard is sale_items.item_id being UNIQUE; this is just the friendly,
+    # all-or-nothing version of that check).
+    already_sold = [item for item in resolved_items if db.get_item_sale(item["id"])]
+    if already_sold:
+        names = ", ".join(f"#{item['item_number']}" for item in already_sold)
+        await interaction.followup.send(
+            f"⚠️ Item(s) {names} were logged in another sale while this was pending - nothing was submitted.",
+            ephemeral=True,
+        )
+        return
+
+    n = len(resolved_items)
+    allocated_shares = _split_evenly(total_price, n)
+    sale_id = db.create_sale(platform, sale_date, total_price, already_deposited, created_by=interaction.user.id)
+
+    affected_pallets = set()
+    je_lines = []
+    for i, item in enumerate(resolved_items):
+        purchase_price, cogs_amount = parsed[item["id"]]
+        allocated_price = allocated_shares[i]
+        db.add_sale_item(sale_id, item["id"], allocated_price, purchase_price, cogs_amount)
+        db.record_item_sale(item["id"], allocated_price, platform, actor_id=interaction.user.id)
+        affected_pallets.add(item["pallet_id"])
+        pallet = db.get_pallet(item["pallet_id"])
+        je_lines.append({
+            "amount": cogs_amount,
+            "description": f"{pallet['name']}#{item['item_number']} - purchase price ${purchase_price:.2f}",
+        })
+
+    for pallet_id in affected_pallets:
+        await finance_utils.refresh_finance_message(interaction.client, pallet_id)
+
+    result = await _post_sale_to_quickbooks(sale_id, platform, total_price, already_deposited, sale_date, je_lines)
+
+    if result["ok"]:
+        item_list = ", ".join(
+            f"{db.get_pallet(item['pallet_id'])['name']}#{item['item_number']}" for item in resolved_items
+        )
+        message = (
+            f"✅ Logged sale #{sale_id} ({item_list}) via **{platform}**.\n"
+            f"Sales Receipt: `{result['sales_receipt_doc']}`\n"
+            f"Journal Entry: `{result['journal_entry_doc']}`"
+        )
+    else:
+        message = (
+            f"⚠️ Sale #{sale_id} saved, but QuickBooks failed: {result['error']}\n"
+            f"Run `/finance retry-sale sale_id:{sale_id}` once it's fixed - nothing was lost."
+        )
+    await interaction.followup.send(message, ephemeral=True)
+
+
 class Finance(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -762,6 +1099,99 @@ class Finance(commands.Cog):
             f"${price:.2f} on {platform.strip()}. Live card updated.",
             ephemeral=True,
         )
+
+    @finance_group.command(
+        name="log-sale",
+        description="Log a sale (single item or bundle) - opens a form for cost/COGS, then books it to QuickBooks.",
+    )
+    @app_commands.describe(
+        items='Item references, comma-separated: "PalletName#3" or "PalletName#3, OtherPallet#7" for a bundle',
+        total_price="Total sale price for everything in this sale, combined (pre-tax)",
+        platform="Where this sold (leave blank to use what was picked at Mark as Sold, if all items agree)",
+        already_deposited="Has this cash already been deposited to the real bank account? (default: No)",
+    )
+    async def log_sale(self, interaction: discord.Interaction, items: str, total_price: float,
+                        platform: str = None, already_deposited: bool = False):
+        if not await _require_any_role(interaction, [config.ROLE_FINANCE_MGMT]):
+            return
+        if total_price <= 0:
+            await interaction.response.send_message("Total sale price must be positive.", ephemeral=True)
+            return
+
+        resolved_items, references, errors = _parse_item_references(items)
+        if errors:
+            await interaction.response.send_message(
+                "Couldn't read some of these item references:\n" + "\n".join(f"- {e}" for e in errors),
+                ephemeral=True,
+            )
+            return
+        if not resolved_items:
+            await interaction.response.send_message("No items given.", ephemeral=True)
+            return
+
+        already_sold = [item for item in resolved_items if db.get_item_sale(item["id"])]
+        if already_sold:
+            names = ", ".join(f"#{item['item_number']}" for item in already_sold)
+            await interaction.response.send_message(
+                f"Item(s) {names} are already part of a logged sale - can't log them again.", ephemeral=True,
+            )
+            return
+
+        if platform:
+            platform = platform.strip()
+        else:
+            platforms_picked = {item["sale_platform"] for item in resolved_items if item["sale_platform"]}
+            if len(platforms_picked) == 1:
+                platform = platforms_picked.pop()
+            else:
+                await interaction.response.send_message(
+                    "Pass `platform` explicitly - these items don't all have the same platform recorded "
+                    "from Mark as Sold (or none do).",
+                    ephemeral=True,
+                )
+                return
+
+        sale_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        await interaction.response.send_modal(
+            LogSaleCogsModal(resolved_items, references, platform, total_price, already_deposited, sale_date)
+        )
+
+    @finance_group.command(
+        name="retry-sale",
+        description="Retry pushing a saved sale to QuickBooks after an earlier API failure.",
+    )
+    @app_commands.describe(sale_id="The sale ID from the earlier failure message")
+    async def retry_sale(self, interaction: discord.Interaction, sale_id: int):
+        if not await _require_any_role(interaction, [config.ROLE_FINANCE_MGMT]):
+            return
+        sale = db.get_sale(sale_id)
+        if not sale:
+            await interaction.response.send_message(f"No sale #{sale_id} found.", ephemeral=True)
+            return
+        if sale["cogs_logged_at"]:
+            await interaction.response.send_message(f"Sale #{sale_id} is already fully logged to QuickBooks.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        sale_items = db.get_sale_items(sale_id)
+        je_lines = [
+            {
+                "amount": si["cogs_amount"],
+                "description": f"{si['pallet_name']}#{si['item_number']} - purchase price ${si['purchase_price']:.2f}",
+            }
+            for si in sale_items
+        ]
+        result = await _post_sale_to_quickbooks(
+            sale_id, sale["platform"], sale["total_price"], bool(sale["already_deposited"]), sale["sale_date"], je_lines,
+        )
+        if result["ok"]:
+            await interaction.followup.send(
+                f"✅ Sale #{sale_id} logged. Sales Receipt: `{result['sales_receipt_doc']}`, "
+                f"Journal Entry: `{result['journal_entry_doc']}`.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(f"⚠️ Still failing: {result['error']}", ephemeral=True)
 
     @finance_group.command(name="refund", description="Log a refund against an item's sale. Run inside that pallet's category.")
     @app_commands.describe(
@@ -1024,7 +1454,7 @@ class Finance(commands.Cog):
             inline=False,
         )
 
-        embed.add_field(name="Revenue So Far", value=f"${fin['revenue_so_far']:.2f}", inline=True)
+        embed.add_field(name="Revenue So Far (net of sales tax)", value=f"${fin['revenue_so_far']:.2f}", inline=True)
         embed.add_field(
             name="Items Priced",
             value=f"{fin['items_priced']} (avg ${fin['avg_sale_price']:.2f})" if fin["items_priced"] else "0",
@@ -1037,11 +1467,22 @@ class Finance(commands.Cog):
                 inline=True,
             )
 
+        cogs_logged = db.get_pallet_cogs_logged_total(pallet["id"])
+        if cogs_logged:
+            embed.add_field(name="COGS Logged (QuickBooks)", value=f"${cogs_logged:.2f}", inline=True)
+
         if fin["cost"] is not None:
             margin_pct = (fin["profit_so_far"] / fin["revenue_so_far"] * 100) if fin["revenue_so_far"] else None
             pl_word = "Profit" if fin["profit_so_far"] >= 0 else "Loss"
             margin_note = f" ({margin_pct:.1f}% margin)" if margin_pct is not None else ""
             embed.add_field(name=pl_word, value=f"${fin['profit_so_far']:.2f}{margin_note}", inline=True)
+            breakeven_note = (
+                f"✅ Broken even ({fin['cost_recovery_pct']:.0f}% of cost recovered)" if fin["broke_even"]
+                else f"${fin['cost'] - fin['net_revenue']:.2f} more needed ({fin['cost_recovery_pct']:.0f}% recovered)"
+                if fin["cost_recovery_pct"] is not None
+                else "No revenue yet"
+            )
+            embed.add_field(name="Breakeven", value=breakeven_note, inline=True)
         else:
             embed.add_field(name="Profit/Margin", value="Cost not set yet", inline=True)
 

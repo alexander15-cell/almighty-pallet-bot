@@ -317,6 +317,105 @@ def test_create_expense_raises_on_api_fault(fresh_db, monkeypatch):
         asyncio.run(qb.create_expense("77", 10.0, "2026-09-22", "memo"))
 
 
+def test_create_sales_receipt_builds_taxable_line_and_returns_id(fresh_db, monkeypatch):
+    _connected(fresh_db, monkeypatch)
+
+    def responder(method, url, body):
+        assert method == "POST"
+        assert "/v3/company/12345/salesreceipt" in url
+        assert body["CustomerRef"] == {"value": "1"}
+        assert body["DepositToAccountRef"] == {"value": "24"}
+        line = body["Line"][0]
+        assert line["Amount"] == 18.69
+        assert line["SalesItemLineDetail"]["ItemRef"] == {"value": "2"}
+        assert line["SalesItemLineDetail"]["ItemAccountRef"] == {"value": "7"}
+        assert line["SalesItemLineDetail"]["TaxCodeRef"] == {"value": "TAX"}
+        assert "TxnTaxDetail" not in body  # left for QuickBooks' own AST to compute
+        return 200, {"SalesReceipt": {"Id": "3", "DocNumber": "1003"}}
+
+    _install_fake_session(monkeypatch, responder)
+
+    result = asyncio.run(qb.create_sales_receipt(
+        customer_id="1", item_id="2", income_account_id="7", deposit_account_id="24",
+        amount=18.69, date="2026-09-29", memo="Cash sale", taxable=True,
+    ))
+    assert result == {"id": "3", "doc_number": "1003"}
+
+
+def test_create_sales_receipt_marks_ebay_lines_non_taxable(fresh_db, monkeypatch):
+    _connected(fresh_db, monkeypatch)
+
+    def responder(method, url, body):
+        assert body["Line"][0]["SalesItemLineDetail"]["TaxCodeRef"] == {"value": "NON"}
+        assert body["Line"][0]["SalesItemLineDetail"]["ItemAccountRef"] == {"value": "98"}
+        return 200, {"SalesReceipt": {"Id": "4", "DocNumber": "1004"}}
+
+    _install_fake_session(monkeypatch, responder)
+
+    asyncio.run(qb.create_sales_receipt(
+        customer_id="1", item_id="2", income_account_id="98", deposit_account_id="24",
+        amount=50.0, date="2026-09-29", memo="eBay sale", taxable=False,
+    ))
+
+
+def test_create_sales_receipt_raises_on_api_fault(fresh_db, monkeypatch):
+    _connected(fresh_db, monkeypatch)
+
+    def responder(method, url, body):
+        return 400, {"Fault": {"Error": [{"Message": "Invalid Reference"}]}}
+
+    _install_fake_session(monkeypatch, responder)
+
+    with pytest.raises(qb.QuickBooksError, match="Invalid Reference"):
+        asyncio.run(qb.create_sales_receipt(
+            customer_id="1", item_id="2", income_account_id="7", deposit_account_id="24",
+            amount=10.0, date="2026-09-29", memo="memo", taxable=True,
+        ))
+
+
+def test_create_journal_entry_builds_matching_debit_credit_lines_per_item(fresh_db, monkeypatch):
+    _connected(fresh_db, monkeypatch)
+
+    def responder(method, url, body):
+        assert method == "POST"
+        assert "/v3/company/12345/journalentry" in url
+        lines = body["Line"]
+        assert len(lines) == 4  # 2 items x (debit + credit)
+        assert lines[0]["JournalEntryLineDetail"]["PostingType"] == "Debit"
+        assert lines[0]["JournalEntryLineDetail"]["AccountRef"] == {"value": "48"}
+        assert lines[0]["Amount"] == 5.0
+        assert lines[1]["JournalEntryLineDetail"]["PostingType"] == "Credit"
+        assert lines[1]["JournalEntryLineDetail"]["AccountRef"] == {"value": "20"}
+        assert lines[1]["Amount"] == 5.0
+        assert lines[2]["Amount"] == 6.0
+        return 200, {"JournalEntry": {"Id": "10", "DocNumber": "JE-10"}}
+
+    _install_fake_session(monkeypatch, responder)
+
+    result = asyncio.run(qb.create_journal_entry(
+        debit_account_id="48", credit_account_id="20",
+        lines=[{"amount": 5.0, "description": "Item A"}, {"amount": 6.0, "description": "Item B"}],
+        date="2026-09-29", memo="COGS for sale #1",
+    ))
+    assert result == {"id": "10", "doc_number": "JE-10"}
+
+
+def test_create_journal_entry_raises_on_api_fault(fresh_db, monkeypatch):
+    _connected(fresh_db, monkeypatch)
+
+    def responder(method, url, body):
+        return 400, {"Fault": {"Error": [{"Message": "Invalid Reference"}]}}
+
+    _install_fake_session(monkeypatch, responder)
+
+    with pytest.raises(qb.QuickBooksError, match="Invalid Reference"):
+        asyncio.run(qb.create_journal_entry(
+            debit_account_id="48", credit_account_id="20",
+            lines=[{"amount": 5.0, "description": "Item A"}],
+            date="2026-09-29", memo="memo",
+        ))
+
+
 def test_get_transaction_returns_merchant_and_amount(fresh_db, monkeypatch):
     _connected(fresh_db, monkeypatch)
 

@@ -979,6 +979,58 @@ class ShippedView(discord.ui.View):
         await cog.mark_shipped(interaction, self.item_id)
 
 
+SALE_PLATFORM_OPTIONS = ["eBay", "Facebook Marketplace", "In Person", "Other"]
+
+
+class SalePlatformSelectView(discord.ui.View):
+    """
+    Shown right after Mark as Sold - a plain button click can't collect a
+    dropdown value (Discord modals only support text inputs, not selects,
+    same constraint as EbayConditionSelectView above), so this ephemeral
+    select asks which platform it sold on before the item actually moves.
+    This matters for sales tax: eBay already collects/remits it, but
+    Facebook/in-person/other sales don't, which is what /finance log-sale
+    later uses to decide whether to create a taxable QuickBooks Sales
+    Receipt. "Other" opens a short modal for free text (a platform this
+    list doesn't name, e.g. Mercari).
+    """
+
+    def __init__(self, item_id: int):
+        super().__init__(timeout=300)
+        self.item_id = item_id
+        self.select = discord.ui.Select(
+            placeholder="Where did this sell?",
+            options=[discord.SelectOption(label=p, value=p) for p in SALE_PLATFORM_OPTIONS],
+        )
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        platform = self.select.values[0]
+        if platform == "Other":
+            await interaction.response.send_modal(OtherSalePlatformModal(self.item_id, interaction.message))
+            return
+        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
+        await cog.finish_move_to_sold(interaction, self.item_id, platform, interaction.message)
+
+
+class OtherSalePlatformModal(discord.ui.Modal, title="Where did this sell?"):
+    platform = discord.ui.TextInput(
+        label="Platform", placeholder="e.g. Mercari, OfferUp, local pickup app...", max_length=100,
+    )
+
+    def __init__(self, item_id: int, source_message: discord.Message):
+        super().__init__()
+        self.item_id = item_id
+        self.source_message = source_message
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
+        await cog.finish_move_to_sold(
+            interaction, self.item_id, f"Other: {self.platform.value.strip()}", self.source_message
+        )
+
+
 def _channel_and_view_for_status(item_id: int, status: str):
     """
     The channel "stage" key and matching persistent view for reposting an
@@ -1930,19 +1982,69 @@ class ItemFlow(commands.Cog):
                 f"This item was already moved on (current status: {item['status']}).", ephemeral=True
             )
             return
+        await interaction.response.edit_message(
+            content="Where did this sell? (needed for sales-tax handling)",
+            view=SalePlatformSelectView(item_id),
+        )
+
+    async def finish_move_to_sold(self, interaction: discord.Interaction, item_id: int, platform: str,
+                                   source_message: discord.Message):
+        """
+        The rest of move_to_sold, run once a platform's been picked (see
+        SalePlatformSelectView/OtherSalePlatformModal below) - split out
+        since the interaction that carries this on is the select/modal's
+        own, not the original button click's.
+        """
+        item = db.get_item(item_id)
+        if not await recovery_safety.require_current_card(
+            interaction, item, db.STATUS_LISTED, source_message_id=source_message.id
+        ):
+            return
+        if item["status"] != db.STATUS_LISTED:
+            await interaction.response.send_message(
+                f"This item was already moved on (current status: {item['status']}).", ephemeral=True
+            )
+            return
         await interaction.response.defer(ephemeral=True, thinking=True)
         pallet_id = item["pallet_id"]
+        db.record_sale_platform(item_id, platform, actor_id=interaction.user.id)
         channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "sold"))
         view = ShippedView(item_id)
         msg = await send_item_card(channel, item, view=view, destination_status=db.STATUS_SOLD)
         db.update_status(item_id, db.STATUS_SOLD, actor_id=interaction.user.id, new_message_id=msg.id)
-        await self._clear_old_card(interaction.message, item_id, "mark sold")
+        await self._clear_old_card(source_message, item_id, "mark sold")
+        await self._post_to_accounting_channel(item_id, platform)
         await interaction.followup.send(
-            f"Marked sold. 🎉 See <#{channel.id}>. Finance Management can record the sale price "
-            f"with `/finance record-sale`.",
+            f"Marked sold via **{platform}**. 🎉 See <#{channel.id}>. It's now in the accounting "
+            f"channel for Finance Management to log COGS with `/finance log-sale`.",
             ephemeral=True,
         )
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
+
+    async def _post_to_accounting_channel(self, item_id: int, platform: str):
+        """
+        Best-effort worklist entry for Finance Management - just enough to
+        find it and know it needs COGS entered via /finance log-sale.
+        Never blocks the sale itself if the channel isn't set up yet or a
+        transient error hits (same "log it, don't crash the pipeline"
+        posture as every other best-effort Discord call in this cog).
+        """
+        channel_id = db.get_shared_channel_id("accounting")
+        if not channel_id:
+            return
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            return
+        item = db.get_item(item_id)
+        pallet = db.get_pallet(item["pallet_id"])
+        title = item.get("ai_title") or item.get("raw_description") or "(no title)"
+        try:
+            await channel.send(
+                f"💵 **{pallet['name']}** item #{item['item_number']} sold via **{platform}** - "
+                f"\"{title}\" - needs COGS entered with `/finance log-sale`."
+            )
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
+            print(f"[item_flow] Could not post to accounting channel for item {item_id}: {e}")
 
     async def mark_shipped(self, interaction: discord.Interaction, item_id: int):
         if not await self._require_role(interaction, config.ROLE_LISTING_MGMT):

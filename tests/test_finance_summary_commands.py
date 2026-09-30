@@ -78,7 +78,7 @@ def test_pallet_summary_by_name(fresh_db, cog):
     assert "Purchase" in _field(embed, "Cost Basis")
     assert "Shipping" in _field(embed, "Cost Basis")
     assert "Total: $110.00" in _field(embed, "Cost Basis")
-    assert _field(embed, "Revenue So Far") == "$200.00"
+    assert _field(embed, "Revenue So Far (net of sales tax)") == "$200.00"
 
 
 def test_pallet_summary_unknown_name(fresh_db, cog):

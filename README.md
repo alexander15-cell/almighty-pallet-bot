@@ -309,6 +309,52 @@ automatically from QuickBooks:
   `/setup shared-channels` again (safe to re-run) to create whatever's
   missing if you're adding this to an existing server.
 
+### Sale logging + Cost of Goods Sold (`#accounting`, `/finance log-sale`)
+
+Books the *sale* side to QuickBooks - a Sales Receipt (revenue) plus a Cost
+of Goods Sold Journal Entry - separately from the credit-card/invoice
+tracking above, which only ever covers what a pallet *cost*. Purchase
+price and COGS are always entered fresh by a partner - never pulled from
+any stored/default value, since per-item purchase cost isn't reliably
+tracked anywhere in this bot.
+
+- **Mark as Sold** now asks which platform it sold on first (eBay /
+  Facebook Marketplace / In Person / Other) before the item actually moves -
+  this matters for sales tax, not just record-keeping: eBay already
+  collects and remits it as a marketplace facilitator, the others don't.
+  The item then posts to **`#accounting`** (Finance Management) as a
+  worklist entry.
+- **`/finance log-sale`** (Finance Management) takes the item(s) - one
+  reference like `Pallet-2026-014#3`, or several comma-separated for a
+  bundle sold together, even across different pallets - the total sale
+  price (pre-tax), and platform (defaults to what was picked at Mark as
+  Sold if every item in the bundle agrees). It opens a form for cost and
+  COGS per item (or one combined figure, split evenly across the bundle -
+  never a mix of both in the same sale), then shows a full confirmation
+  (every item, price, cost, which QuickBooks accounts get hit) before
+  anything is sent anywhere.
+- On confirmation: a **Sales Receipt** posts to QuickBooks - non-taxable
+  and routed to the "eBay Sales" account for eBay, taxable and routed to
+  the normal Sales account for everything else, letting **QuickBooks'
+  own Automated Sales Tax calculate the tax** rather than this bot
+  guessing at a flat rate. Deposits to Undeposited Funds unless the sale
+  is marked as already deposited to the real bank account. A **Journal
+  Entry** (Debit Cost of Goods Sold / Credit Inventory) follows, referencing
+  the Sales Receipt's number in its memo. An item can only ever be logged
+  once (blocks re-submitting the same item into a second sale).
+- If QuickBooks fails partway through, nothing is lost - the sale is saved
+  to the database before either QuickBooks call, and **`/finance
+  retry-sale sale_id:<id>`** picks up exactly where it left off (skipping
+  a Sales Receipt that already went through, so it's never created twice).
+- `/finance pallet-summary` shows revenue net of sales tax (it always was -
+  only the pre-tax price is ever recorded), the real COGS logged so far
+  from this flow, and an explicit breakeven line.
+- The QuickBooks account/item/customer IDs this posts against
+  (`QUICKBOOKS_CASH_SALES_ITEM_ID`, `QUICKBOOKS_COGS_ACCOUNT_ID`, etc.) are
+  documented in `config.py` and default to the real values already set up
+  in the connected company - override in `.env` only if that QuickBooks
+  setup changes.
+
 ## Important limitation: no Vendoo API, and eBay/FB Marketplace both use CSV batches
 
 Neither eBay nor Facebook Marketplace offer a listing-creation API this bot

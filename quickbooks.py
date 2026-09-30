@@ -354,3 +354,88 @@ async def create_expense(account_id: str, amount: float, date: str, memo: str,
     result = await _request("POST", "purchase", json_body=payload)
     purchase = result.get("Purchase", {})
     return {"id": purchase.get("Id")}
+
+
+async def create_sales_receipt(customer_id: str, item_id: str, income_account_id: str,
+                                deposit_account_id: str, amount: float, date: str,
+                                memo: str, taxable: bool) -> dict:
+    """
+    Creates a QuickBooks Sales Receipt - used by /finance log-sale
+    (cogs/finance.py) for Facebook/in-person/other/eBay sales. `amount` is
+    always the pre-tax line total; when `taxable` is True this deliberately
+    never sets TxnTaxDetail itself - marking the line's TaxCodeRef "TAX" is
+    enough for QuickBooks' own Automated Sales Tax to compute and attach the
+    real tax server-side, which is the whole point (config.py's own comment
+    explains why this bot never computes tax itself). `income_account_id`
+    overrides the sale Item's own default income account - used to route
+    eBay sales to a dedicated "eBay Sales" account instead of the Item's
+    default, and marked non-taxable since eBay already collects/remits.
+
+    Returns {'id': <new SalesReceipt id>, 'doc_number': <DocNumber>}.
+    """
+    line = {
+        "Amount": round(float(amount), 2),
+        "DetailType": "SalesItemLineDetail",
+        "SalesItemLineDetail": {
+            "ItemRef": {"value": item_id},
+            "UnitPrice": round(float(amount), 2),
+            "Qty": 1,
+            "ItemAccountRef": {"value": income_account_id},
+            "TaxCodeRef": {"value": "TAX" if taxable else "NON"},
+        },
+        "Description": memo,
+    }
+    payload = {
+        "CustomerRef": {"value": customer_id},
+        "TxnDate": date,
+        "PrivateNote": memo,
+        "DepositToAccountRef": {"value": deposit_account_id},
+        "Line": [line],
+    }
+    result = await _request("POST", "salesreceipt", json_body=payload)
+    receipt = result.get("SalesReceipt", {})
+    return {"id": receipt.get("Id"), "doc_number": receipt.get("DocNumber")}
+
+
+async def create_journal_entry(debit_account_id: str, credit_account_id: str,
+                                lines: list, date: str, memo: str) -> dict:
+    """
+    Creates a QuickBooks Journal Entry - used by /finance log-sale to book
+    Cost of Goods Sold: for each entry in `lines` (`{'amount': float,
+    'description': str}` - one per sold item, or a single combined entry
+    for a bundle logged as one figure), a Debit line against
+    `debit_account_id` (COGS) and a matching Credit line against
+    `credit_account_id` (Inventory).
+
+    Returns {'id': <new JournalEntry id>, 'doc_number': <DocNumber>}.
+    """
+    je_lines = []
+    for entry in lines:
+        amount = round(float(entry["amount"]), 2)
+        description = entry.get("description") or memo
+        je_lines.append({
+            "Amount": amount,
+            "DetailType": "JournalEntryLineDetail",
+            "Description": description,
+            "JournalEntryLineDetail": {
+                "PostingType": "Debit",
+                "AccountRef": {"value": debit_account_id},
+            },
+        })
+        je_lines.append({
+            "Amount": amount,
+            "DetailType": "JournalEntryLineDetail",
+            "Description": description,
+            "JournalEntryLineDetail": {
+                "PostingType": "Credit",
+                "AccountRef": {"value": credit_account_id},
+            },
+        })
+    payload = {
+        "TxnDate": date,
+        "PrivateNote": memo,
+        "Line": je_lines,
+    }
+    result = await _request("POST", "journalentry", json_body=payload)
+    je = result.get("JournalEntry", {})
+    return {"id": je.get("Id"), "doc_number": je.get("DocNumber")}

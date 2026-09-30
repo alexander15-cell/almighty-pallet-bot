@@ -405,6 +405,47 @@ def init_db():
                 connected_at             TEXT NOT NULL,
                 updated_at               TEXT NOT NULL
             );
+
+            -- One row per real-world sale transaction, which can cover one
+            -- item or a bundle sold together (possibly across different
+            -- pallets - e.g. a buyer checking out with items from two
+            -- separate pallets at once). total_price is always the pre-tax
+            -- amount actually entered by a partner (see sale_items.py's
+            -- docstring for why this is never auto-calculated) - this is
+            -- also what QuickBooks Automated Sales Tax is fed for a
+            -- FB/in-person Sales Receipt, letting IT compute tax rather
+            -- than this bot guessing at a flat rate.
+            CREATE TABLE IF NOT EXISTS sales (
+                id                            INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform                      TEXT NOT NULL,   -- 'eBay', 'Facebook Marketplace', 'In Person', or 'Other: <text>'
+                sale_date                     TEXT NOT NULL,
+                total_price                   REAL NOT NULL,   -- pre-tax
+                already_deposited             INTEGER NOT NULL DEFAULT 0,
+                quickbooks_sales_receipt_id   TEXT,
+                quickbooks_journal_entry_id   TEXT,
+                cogs_logged_at                TEXT,
+                created_by                    INTEGER NOT NULL,
+                created_at                    TEXT NOT NULL
+            );
+
+            -- One row per item within a sales row above - an item can only
+            -- ever belong to one sale (UNIQUE on item_id), which is what
+            -- makes re-submitting the same item's COGS a hard block rather
+            -- than a soft warning. purchase_price/cogs_amount are always
+            -- freshly entered by a partner at logging time, per the
+            -- deliberate "never auto-calculated" design (see /finance
+            -- log-sale in cogs/finance.py) - stored per item even when
+            -- entered as one combined bundle figure (split evenly across
+            -- the sale's items at entry time), so every Sales Receipt/
+            -- Journal Entry line always has a concrete per-item amount.
+            CREATE TABLE IF NOT EXISTS sale_items (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                sale_id          INTEGER NOT NULL REFERENCES sales(id),
+                item_id          INTEGER NOT NULL UNIQUE REFERENCES items(id),
+                allocated_price  REAL NOT NULL,
+                purchase_price   REAL NOT NULL,
+                cogs_amount      REAL NOT NULL
+            );
             """
         )
         _migrate_add_columns(conn)
@@ -1285,6 +1326,102 @@ def record_item_sale(item_id: int, price: float, platform: str, actor_id: int):
         )
 
 
+def record_sale_platform(item_id: int, platform: str, actor_id: int):
+    """
+    Sets just sale_platform, right at Mark as Sold time (cogs/item_flow.py's
+    move_to_sold) - price isn't known yet at that point, so this deliberately
+    doesn't touch sale_price. /finance log-sale later calls record_item_sale
+    with the real price once COGS is entered, which overwrites platform too
+    if it was picked wrong here - this is just an early, informational value
+    so the item shows up in #accounting with a platform already attached.
+    """
+    with get_conn() as conn:
+        now = _now()
+        conn.execute("UPDATE items SET sale_platform = ?, updated_at = ? WHERE id = ?", (platform, now, item_id))
+        conn.execute(
+            "INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp) "
+            "VALUES (?, NULL, (SELECT status FROM items WHERE id = ?), ?, ?, ?)",
+            (item_id, item_id, actor_id, f"Marked sold via {platform}", now),
+        )
+
+
+# ------------------------------------------------------------------ sales --
+# See sales/sale_items' own CREATE TABLE comments (init_db). One "sale" can
+# cover a single item or a bundle sold together across one or more pallets -
+# /finance log-sale (cogs/finance.py) is the only writer.
+
+def get_item_sale(item_id: int):
+    """The sale_items row (if any) an item already belongs to - the
+    idempotency check /finance log-sale uses to refuse double-logging the
+    same item into a second sale. None if this item hasn't been sold yet."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM sale_items WHERE item_id = ?", (item_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def create_sale(platform: str, sale_date: str, total_price: float, already_deposited: bool, created_by: int) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO sales (platform, sale_date, total_price, already_deposited, created_by, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (platform, sale_date, total_price, int(already_deposited), created_by, _now()),
+        )
+        return cur.lastrowid
+
+
+def add_sale_item(sale_id: int, item_id: int, allocated_price: float, purchase_price: float, cogs_amount: float):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO sale_items (sale_id, item_id, allocated_price, purchase_price, cogs_amount) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (sale_id, item_id, allocated_price, purchase_price, cogs_amount),
+        )
+
+
+def get_sale(sale_id: int):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM sales WHERE id = ?", (sale_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_sale_items(sale_id: int):
+    """Every sale_items row for this sale, joined with the item's own
+    pallet/number/title for display - the shape /finance log-sale's
+    confirmation summary and completion message are built from."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT si.*, i.item_number, i.pallet_id, i.raw_description, i.ai_title, p.name AS pallet_name
+               FROM sale_items si
+               JOIN items i ON i.id = si.item_id
+               JOIN pallets p ON p.id = i.pallet_id
+               WHERE si.sale_id = ?
+               ORDER BY si.id""",
+            (sale_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_sale_receipt_id(sale_id: int, sales_receipt_id: str):
+    """
+    Saved the moment the Sales Receipt is created, separately from
+    mark_sale_logged - if the Journal Entry call fails right after (a real
+    QuickBooks outage, not a hypothetical), /finance retry-sale needs to
+    know a receipt already exists so it never creates a second one.
+    """
+    with get_conn() as conn:
+        conn.execute("UPDATE sales SET quickbooks_sales_receipt_id = ? WHERE id = ?", (sales_receipt_id, sale_id))
+
+
+def mark_sale_logged(sale_id: int, journal_entry_id: str):
+    """Called once the Journal Entry (always the last step) succeeds - the
+    Sales Receipt id, if any, was already saved via set_sale_receipt_id."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE sales SET quickbooks_journal_entry_id = ?, cogs_logged_at = ? WHERE id = ?",
+            (journal_entry_id, _now(), sale_id),
+        )
+
+
 def record_refund(item_id: int, amount: float, reason: str, actor_id: int):
     """
     Logs a refund against a specific item's sale - used by /finance refund.
@@ -1409,6 +1546,25 @@ def get_pallet_cost_breakdown(pallet_id: int) -> dict:
             (pallet_id,),
         ).fetchall()
         return {r["cost_type"]: r["total"] for r in rows}
+
+
+def get_pallet_cogs_logged_total(pallet_id: int) -> float:
+    """
+    Sum of sale_items.cogs_amount actually booked to QuickBooks so far for
+    this pallet's items - the real, per-sale cost figure /finance log-sale
+    records, distinct from `cost` above (the pallet-level acquisition cost
+    basis from /finance setprice + pallet_costs, which covers the WHOLE
+    pallet regardless of what's sold yet). 0.0, not None, when nothing's
+    been logged yet - "no COGS logged" is a fact worth showing as $0, not
+    hidden like an unset cost basis is.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(si.cogs_amount), 0) AS total FROM sale_items si "
+            "JOIN items i ON i.id = si.item_id WHERE i.pallet_id = ?",
+            (pallet_id,),
+        ).fetchone()
+        return row["total"] or 0.0
 
 
 def has_quickbooks_txn_been_allocated(quickbooks_txn_id: str) -> bool:

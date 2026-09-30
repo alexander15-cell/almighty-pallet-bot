@@ -133,8 +133,28 @@ ENTRIES = (
     ),
     HelpEntry(
         "/finance record-sale",
-        "Record (or correct) an item's actual sale price + platform.",
-        ("record sale", "sale price", "how much did it sell"),
+        "Manually correct an item's sale price/platform - /finance log-sale sets these normally.",
+        ("record sale", "sale price", "how much did it sell", "correct sale"),
+    ),
+    HelpEntry(
+        "/finance log-sale <items> <total_price>",
+        "Log a sale (single item or cross-pallet bundle) and book it to QuickBooks: a Sales Receipt plus a COGS journal entry.",
+        ("log sale", "book sale", "cogs", "cost of goods sold", "sales receipt", "sales tax"),
+    ),
+    HelpEntry(
+        "/finance retry-sale <sale_id>",
+        "Retry pushing a saved sale to QuickBooks after an earlier API failure.",
+        ("retry sale", "quickbooks failed", "sale failed"),
+    ),
+    HelpEntry(
+        "Mark as Sold platform picker",
+        "Choosing where an item sold (eBay/Facebook/In Person/Other) right when it's marked sold - needed for sales tax, and posts it to #accounting for COGS entry.",
+        ("mark sold platform", "where did it sell", "sales tax platform"),
+    ),
+    HelpEntry(
+        "#accounting",
+        "Sold items land here for Finance Management to log cost/COGS with /finance log-sale.",
+        ("accounting channel", "cogs channel", "log cogs"),
     ),
     HelpEntry(
         "/finance refund",

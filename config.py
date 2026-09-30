@@ -180,6 +180,7 @@ FINANCE_SHARED_CHANNELS = [
     "credit-card-charges",
     "awaiting-pallet-charges",
     "submit-invoices",
+    "accounting",
 ]
 FINANCE_CATEGORY_NAME = "Finance"
 
@@ -226,6 +227,7 @@ CHANNEL_ROLE_PERMISSIONS = {
     "credit-card-charges": [ROLE_FINANCE_MGMT, ROLE_PURCHASE_MGMT],
     "awaiting-pallet-charges": [ROLE_FINANCE_MGMT, ROLE_PURCHASE_MGMT],
     "submit-invoices": [ROLE_FINANCE_MGMT, ROLE_PURCHASE_MGMT],
+    "accounting": [ROLE_FINANCE_MGMT],
 }
 
 # ---- Onboarding text ----
@@ -332,6 +334,14 @@ CHANNEL_INFO = {
         "shows up in #awaiting-pallet-charges until Start New Pallet attaches it to the "
         "matching pallet, at which point it's ready for the accountant to enter into "
         "QuickBooks by hand."
+    ),
+    "accounting": (
+        "**Finance Management role.** Items land here as soon as they're marked sold, "
+        "with the platform picked at that time. Use `/finance log-sale` to enter the "
+        "purchase price and COGS (single item or a bundle across pallets) and book it to "
+        "QuickBooks - a Sales Receipt for Facebook/in-person/other sales (QuickBooks' own "
+        "Automated Sales Tax adds the tax), plus a Cost of Goods Sold journal entry either "
+        "way."
     ),
 }
 
@@ -639,6 +649,35 @@ QUICKBOOKS_ENABLED = bool(QUICKBOOKS_CLIENT_ID and QUICKBOOKS_CLIENT_SECRET)
 # as it already does for pallets that never touch these newer workflows.
 # Used by the low-margin early-warning below.
 QUICKBOOKS_MARGIN_WARNING_THRESHOLD_PCT = float(os.getenv("QUICKBOOKS_MARGIN_WARNING_THRESHOLD_PCT") or "20")
+
+# ---- Sale logging: COGS Journal Entry + FB/in-person Sales Receipt ----
+# See /finance log-sale (cogs/finance.py). These default to the real IDs in
+# the connected company as of when this was built (looked up directly via
+# QuickBooks' own API, not guessed) - override in .env only if the QuickBooks
+# setup changes (a renamed/re-created account, item, or customer).
+#
+#   Item "Merchandise Sales (Cash/Local)" -> income account "Sales" (7)
+#   Customer "Cash & Local Sales Customer"
+#   Account "eBay Sales" (98) - a sub-account of "Sales" (7), used instead
+#     of the Item's own default income account for eBay-platform sales
+#   Account "Cost of goods sold" (48) / "Inventory" (20) - the COGS Journal
+#     Entry's Debit/Credit pair
+#   Account "Undeposited funds" (24) - default Sales Receipt deposit target
+#     unless a sale is logged as already_deposited
+QUICKBOOKS_CASH_SALES_ITEM_ID = os.getenv("QUICKBOOKS_CASH_SALES_ITEM_ID", "2")
+QUICKBOOKS_CASH_SALES_CUSTOMER_ID = os.getenv("QUICKBOOKS_CASH_SALES_CUSTOMER_ID", "1")
+QUICKBOOKS_SALES_INCOME_ACCOUNT_ID = os.getenv("QUICKBOOKS_SALES_INCOME_ACCOUNT_ID", "7")
+QUICKBOOKS_EBAY_SALES_ACCOUNT_ID = os.getenv("QUICKBOOKS_EBAY_SALES_ACCOUNT_ID", "98")
+QUICKBOOKS_COGS_ACCOUNT_ID = os.getenv("QUICKBOOKS_COGS_ACCOUNT_ID", "48")
+QUICKBOOKS_INVENTORY_ACCOUNT_ID = os.getenv("QUICKBOOKS_INVENTORY_ACCOUNT_ID", "20")
+QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID = os.getenv("QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID", "24")
+# Only used when a sale is logged as already_deposited=True (cash already
+# physically deposited by the time it's entered) - the real bank/cash
+# account to deposit to instead of Undeposited Funds. Defaults to "Cash"
+# (id 8), the only Bank-type account that exists in the connected company
+# as of when this was built; update this once a real checking account is
+# connected instead.
+QUICKBOOKS_BANK_ACCOUNT_ID = os.getenv("QUICKBOOKS_BANK_ACCOUNT_ID", "8")
 
 # ---- Cloudflare R2 image hosting (optional, see r2_storage.py) ----
 # Gives each Data Entry photo a durable public URL for the eBay CSV batch's

@@ -182,8 +182,7 @@ def test_mark_shipped_updates_contract_and_removes_buttons(monkeypatch):
     assert item["status"] == "sold"  # source dictionary was not mutated
 
 
-@pytest.mark.parametrize("method,start_status,destination", [("move_to_listed", "awaiting_listing", "listed"),
-                                                           ("move_to_sold", "listed", "sold")])
+@pytest.mark.parametrize("method,start_status,destination", [("move_to_listed", "awaiting_listing", "listed")])
 def test_transition_passes_destination_before_source_update(monkeypatch, method, start_status, destination):
     import cogs.item_flow as flow
     item, _ = example()
@@ -203,3 +202,31 @@ def test_transition_passes_destination_before_source_update(monkeypatch, method,
     asyncio.run(getattr(cog, method)(interaction, 12))
     assert send_card.call_args.kwargs["destination_status"] == destination
     assert send_card.call_args.args[1]["status"] == start_status
+
+
+def test_finish_move_to_sold_passes_destination_before_source_update(monkeypatch):
+    # move_to_sold itself now just shows a platform-picker (see
+    # cogs/item_flow.py's SalePlatformSelectView) - the actual transition
+    # this contract cares about happens in finish_move_to_sold once a
+    # platform's been chosen.
+    import cogs.item_flow as flow
+    item, _ = example()
+    item["status"] = "listed"
+    channel = SimpleNamespace(id=321)
+    source_message = SimpleNamespace(id=999, delete=AsyncMock())
+    interaction = SimpleNamespace(message=source_message, user=SimpleNamespace(id=123),
+                                  response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()),
+                                  followup=SimpleNamespace(send=AsyncMock()))
+    monkeypatch.setattr(flow.db, "get_item", lambda _: item)
+    monkeypatch.setattr(flow.db, "get_pallet", lambda _: {"name": "Pallet"})
+    monkeypatch.setattr(flow.db, "resolve_channel_id", lambda *args: 321)
+    monkeypatch.setattr(flow.db, "update_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(flow.db, "record_sale_platform", lambda *args, **kwargs: None)
+    monkeypatch.setattr(flow.db, "get_shared_channel_id", lambda *_: None)
+    monkeypatch.setattr(flow.finance_utils, "refresh_finance_message", AsyncMock())
+    send_card = AsyncMock(return_value=SimpleNamespace(id=456))
+    monkeypatch.setattr(flow, "send_item_card", send_card)
+    cog = flow.ItemFlow(SimpleNamespace(get_channel=lambda _: channel))
+    asyncio.run(cog.finish_move_to_sold(interaction, 12, "eBay", source_message))
+    assert send_card.call_args.kwargs["destination_status"] == "sold"
+    assert send_card.call_args.args[1]["status"] == "listed"
