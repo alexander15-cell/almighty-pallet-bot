@@ -326,6 +326,16 @@ def _pallet_item_commands_embed() -> discord.Embed:
         value="Move an item into #hold with a fixed reason (Queue Review or Listing Management role - not admin-only). Tap Resolved on its card to send it back where it came from.",
         inline=False,
     )
+    embed.add_field(
+        name="/item move-back <pallet> <item_number> (admin only)",
+        value="Force-move an item to a different stage - fixes a wrong click (e.g. the wrong item marked Sold). Pick the new stage from a dropdown; reverses a logged sale and clears any captured eBay listing details as needed. Refuses if the sale was already logged to QuickBooks via /finance log-sale.",
+        inline=False,
+    )
+    embed.add_field(
+        name="/list items [status]",
+        value="Browse every collected item across every pallet, with a photo and its current stage - optionally filtered to one stage. Paginated with Previous/Next for a large inventory.",
+        inline=False,
+    )
     return embed
 
 
@@ -341,5 +351,5 @@ def _admin_setup_commands_embed() -> discord.Embed:
         value="Point a shared channel (e.g. #awaiting-pallet-charges) at a different Discord channel - for after accidentally deleting and recreating one, since a same-named replacement doesn't fix itself.",
         inline=False,
     )
-    embed.set_footer(text="All /admin and /pallet, /setup commands (and /item delete, /item duplicate) require the Pallet Admin role - /item hold is the one exception, see Pallets & Items.")
+    embed.set_footer(text="All /admin and /pallet, /setup commands (and /item delete, /item duplicate, /item move-back) require the Pallet Admin role - /item hold is one exception (Queue Review/Listing Management), and /list items is open to everyone, see Pallets & Items.")
     return embed

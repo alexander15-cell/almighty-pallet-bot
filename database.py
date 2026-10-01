@@ -931,6 +931,29 @@ def get_items_by_status_for_pallet(pallet_id: int, status: str):
         return [dict(r) for r in rows]
 
 
+def get_all_items(status: str = None, include_deleted: bool = False) -> list:
+    """Every item across every pallet, optionally filtered to one status -
+    the source for /list items (cogs/admin_tools.py). Excludes soft-deleted
+    items (STATUS_DELETED) unless status is explicitly 'deleted' or
+    include_deleted is True - those aren't really "collected" anymore from
+    a browsing user's perspective (see soft_delete_item: the row survives
+    for audit purposes, but shouldn't clutter an ordinary inventory list)."""
+    with get_conn() as conn:
+        query = "SELECT * FROM items"
+        conditions, params = [], []
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        elif not include_deleted:
+            conditions.append("status != ?")
+            params.append(STATUS_DELETED)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY pallet_id, item_number"
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+
 # ------------------------------------------------------- eBay listing data --
 
 def save_ebay_listing_data(item_id: int, ebay_title: str, category_id: str, condition_id: str,
@@ -993,6 +1016,93 @@ def get_ebay_listing_data(item_id: int):
         data = dict(row)
         data["item_specifics"] = json.loads(data["item_specifics"]) if data["item_specifics"] else {}
         return data
+
+
+def delete_ebay_listing_data(item_id: int):
+    """Drops a single item's captured eBay listing details (title/category/
+    condition/price/specifics, from Queue Review's Approve step) - used
+    when an admin force-moves an item back before Queue Review (see
+    unwind_item_downstream_data below), so re-approving it later doesn't
+    show stale details from a different pass. The only other place this
+    table is touched is delete_pallet_permanently's full pallet wipe."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM ebay_listing_data WHERE item_id = ?", (item_id,))
+
+
+# Pipeline order for unwind_item_downstream_data's "how far forward did this
+# item get" comparisons - deliberately excludes the off-pipeline statuses
+# (on_hold, rejected, deleted, pending_ebay_upload, pending_fb_marketplace_upload),
+# which are never compared against for that purpose.
+_STAGE_ORDER = [
+    STATUS_DATA_ENTRY, STATUS_AUTOMATED_REVIEW, STATUS_QUEUE_REVIEW, STATUS_AWAITING_LISTING,
+    STATUS_LISTED, STATUS_SOLD, STATUS_SHIPPED,
+]
+
+
+def _stage_rank(status: str) -> int:
+    try:
+        return _STAGE_ORDER.index(status)
+    except ValueError:
+        return len(_STAGE_ORDER)
+
+
+def unwind_item_downstream_data(item_id: int, target_status: str, actor_id: int, note: str = None) -> dict:
+    """
+    Clears whatever downstream data no longer applies once an item is
+    force-moved to target_status (see cogs/admin_tools.py's /item move-back,
+    cogs/item_flow.py's ItemFlow.admin_move_item_to_stage) - this bot's one
+    deliberately-backward-capable transition. Unlike every forward
+    transition, which only ever adds data, this has to actively unwind it so
+    a corrected item doesn't carry stale sold/listed timestamps or a
+    captured eBay listing from a pass that no longer applies:
+
+      - If the item currently has a sale price and target_status isn't
+        itself 'sold', reverses the sale (via reverse_sale - a real, audited
+        finance_transactions row, not a silent NULL-out).
+      - Clears listed_at/sold_at/shipped_at if target_status is earlier in
+        the pipeline than the stage each one belongs to.
+      - Deletes its ebay_listing_data row (the title/category/condition/
+        price/specifics captured at Queue Review's Approve step) if
+        target_status is earlier than Awaiting Listing - the data a partner
+        would need to re-enter at Approve time if this item goes through
+        Queue Review again.
+
+    Raises ValueError (never silently proceeds) if the item's sale was
+    already logged to QuickBooks via /finance log-sale (a real sale_items
+    row exists) - undoing THAT needs a manual QuickBooks correction first,
+    which this function doesn't attempt. Returns
+    {"reversed_sale_amount": float|None, "cleared_listing_data": bool} for
+    the caller to report back.
+    """
+    item = get_item(item_id)
+    if get_item_sale(item_id) and target_status != STATUS_SOLD:
+        raise ValueError(
+            "This item's sale was already logged to QuickBooks via /finance log-sale - "
+            "correct or void that in QuickBooks first before moving it to a different stage."
+        )
+
+    reversed_amount = None
+    if item.get("sale_price") is not None and target_status != STATUS_SOLD:
+        reversed_amount = reverse_sale(item_id, note or "Moved to a different stage by an admin", actor_id)
+
+    target_rank = _stage_rank(target_status)
+    cleared_listing_data = False
+    if target_rank < _stage_rank(STATUS_AWAITING_LISTING) and get_ebay_listing_data(item_id):
+        delete_ebay_listing_data(item_id)
+        cleared_listing_data = True
+
+    clears = []
+    if target_rank < _stage_rank(STATUS_LISTED):
+        clears.append("listed_at = NULL")
+    if target_rank < _stage_rank(STATUS_SOLD):
+        clears.append("sold_at = NULL")
+    if target_rank < _stage_rank(STATUS_SHIPPED):
+        clears.append("shipped_at = NULL")
+    if clears:
+        with get_conn() as conn:
+            conn.execute(f"UPDATE items SET {', '.join(clears)} WHERE id = ?", (item_id,))
+
+    return {"reversed_sale_amount": reversed_amount, "cleared_listing_data": cleared_listing_data}
 
 
 def get_unbatched_pending_items():

@@ -1212,6 +1212,45 @@ def _channel_and_view_for_status(item_id: int, status: str):
     return None, None
 
 
+# What /item move-back's stage picker offers, in pipeline order - every
+# status that has a real "resting" card (or, for Automated Review, a
+# re-run of the AI review) to send the item to. Deliberately excludes Sold
+# (that's Mark as Sold's own dedicated flow, which also needs a sale
+# platform), On Hold (its own /item hold command), and the pending-upload/
+# rejected/deleted statuses (transient or already have a dedicated path).
+MOVE_BACK_STAGE_LABELS = [
+    (db.STATUS_DATA_ENTRY, "Data Entry"),
+    (db.STATUS_AUTOMATED_REVIEW, "Automated Review (re-run AI)"),
+    (db.STATUS_QUEUE_REVIEW, "Queue Review"),
+    (db.STATUS_AWAITING_LISTING, "Awaiting Listing"),
+    (db.STATUS_LISTED, "Listed"),
+]
+
+
+class MoveBackStageSelect(discord.ui.Select):
+    def __init__(self, item_id: int, current_status: str):
+        self.item_id = item_id
+        options = [
+            discord.SelectOption(label=label, value=status)
+            for status, label in MOVE_BACK_STAGE_LABELS if status != current_status
+        ]
+        super().__init__(placeholder="Move this item to...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
+        await cog.admin_move_item_to_stage(interaction, self.item_id, self.values[0])
+
+
+class MoveBackStageView(discord.ui.View):
+    """Shown by /item move-back (cogs/admin_tools.py) - the admin fix for a
+    wrong click (e.g. the wrong item marked Sold), picking any stage this
+    item should actually be at instead of its current one."""
+
+    def __init__(self, item_id: int, current_status: str):
+        super().__init__(timeout=300)
+        self.add_item(MoveBackStageSelect(item_id, current_status))
+
+
 class HoldResolvedButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pallet_bot:hold_resolved:(?P<item_id>\d+)"):
     """
     Marks an item's open hold resolved and moves its card back to wherever
@@ -2104,6 +2143,98 @@ class ItemFlow(commands.Cog):
         await self._clear_old_card(interaction.message, item_id, "reject to Data Entry")
         await interaction.followup.send("Sent back to Data Entry.", ephemeral=True)
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
+
+    # ------------------------------------------------------ admin move-back --
+
+    async def admin_move_item_to_stage(self, interaction: discord.Interaction, item_id: int, target_status: str):
+        """
+        Behind /item move-back (cogs/admin_tools.py) - the admin fix for a
+        wrong click (e.g. the wrong item marked Sold): force-moves item_id to
+        target_status regardless of its current status, unwinding whatever
+        downstream data no longer applies (database.unwind_item_downstream_data
+        reverses a logged sale and clears a captured eBay listing as needed),
+        clears the item's now-stale card wherever it currently sits, and
+        reposts it at the new stage - via the same channel+view every
+        forward transition already uses (_channel_and_view_for_status) for
+        Queue Review/Awaiting Listing/Listed/Sold, or two special cases this
+        bot has no other "resting" card for: Data Entry (the same "reply to
+        resubmit" card reject_to_data_entry posts) and Automated Review
+        (actually re-runs the AI review, which ends in Queue Review - there's
+        no persistent Automated Review card to park on).
+        """
+        if not await self._require_role(interaction, config.ROLE_ADMIN):
+            return
+        if await recovery_safety.block_destructive(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        item = db.get_item(item_id)
+        if not item:
+            await interaction.followup.send("That item no longer exists.", ephemeral=True)
+            return
+        pallet = db.get_pallet(item["pallet_id"])
+        old_status = item["status"]
+
+        try:
+            result = db.unwind_item_downstream_data(
+                item_id, target_status, interaction.user.id,
+                note=f"Moved from {old_status} to {target_status} by an admin",
+            )
+        except ValueError as e:
+            await interaction.followup.send(f"⚠️ {e}", ephemeral=True)
+            return
+
+        old_stage, _ = _channel_and_view_for_status(item_id, old_status)
+        if old_stage is None and old_status == db.STATUS_REJECTED:
+            old_stage = "data-entry"
+        if old_stage:
+            old_channel = self.bot.get_channel(db.resolve_channel_id(item["pallet_id"], old_stage))
+            if old_channel and item.get("current_message_id"):
+                try:
+                    old_msg = await old_channel.fetch_message(item["current_message_id"])
+                except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                    old_msg = None
+                if old_msg:
+                    await self._clear_old_card(old_msg, item_id, "move to a different stage")
+
+        notes = []
+        if result["reversed_sale_amount"] is not None:
+            notes.append(f"reversed its ${result['reversed_sale_amount']:.2f} sale")
+        if result["cleared_listing_data"]:
+            notes.append("cleared its captured eBay listing details")
+        note_suffix = (" (" + ", ".join(notes) + ")") if notes else ""
+
+        item = db.get_item(item_id)  # re-fetch - unwind_item_downstream_data may have changed it
+        if target_status == db.STATUS_AUTOMATED_REVIEW:
+            channel = self.bot.get_channel(db.resolve_channel_id(item["pallet_id"], "automated-review"))
+            placeholder = await channel.send(f"🔄 Re-reviewing **{pallet['name']}** item #{item['item_number']}...")
+            await self.run_ai_review([item_id], placeholder)
+            dest_label = "Automated Review (now re-running AI)"
+        elif target_status == db.STATUS_DATA_ENTRY:
+            channel = self.bot.get_channel(db.resolve_channel_id(item["pallet_id"], "data-entry"))
+            msg = await send_item_card(
+                channel, item,
+                extra_text="↩️ Moved back to Data Entry by an admin - REPLY to this message with "
+                           "corrected photo(s)/note to resubmit (don't post a fresh message, or "
+                           "it'll be logged as a separate item).",
+            )
+            db.update_status(item_id, db.STATUS_REJECTED, actor_id=interaction.user.id, new_message_id=msg.id,
+                              note=f"Moved to Data Entry by an admin{note_suffix}")
+            dest_label = "Data Entry"
+        else:
+            stage, view = _channel_and_view_for_status(item_id, target_status)
+            channel = self.bot.get_channel(db.resolve_channel_id(item["pallet_id"], stage))
+            msg = await send_item_card(channel, item, view=view, destination_status=target_status)
+            db.update_status(item_id, target_status, actor_id=interaction.user.id, new_message_id=msg.id,
+                              note=f"Moved to {target_status} by an admin{note_suffix}")
+            dest_label = target_status
+
+        await finance_utils.refresh_finance_message(self.bot, item["pallet_id"])
+        await interaction.followup.send(
+            f"✅ Moved **{pallet['name']}** item #{item['item_number']} from **{old_status}** to "
+            f"**{dest_label}**{note_suffix}.",
+            ephemeral=True,
+        )
 
     async def move_to_listed(self, interaction: discord.Interaction, item_id: int):
         if not await self._require_role(interaction, config.ROLE_LISTING_MGMT):

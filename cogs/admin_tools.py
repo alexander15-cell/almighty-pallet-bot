@@ -75,6 +75,117 @@ async def _require_any_role(interaction: discord.Interaction, role_names: list) 
     return False
 
 
+_LIST_ITEMS_STATUS_CHOICES = [
+    app_commands.Choice(name="Data Entry", value=db.STATUS_DATA_ENTRY),
+    app_commands.Choice(name="Automated Review", value=db.STATUS_AUTOMATED_REVIEW),
+    app_commands.Choice(name="Queue Review", value=db.STATUS_QUEUE_REVIEW),
+    app_commands.Choice(name="Awaiting Listing", value=db.STATUS_AWAITING_LISTING),
+    app_commands.Choice(name="Pending eBay Upload", value=db.STATUS_PENDING_EBAY_UPLOAD),
+    app_commands.Choice(name="Pending FB Marketplace Upload", value=db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD),
+    app_commands.Choice(name="Listed", value=db.STATUS_LISTED),
+    app_commands.Choice(name="Sold", value=db.STATUS_SOLD),
+    app_commands.Choice(name="Shipped", value=db.STATUS_SHIPPED),
+    app_commands.Choice(name="On Hold", value=db.STATUS_ON_HOLD),
+    app_commands.Choice(name="Rejected (awaiting resubmit)", value=db.STATUS_REJECTED),
+    app_commands.Choice(name="Deleted", value=db.STATUS_DELETED),
+]
+
+ITEMS_PER_PAGE = 8  # keeps each page under Discord's 10-embed/10-attachment-per-message caps
+
+
+def _status_label(status: str) -> str:
+    return status.replace("_", " ").title()
+
+
+def _build_item_list_page(items: list, page: int, status_filter: str = None) -> dict:
+    """
+    One page of /list items: one embed per item (pallet + item number +
+    stage), with a thumbnail photo when one's available - preferring the
+    hosted R2 URL (photo_public_urls, no attachment needed - lets a page
+    show more than ITEMS_PER_PAGE one day without hitting Discord's
+    attachment cap) and falling back to attaching the local file directly
+    when R2 isn't enabled for this install.
+    """
+    max_page = max(0, (len(items) - 1) // ITEMS_PER_PAGE) if items else 0
+    start = page * ITEMS_PER_PAGE
+    page_items = items[start:start + ITEMS_PER_PAGE]
+
+    embeds = []
+    files = []
+    for item in page_items:
+        pallet = db.get_pallet(item["pallet_id"])
+        pallet_name = pallet["name"] if pallet else f"(pallet #{item['pallet_id']})"
+        embed = discord.Embed(
+            title=item.get("ai_title") or f"Item #{item['item_number']}",
+            description=f"**{pallet_name}** #{item['item_number']} - {_status_label(item['status'])}",
+        )
+
+        thumbnail_url = None
+        try:
+            public_urls = json.loads(item["photo_public_urls"]) if item.get("photo_public_urls") else []
+        except (TypeError, ValueError):
+            public_urls = []
+        if public_urls:
+            thumbnail_url = public_urls[0]
+
+        if thumbnail_url:
+            embed.set_thumbnail(url=thumbnail_url)
+        else:
+            try:
+                photo_paths = json.loads(item["photo_urls"]) if item.get("photo_urls") else []
+            except (TypeError, ValueError):
+                photo_paths = []
+            if photo_paths:
+                path = Path(photo_paths[0])
+                if path.is_file():
+                    filename = f"thumb-{item['id']}{path.suffix or '.jpg'}"
+                    files.append(discord.File(path, filename=filename))
+                    embed.set_thumbnail(url=f"attachment://{filename}")
+        embeds.append(embed)
+
+    header = f"📋 Page {page + 1}/{max_page + 1} - {len(items)} item(s)"
+    if status_filter:
+        header += f" (stage: {_status_label(status_filter)})"
+    return {"content": header, "embeds": embeds, "files": files, "max_page": max_page}
+
+
+class ItemListPaginatorView(discord.ui.View):
+    """Previous/Next pager for /list items - built fresh (not re-queried)
+    from the full item list captured at command time, so paging back and
+    forth never re-hits the database and the page count never shifts
+    underneath whoever's browsing."""
+
+    def __init__(self, items: list, status_filter: str = None):
+        super().__init__(timeout=300)
+        self.items = items
+        self.status_filter = status_filter
+        self.page = 0
+        self._sync_buttons()
+
+    def _sync_buttons(self):
+        page = _build_item_list_page(self.items, self.page, self.status_filter)
+        self.previous.disabled = self.page <= 0
+        self.next.disabled = self.page >= page["max_page"]
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
+    async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page -= 1
+        self._sync_buttons()
+        page = _build_item_list_page(self.items, self.page, self.status_filter)
+        await interaction.response.edit_message(
+            content=page["content"], embeds=page["embeds"], attachments=page["files"], view=self
+        )
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page += 1
+        self._sync_buttons()
+        page = _build_item_list_page(self.items, self.page, self.status_filter)
+        await interaction.response.edit_message(
+            content=page["content"], embeds=page["embeds"], attachments=page["files"], view=self
+        )
+
+
 class ConfirmArchiveView(discord.ui.View):
     """One-click confirmation before deleting real Discord channels."""
 
@@ -191,6 +302,27 @@ class AdminTools(commands.Cog):
     item_group = app_commands.Group(name="item", description="Admin item management")
     pallet_group = app_commands.Group(name="pallet", description="Admin pallet management")
     admin_group = app_commands.Group(name="admin", description="Admin utilities: backups, role bindings, database wipe")
+    list_group = app_commands.Group(name="list", description="Browse collected inventory")
+
+    @list_group.command(
+        name="items",
+        description="List every collected item (optionally filtered to one stage), with a photo and its current stage.",
+    )
+    @app_commands.describe(status="Only show items at this stage (optional - shows every stage if omitted)")
+    @app_commands.choices(status=_LIST_ITEMS_STATUS_CHOICES)
+    async def list_items(self, interaction: discord.Interaction, status: app_commands.Choice[str] = None):
+        status_value = status.value if status else None
+        items = db.get_all_items(status=status_value)
+        if not items:
+            message = "No items found" + (f" at stage **{_status_label(status_value)}**." if status_value else ".")
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+
+        view = ItemListPaginatorView(items, status_filter=status_value)
+        page = _build_item_list_page(items, 0, status_value)
+        await interaction.response.send_message(
+            content=page["content"], embeds=page["embeds"], files=page["files"], view=view
+        )
 
     @tasks.loop(hours=config.BACKUP_INTERVAL_HOURS)
     async def backup_loop(self):
@@ -326,6 +458,47 @@ class AdminTools(commands.Cog):
         await interaction.followup.send(
             f"✅ Created {extra} more identical item(s) from #{item_number}: {numbers_text} - each now "
             f"tracked independently in Queue Review (its own price, sale, and shipping going forward).",
+            ephemeral=True,
+        )
+
+    @item_group.command(
+        name="move-back",
+        description="Admin: force-move an item to a different stage - fixes a wrong click (e.g. wrong item marked Sold).",
+    )
+    @app_commands.describe(
+        pallet="The pallet's name (e.g. Pallet-2026-014)",
+        item_number="The item's number shown on its card",
+    )
+    async def item_move_back(self, interaction: discord.Interaction, pallet: str, item_number: int):
+        if not await _require_admin(interaction):
+            return
+        if await recovery_safety.block_destructive(interaction):
+            return
+
+        pallet_row = db.get_pallet_by_name(pallet)
+        if not pallet_row:
+            await interaction.response.send_message(f'No pallet named "{pallet}".', ephemeral=True)
+            return
+        item = db.get_item_by_pallet_and_number(pallet_row["id"], item_number)
+        if not item:
+            await interaction.response.send_message(
+                f"No item #{item_number} in **{pallet_row['name']}**.", ephemeral=True
+            )
+            return
+        if item["status"] == db.STATUS_DELETED:
+            await interaction.response.send_message("That item was deleted - nothing to move.", ephemeral=True)
+            return
+        if item["status"] == db.STATUS_ON_HOLD:
+            await interaction.response.send_message(
+                "This item is on hold - resolve the hold first (its **Resolved** button) before "
+                "moving it to a different stage.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            f"Move **{pallet_row['name']}** item #{item_number} (currently **{item['status']}**) to:",
+            view=item_flow.MoveBackStageView(item["id"], item["status"]),
             ephemeral=True,
         )
 
