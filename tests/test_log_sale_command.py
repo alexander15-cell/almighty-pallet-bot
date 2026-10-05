@@ -294,7 +294,6 @@ def test_confirm_writes_sale_and_updates_item_price(fresh_db, monkeypatch):
     item = fresh_db.get_item(fresh_db.create_item(pallet_id, "Widget", [], 1))
 
     monkeypatch.setattr(qb, "create_sales_receipt", AsyncMock(return_value={"id": "sr-1", "doc_number": "1001"}))
-    monkeypatch.setattr(qb, "create_journal_entry", AsyncMock(return_value={"id": "je-1", "doc_number": "JE-1"}))
 
     view = LogSaleConfirmView([item], {item["id"]: (4.0, 4.0)}, "eBay", 10.0, False, "2026-09-30")
     message = _FakeMessage()
@@ -308,7 +307,26 @@ def test_confirm_writes_sale_and_updates_item_price(fresh_db, monkeypatch):
     assert updated_item["sale_price"] == 10.0
     assert updated_item["sale_platform"] == "eBay"
     assert "1001" in interaction.followup.content
-    assert "JE-1" in interaction.followup.content
+
+
+def test_confirm_never_creates_a_journal_entry(fresh_db, monkeypatch):
+    """Cash basis: a sale posts ONLY a Sales Receipt - the pallet's cost was
+    already expensed in full at purchase, so no COGS Journal Entry should
+    ever be created here (that would double-count it)."""
+    pallet_id = fresh_db.create_pallet("Pallet A", category_id=1, created_by=1)
+    item = fresh_db.get_item(fresh_db.create_item(pallet_id, "Widget", [], 1))
+
+    monkeypatch.setattr(qb, "create_sales_receipt", AsyncMock(return_value={"id": "sr-1", "doc_number": "1001"}))
+    je_mock = AsyncMock(side_effect=AssertionError("no Journal Entry on a cash basis"))
+    monkeypatch.setattr(qb, "create_journal_entry", je_mock)
+
+    view = LogSaleConfirmView([item], {item["id"]: (4.0, 4.0)}, "eBay", 10.0, False, "2026-09-30")
+    interaction = _interaction(message=_FakeMessage())
+    asyncio.run(view.confirm.callback(interaction))
+
+    je_mock.assert_not_awaited()
+    sale = fresh_db.get_item_sale(item["id"])
+    assert fresh_db.get_sale(sale["sale_id"])["quickbooks_sales_receipt_id"] == "sr-1"
 
 
 def test_confirm_posts_to_the_audit_log_on_success(fresh_db, monkeypatch):
@@ -319,7 +337,6 @@ def test_confirm_posts_to_the_audit_log_on_success(fresh_db, monkeypatch):
     client = SimpleNamespace(get_channel=lambda cid: audit_channel if cid == 777 else None)
 
     monkeypatch.setattr(qb, "create_sales_receipt", AsyncMock(return_value={"id": "sr-1", "doc_number": "1001"}))
-    monkeypatch.setattr(qb, "create_journal_entry", AsyncMock(return_value={"id": "je-1", "doc_number": "JE-1"}))
 
     view = LogSaleConfirmView([item], {item["id"]: (4.0, 4.0)}, "eBay", 10.0, False, "2026-09-30")
     interaction = _interaction(client=client)
@@ -327,7 +344,6 @@ def test_confirm_posts_to_the_audit_log_on_success(fresh_db, monkeypatch):
 
     assert len(audit_channel.sent) == 1
     assert "1001" in audit_channel.sent[0][0]
-    assert "JE-1" in audit_channel.sent[0][0]
 
 
 def test_confirm_does_not_post_to_the_audit_log_on_quickbooks_failure(fresh_db, monkeypatch):
@@ -459,30 +475,11 @@ def test_retry_sale_already_logged(fresh_db, cog):
     item = fresh_db.get_item(fresh_db.create_item(pallet_id, "Widget", [], 1))
     sale_id = fresh_db.create_sale("eBay", "2026-09-30", 10.0, False, created_by=1)
     fresh_db.add_sale_item(sale_id, item["id"], 10.0, 4.0, 4.0)
-    fresh_db.mark_sale_logged(sale_id, "je-1")
+    fresh_db.set_sale_receipt_id(sale_id, "sr-1")
 
     interaction = _interaction()
     asyncio.run(Finance.retry_sale.callback(cog, interaction, sale_id))
     assert "already fully logged" in interaction.response.content
-
-
-def test_retry_sale_skips_an_already_created_receipt(fresh_db, cog, monkeypatch):
-    pallet_id = fresh_db.create_pallet("Pallet A", category_id=1, created_by=1)
-    item = fresh_db.get_item(fresh_db.create_item(pallet_id, "Widget", [], 1))
-    sale_id = fresh_db.create_sale("eBay", "2026-09-30", 10.0, False, created_by=1)
-    fresh_db.add_sale_item(sale_id, item["id"], 10.0, 4.0, 4.0)
-    fresh_db.set_sale_receipt_id(sale_id, "sr-already-made")
-
-    receipt_mock = AsyncMock()
-    monkeypatch.setattr(qb, "create_sales_receipt", receipt_mock)
-    monkeypatch.setattr(qb, "create_journal_entry", AsyncMock(return_value={"id": "je-1", "doc_number": "JE-1"}))
-
-    interaction = _interaction()
-    asyncio.run(Finance.retry_sale.callback(cog, interaction, sale_id))
-
-    receipt_mock.assert_not_awaited()
-    assert "JE-1" in interaction.followup.content
-    assert fresh_db.get_sale(sale_id)["cogs_logged_at"] is not None
 
 
 def test_retry_sale_posts_to_the_audit_log_on_success(fresh_db, cog, monkeypatch):
@@ -495,7 +492,6 @@ def test_retry_sale_posts_to_the_audit_log_on_success(fresh_db, cog, monkeypatch
     client = SimpleNamespace(get_channel=lambda cid: audit_channel if cid == 777 else None)
 
     monkeypatch.setattr(qb, "create_sales_receipt", AsyncMock(return_value={"id": "sr-1", "doc_number": "1001"}))
-    monkeypatch.setattr(qb, "create_journal_entry", AsyncMock(return_value={"id": "je-1", "doc_number": "JE-1"}))
 
     interaction = _interaction(client=client)
     asyncio.run(Finance.retry_sale.callback(cog, interaction, sale_id))

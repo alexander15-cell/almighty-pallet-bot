@@ -182,7 +182,10 @@ async def _claim_charges_for_pallet(client: discord.Client, pallet_id: int, pall
     Moves each selected awaiting_pallet_charges row onto the just-created
     pallet (into pallet_costs), links any manifest attached to it to this
     pallet (see database.set_manifest_lot_pallet), and pushes a matching
-    QuickBooks expense tagged with the pallet's name/id. No
+    QuickBooks expense tagged with the pallet's name/id - categorized
+    straight to QUICKBOOKS_COGS_ACCOUNT_ID, since on a cash basis the whole
+    purchase is recognized as cost the moment it's claimed, not deferred to
+    an Inventory asset relieved later at sale time. No
     interaction.response/followup handling here - callers already
     mid-interaction (NewPalletModal.on_submit, which defers up front) call
     this directly instead of double-deferring; _claim_awaiting_charges below
@@ -212,6 +215,7 @@ async def _claim_charges_for_pallet(client: discord.Client, pallet_id: int, pall
                 await quickbooks.create_expense(
                     config.QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID, charge["amount"], charge["txn_date"],
                     memo=f"{pallet_name} (Pallet #{pallet_id}) - {charge['merchant']}",
+                    expense_account_ref=config.QUICKBOOKS_COGS_ACCOUNT_ID,
                 )
             except quickbooks.QuickBooksError:
                 log.exception(

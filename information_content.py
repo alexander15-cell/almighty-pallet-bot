@@ -171,7 +171,7 @@ def _finance_commands_embed() -> discord.Embed:
     embed = discord.Embed(title="💬 Commands - Finance (`/finance ...`)", color=COLOR)
     embed.add_field(name="setprice <cost>", value="Set a pallet's total cost. Purchase Management or Finance Management.", inline=False)
     embed.add_field(name="record-sale", value="Manually correct an item's sale price/platform - log-sale below sets these normally.", inline=False)
-    embed.add_field(name="log-sale <items> <total_price>", value="Log a sale (single item or cross-pallet bundle) and book it to QuickBooks: a Sales Receipt plus a COGS journal entry. See the Sale Logging channel below.", inline=False)
+    embed.add_field(name="log-sale <items> <total_price>", value="Log a sale (single item or cross-pallet bundle) and book a Sales Receipt to QuickBooks - cash basis, no separate COGS journal entry. See the Sale Logging channel below.", inline=False)
     embed.add_field(name="retry-sale <sale_id>", value="Retry pushing a saved sale to QuickBooks after an earlier API failure - nothing is ever lost.", inline=False)
     embed.add_field(name="refund / expense", value="Log a refund against a sale, or an expense against a pallet.", inline=False)
     embed.add_field(name="reverse-sale", value="Undo an item's recorded sale (duplicate entry, fell through).", inline=False)
@@ -229,7 +229,8 @@ def _finance_channels_embed() -> discord.Embed:
             "**Finance Management role.** An item lands here as soon as it's marked sold, with the "
             "platform picked at that moment (Mark as Sold now asks - eBay already collects/remits "
             "sales tax, Facebook/In Person/Other don't). Use `/finance log-sale` to enter cost/COGS "
-            "and book a Sales Receipt + Cost of Goods Sold journal entry to QuickBooks."
+            "and book a Sales Receipt to QuickBooks - cash basis, so there's no separate COGS journal "
+            "entry: a pallet's purchase cost is expensed in full back when it's claimed."
         ),
         inline=False,
     )

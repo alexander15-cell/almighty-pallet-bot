@@ -446,8 +446,11 @@ async def _handle_allocation_choice(interaction: discord.Interaction, txn_id: st
     only place a pallet_costs row or an awaiting_pallet_charges row actually
     gets created from a QuickBooks charge). expense_account_ref/_name are
     only ever set for a direct pallet allocation (see ExpenseAccountSelect) -
-    optionally categorizes the pushed QuickBooks expense under a specific
-    account instead of just its own default.
+    lets staff categorize the pushed QuickBooks expense under a different
+    account for a genuine exception (a fee, shipping, supplies); left
+    unset, it falls back to QUICKBOOKS_COGS_ACCOUNT_ID - on a cash basis,
+    an ordinary merchandise purchase's cost is recognized immediately, not
+    deferred to an Inventory asset relieved later at sale time.
     """
     await interaction.response.defer(ephemeral=True, thinking=True)
 
@@ -488,20 +491,22 @@ async def _handle_allocation_choice(interaction: discord.Interaction, txn_id: st
         description=merchant, quickbooks_txn_id=txn_id, actor_id=interaction.user.id,
     )
 
+    account_ref = expense_account_ref or config.QUICKBOOKS_COGS_ACCOUNT_ID
+    account_name = expense_account_name or "Cost of Goods Sold (default)"
     qb_note = ""
     try:
         await quickbooks.create_expense(
             config.QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID, amount, txn_date,
             memo=f"{pallet['name']} (Pallet #{pallet_id}) - {merchant}",
-            expense_account_ref=expense_account_ref,
+            expense_account_ref=account_ref,
         )
     except quickbooks.QuickBooksError as e:
         qb_note = f"\n⚠️ Allocated here, but pushing the matching expense back to QuickBooks failed: {e}"
     else:
-        category_note = f" categorized under **{expense_account_name}**" if expense_account_name else ""
         await finance_utils.post_to_finance_audit_log(
             interaction.client,
-            f"💳 **{pallet['name']}**: ${amount:.2f} charge from **{merchant}** allocated{category_note}.",
+            f"💳 **{pallet['name']}**: ${amount:.2f} charge from **{merchant}** allocated "
+            f"(categorized under **{account_name}**).",
         )
 
     await finance_utils.refresh_finance_message(interaction.client, pallet_id)
@@ -513,15 +518,17 @@ class ExpenseAccountSelect(discord.ui.Select):
     """
     Second step after picking a pallet (see PalletAllocateSelect) - lets
     someone optionally categorize this charge under a specific QuickBooks
-    expense/COGS account instead of just accepting QuickBooks' own default
-    categorization. Built fresh from whatever expense accounts currently
-    exist (never persisted, the chart of accounts can change) - "Don't
-    categorize" is always the first option, since picking one is optional.
+    expense account instead of the cash-basis default (Cost of Goods Sold -
+    see config.QUICKBOOKS_COGS_ACCOUNT_ID), for a genuine exception like a
+    fee or shipping charge that isn't actually merchandise cost. Built
+    fresh from whatever expense accounts currently exist (never persisted,
+    the chart of accounts can change) - the default is always the first
+    option, since overriding it is optional.
     """
 
     def __init__(self, txn_id: str, amount: float, merchant: str, txn_date: str,
                  original_message: discord.Message, pallet_id: int, accounts: list):
-        options = [discord.SelectOption(label="Don't categorize (use QuickBooks default)", value="__none__")]
+        options = [discord.SelectOption(label="Cost of Goods Sold (default - recommended)", value="__none__")]
         options += [
             discord.SelectOption(label=f"{a['name']} ({a['type']})"[:100], value=a["id"])
             for a in accounts[:24]
@@ -713,9 +720,14 @@ class UnmatchedShippingSelect(discord.ui.Select):
 # across different pallets) and books it to QuickBooks: a Sales Receipt
 # (taxable for everything except eBay, which already collects/remits tax -
 # still gets a non-taxable receipt posted to the eBay Sales account so every
-# channel's revenue shows up in the books consistently) plus a Cost of Goods
-# Sold Journal Entry either way. Purchase price and COGS are always entered
-# fresh by a partner here - never pulled from any stored/default value.
+# channel's revenue shows up in the books consistently). That's the ONLY
+# QuickBooks entry a sale creates - cash basis means the pallet's purchase
+# cost was already expensed in full back when it was claimed, so there's no
+# COGS Journal Entry here to avoid double-counting it. Purchase price and
+# COGS are still entered fresh by a partner here (pre-filled from a matched
+# manifest line when available) - stored for this bot's own profit-per-item
+# reporting, never pulled from any stored/default value, and never pushed
+# to QuickBooks as its own entry.
 
 _COST_COGS_RE = re.compile(
     r"cost\s*[:=]?\s*\$?\s*([\d]+(?:\.\d+)?).*?cogs\s*[:=]?\s*\$?\s*([\d]+(?:\.\d+)?)",
@@ -954,56 +966,50 @@ class LogSaleConfirmView(discord.ui.View):
 
 
 async def _post_sale_to_quickbooks(sale_id: int, platform: str, total_price: float, already_deposited: bool,
-                                    sale_date: str, je_lines: list) -> dict:
+                                    sale_date: str) -> dict:
     """
-    Creates the Sales Receipt (taxable unless platform is eBay) and the COGS
-    Journal Entry for one sale, in that order - shared by _finalize_log_sale
-    and /finance retry-sale so a QuickBooks failure is only ever handled one
-    way. Idempotent against a partial prior attempt: skips creating another
-    Sales Receipt if one's already saved on this sale (see
-    database.set_sale_receipt_id) - so retrying after a Journal Entry
-    failure never double-books revenue.
+    Creates the Sales Receipt (taxable unless platform is eBay) for one
+    sale - shared by _finalize_log_sale and /finance retry-sale so a
+    QuickBooks failure is only ever handled one way. Idempotent: returns
+    "(already created)" instead of creating a second receipt if one's
+    already saved on this sale (see database.set_sale_receipt_id).
 
-    Returns {'ok': True, 'sales_receipt_doc', 'journal_entry_doc'} on
-    success, or {'ok': False, 'error'} - never raises, so a QuickBooks
-    outage never loses the already-saved sale/sale_items rows.
+    Cash basis, not accrual: this posts revenue ONLY. No COGS Journal Entry
+    - the pallet's purchase cost was already expensed in full back when it
+    was claimed (see cogs/pallet_setup.py's _claim_charges_for_pallet,
+    QUICKBOOKS_COGS_ACCOUNT_ID), so booking it again here at sale time
+    would double it. The per-item cost/COGS figure entered in
+    /finance log-sale is still saved to sale_items for this bot's own
+    profit-per-item reporting - it just never becomes its own QuickBooks
+    entry.
+
+    Returns {'ok': True, 'sales_receipt_doc'} on success, or
+    {'ok': False, 'error'} - never raises, so a QuickBooks outage never
+    loses the already-saved sale/sale_items rows.
     """
     sale = db.get_sale(sale_id)
     is_ebay = platform.strip().lower() == "ebay"
-    sales_receipt_doc = "(already created)" if sale["quickbooks_sales_receipt_id"] else None
+    if sale["quickbooks_sales_receipt_id"]:
+        return {"ok": True, "sales_receipt_doc": "(already created)"}
 
-    if not sale["quickbooks_sales_receipt_id"]:
-        income_account = config.QUICKBOOKS_EBAY_SALES_ACCOUNT_ID if is_ebay else config.QUICKBOOKS_SALES_INCOME_ACCOUNT_ID
-        deposit_account = (
-            config.QUICKBOOKS_BANK_ACCOUNT_ID if already_deposited else config.QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID
-        )
-        memo = f"Sale #{sale_id} via {platform} on {sale_date}"
-        try:
-            receipt = await quickbooks.create_sales_receipt(
-                customer_id=config.QUICKBOOKS_CASH_SALES_CUSTOMER_ID,
-                item_id=config.QUICKBOOKS_CASH_SALES_ITEM_ID,
-                income_account_id=income_account,
-                deposit_account_id=deposit_account,
-                amount=total_price, date=sale_date, memo=memo,
-                taxable=not is_ebay,
-            )
-        except quickbooks.QuickBooksError as e:
-            return {"ok": False, "error": f"Sales Receipt failed: {e}"}
-        db.set_sale_receipt_id(sale_id, receipt["id"])
-        sales_receipt_doc = receipt.get("doc_number") or receipt["id"]
-
-    je_memo = f"COGS for sale #{sale_id} via {platform} on {sale_date} (Sales Receipt {sales_receipt_doc})"
+    income_account = config.QUICKBOOKS_EBAY_SALES_ACCOUNT_ID if is_ebay else config.QUICKBOOKS_SALES_INCOME_ACCOUNT_ID
+    deposit_account = (
+        config.QUICKBOOKS_BANK_ACCOUNT_ID if already_deposited else config.QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID
+    )
+    memo = f"Sale #{sale_id} via {platform} on {sale_date}"
     try:
-        je = await quickbooks.create_journal_entry(
-            debit_account_id=config.QUICKBOOKS_COGS_ACCOUNT_ID,
-            credit_account_id=config.QUICKBOOKS_INVENTORY_ACCOUNT_ID,
-            lines=je_lines, date=sale_date, memo=je_memo,
+        receipt = await quickbooks.create_sales_receipt(
+            customer_id=config.QUICKBOOKS_CASH_SALES_CUSTOMER_ID,
+            item_id=config.QUICKBOOKS_CASH_SALES_ITEM_ID,
+            income_account_id=income_account,
+            deposit_account_id=deposit_account,
+            amount=total_price, date=sale_date, memo=memo,
+            taxable=not is_ebay,
         )
     except quickbooks.QuickBooksError as e:
-        return {"ok": False, "error": f"Journal Entry failed: {e}"}
-
-    db.mark_sale_logged(sale_id, je["id"])
-    return {"ok": True, "sales_receipt_doc": sales_receipt_doc, "journal_entry_doc": je.get("doc_number") or je["id"]}
+        return {"ok": False, "error": f"Sales Receipt failed: {e}"}
+    db.set_sale_receipt_id(sale_id, receipt["id"])
+    return {"ok": True, "sales_receipt_doc": receipt.get("doc_number") or receipt["id"]}
 
 
 async def _finalize_log_sale(interaction: discord.Interaction, resolved_items: list, parsed: dict, platform: str,
@@ -1033,23 +1039,17 @@ async def _finalize_log_sale(interaction: discord.Interaction, resolved_items: l
     sale_id = db.create_sale(platform, sale_date, total_price, already_deposited, created_by=interaction.user.id)
 
     affected_pallets = set()
-    je_lines = []
     for i, item in enumerate(resolved_items):
         purchase_price, cogs_amount = parsed[item["id"]]
         allocated_price = allocated_shares[i]
         db.add_sale_item(sale_id, item["id"], allocated_price, purchase_price, cogs_amount)
         db.record_item_sale(item["id"], allocated_price, platform, actor_id=interaction.user.id)
         affected_pallets.add(item["pallet_id"])
-        pallet = db.get_pallet(item["pallet_id"])
-        je_lines.append({
-            "amount": cogs_amount,
-            "description": f"{pallet['name']}#{item['item_number']} - purchase price ${purchase_price:.2f}",
-        })
 
     for pallet_id in affected_pallets:
         await finance_utils.refresh_finance_message(interaction.client, pallet_id)
 
-    result = await _post_sale_to_quickbooks(sale_id, platform, total_price, already_deposited, sale_date, je_lines)
+    result = await _post_sale_to_quickbooks(sale_id, platform, total_price, already_deposited, sale_date)
     item_list = ", ".join(
         f"{db.get_pallet(item['pallet_id'])['name']}#{item['item_number']}" for item in resolved_items
     )
@@ -1057,13 +1057,12 @@ async def _finalize_log_sale(interaction: discord.Interaction, resolved_items: l
     if result["ok"]:
         message = (
             f"✅ Logged sale #{sale_id} ({item_list}) via **{platform}**.\n"
-            f"Sales Receipt: `{result['sales_receipt_doc']}`\n"
-            f"Journal Entry: `{result['journal_entry_doc']}`"
+            f"Sales Receipt: `{result['sales_receipt_doc']}`"
         )
         await finance_utils.post_to_finance_audit_log(
             interaction.client,
             f"💰 **Sale #{sale_id}** ({item_list}) via **{platform}** - ${total_price:.2f} "
-            f"(Sales Receipt `{result['sales_receipt_doc']}`, Journal Entry `{result['journal_entry_doc']}`)",
+            f"(Sales Receipt `{result['sales_receipt_doc']}`)",
         )
     else:
         message = (
@@ -1394,34 +1393,25 @@ class Finance(commands.Cog):
         if not sale:
             await interaction.response.send_message(f"No sale #{sale_id} found.", ephemeral=True)
             return
-        if sale["cogs_logged_at"]:
+        if sale["quickbooks_sales_receipt_id"]:
             await interaction.response.send_message(f"Sale #{sale_id} is already fully logged to QuickBooks.", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
         sale_items = db.get_sale_items(sale_id)
-        je_lines = [
-            {
-                "amount": si["cogs_amount"],
-                "description": f"{si['pallet_name']}#{si['item_number']} - purchase price ${si['purchase_price']:.2f}",
-            }
-            for si in sale_items
-        ]
         result = await _post_sale_to_quickbooks(
-            sale_id, sale["platform"], sale["total_price"], bool(sale["already_deposited"]), sale["sale_date"], je_lines,
+            sale_id, sale["platform"], sale["total_price"], bool(sale["already_deposited"]), sale["sale_date"],
         )
         if result["ok"]:
             await interaction.followup.send(
-                f"✅ Sale #{sale_id} logged. Sales Receipt: `{result['sales_receipt_doc']}`, "
-                f"Journal Entry: `{result['journal_entry_doc']}`.",
+                f"✅ Sale #{sale_id} logged. Sales Receipt: `{result['sales_receipt_doc']}`.",
                 ephemeral=True,
             )
             item_list = ", ".join(f"{si['pallet_name']}#{si['item_number']}" for si in sale_items)
             await finance_utils.post_to_finance_audit_log(
                 interaction.client,
                 f"💰 **Sale #{sale_id}** ({item_list}) via **{sale['platform']}** - ${sale['total_price']:.2f} "
-                f"(Sales Receipt `{result['sales_receipt_doc']}`, Journal Entry `{result['journal_entry_doc']}`) "
-                f"- via retry-sale",
+                f"(Sales Receipt `{result['sales_receipt_doc']}`) - via retry-sale",
             )
         else:
             await interaction.followup.send(f"⚠️ Still failing: {result['error']}", ephemeral=True)
@@ -1702,7 +1692,7 @@ class Finance(commands.Cog):
 
         cogs_logged = db.get_pallet_cogs_logged_total(pallet["id"])
         if cogs_logged:
-            embed.add_field(name="COGS Logged (QuickBooks)", value=f"${cogs_logged:.2f}", inline=True)
+            embed.add_field(name="COGS Logged", value=f"${cogs_logged:.2f}", inline=True)
 
         if fin["cost"] is not None:
             margin_pct = (fin["profit_so_far"] / fin["revenue_so_far"] * 100) if fin["revenue_so_far"] else None

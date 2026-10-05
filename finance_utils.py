@@ -21,10 +21,13 @@ import quickbooks
 # #finance-dashboard live balance snapshot - see build_dashboard_embed.
 # The credit card account is handled separately below since it only makes
 # sense to show once QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID is actually set.
+# "Cost of Goods Sold" (not "Inventory") since every pallet purchase is
+# expensed immediately on a cash basis - there's no Inventory asset this
+# bot maintains anymore (see config.py's QUICKBOOKS_COGS_ACCOUNT_ID comment).
 DASHBOARD_ACCOUNTS = [
     ("Cash", "QUICKBOOKS_BANK_ACCOUNT_ID"),
     ("Undeposited Funds", "QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID"),
-    ("Inventory", "QUICKBOOKS_INVENTORY_ACCOUNT_ID"),
+    ("Cost of Goods Sold", "QUICKBOOKS_COGS_ACCOUNT_ID"),
 ]
 
 

@@ -441,6 +441,13 @@ def init_db():
                 total_price                   REAL NOT NULL,   -- pre-tax
                 already_deposited             INTEGER NOT NULL DEFAULT 0,
                 quickbooks_sales_receipt_id   TEXT,
+                -- quickbooks_journal_entry_id/cogs_logged_at: legacy, from
+                -- before the switch to cash-basis accounting - a sale used
+                -- to also push a COGS Journal Entry at sale time, which set
+                -- these. Kept (never backfilled) so old rows stay readable;
+                -- a new sale is now "fully logged" once
+                -- quickbooks_sales_receipt_id is set - see
+                -- cogs/finance.py's _post_sale_to_quickbooks.
                 quickbooks_journal_entry_id   TEXT,
                 cogs_logged_at                TEXT,
                 created_by                    INTEGER NOT NULL,
@@ -455,8 +462,9 @@ def init_db():
             -- deliberate "never auto-calculated" design (see /finance
             -- log-sale in cogs/finance.py) - stored per item even when
             -- entered as one combined bundle figure (split evenly across
-            -- the sale's items at entry time), so every Sales Receipt/
-            -- Journal Entry line always has a concrete per-item amount.
+            -- the sale's items at entry time), so this bot's own per-item
+            -- profit reporting always has a concrete figure, even though
+            -- (cash basis) it's never pushed to QuickBooks as its own entry.
             CREATE TABLE IF NOT EXISTS sale_items (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
                 sale_id          INTEGER NOT NULL REFERENCES sales(id),
@@ -596,8 +604,8 @@ def delete_pallet_permanently(pallet_id: int):
 
     A sale_items row for one of this pallet's items is deleted outright
     (not un-claimed) - unlike awaiting_pallet_charges, there's no "put it
-    back in a pool" state for a QuickBooks Sales Receipt/Journal Entry that
-    already posted for real. The parent sales row is left alone even then,
+    back in a pool" state for a QuickBooks Sales Receipt that already
+    posted for real. The parent sales row is left alone even then,
     since /finance log-sale's bundles can span other pallets' items too -
     only ever this pallet's own sale_items rows are touched.
     """
@@ -1606,23 +1614,13 @@ def get_sale_items(sale_id: int):
 
 def set_sale_receipt_id(sale_id: int, sales_receipt_id: str):
     """
-    Saved the moment the Sales Receipt is created, separately from
-    mark_sale_logged - if the Journal Entry call fails right after (a real
-    QuickBooks outage, not a hypothetical), /finance retry-sale needs to
-    know a receipt already exists so it never creates a second one.
+    Saved the moment the Sales Receipt is created - on a cash basis this is
+    the only QuickBooks artifact a sale ever produces (see
+    cogs/finance.py's _post_sale_to_quickbooks), so a sale is "fully
+    logged" once this is set.
     """
     with get_conn() as conn:
         conn.execute("UPDATE sales SET quickbooks_sales_receipt_id = ? WHERE id = ?", (sales_receipt_id, sale_id))
-
-
-def mark_sale_logged(sale_id: int, journal_entry_id: str):
-    """Called once the Journal Entry (always the last step) succeeds - the
-    Sales Receipt id, if any, was already saved via set_sale_receipt_id."""
-    with get_conn() as conn:
-        conn.execute(
-            "UPDATE sales SET quickbooks_journal_entry_id = ?, cogs_logged_at = ? WHERE id = ?",
-            (journal_entry_id, _now(), sale_id),
-        )
 
 
 def record_refund(item_id: int, amount: float, reason: str, actor_id: int):
@@ -1753,13 +1751,15 @@ def get_pallet_cost_breakdown(pallet_id: int) -> dict:
 
 def get_pallet_cogs_logged_total(pallet_id: int) -> float:
     """
-    Sum of sale_items.cogs_amount actually booked to QuickBooks so far for
-    this pallet's items - the real, per-sale cost figure /finance log-sale
-    records, distinct from `cost` above (the pallet-level acquisition cost
-    basis from /finance setprice + pallet_costs, which covers the WHOLE
-    pallet regardless of what's sold yet). 0.0, not None, when nothing's
-    been logged yet - "no COGS logged" is a fact worth showing as $0, not
-    hidden like an unset cost basis is.
+    Sum of sale_items.cogs_amount recorded so far for this pallet's items -
+    the real, per-sale cost figure /finance log-sale records (for this
+    bot's own profit-per-item reporting, since QUICKBOOKS_COGS_ACCOUNT_ID
+    is expensed up front at purchase, on a cash basis - this figure is
+    never pushed to QuickBooks as its own entry). Distinct from `cost`
+    above (the pallet-level acquisition cost basis from /finance setprice +
+    pallet_costs, which covers the WHOLE pallet regardless of what's sold
+    yet). 0.0, not None, when nothing's been logged yet - "no COGS logged"
+    is a fact worth showing as $0, not hidden like an unset cost basis is.
     """
     with get_conn() as conn:
         row = conn.execute(

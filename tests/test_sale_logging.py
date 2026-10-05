@@ -68,7 +68,11 @@ def test_get_item_sale_reflects_idempotency_state(fresh_db):
     assert found["sale_id"] == sale_id
 
 
-def test_set_sale_receipt_id_then_mark_sale_logged(fresh_db):
+def test_set_sale_receipt_id_marks_a_sale_fully_logged(fresh_db):
+    """Cash basis: the Sales Receipt is the only QuickBooks artifact a sale
+    produces (no COGS Journal Entry - see cogs/finance.py's
+    _post_sale_to_quickbooks) - set_sale_receipt_id alone is what
+    /finance retry-sale checks to know a sale is fully logged."""
     pallet_id = fresh_db.create_pallet("Pallet A", category_id=1, created_by=1)
     item_id = fresh_db.create_item(pallet_id, "Widget", [], 1)
     sale_id = fresh_db.create_sale("eBay", "2026-09-30", 20.0, False, created_by=1)
@@ -77,13 +81,6 @@ def test_set_sale_receipt_id_then_mark_sale_logged(fresh_db):
     fresh_db.set_sale_receipt_id(sale_id, "sr-1")
     sale = fresh_db.get_sale(sale_id)
     assert sale["quickbooks_sales_receipt_id"] == "sr-1"
-    assert sale["cogs_logged_at"] is None
-
-    fresh_db.mark_sale_logged(sale_id, "je-1")
-    sale = fresh_db.get_sale(sale_id)
-    assert sale["quickbooks_sales_receipt_id"] == "sr-1"  # untouched by mark_sale_logged
-    assert sale["quickbooks_journal_entry_id"] == "je-1"
-    assert sale["cogs_logged_at"] is not None
 
 
 def test_record_sale_platform_sets_platform_without_touching_price(fresh_db):

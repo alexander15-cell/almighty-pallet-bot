@@ -670,18 +670,30 @@ QUICKBOOKS_ENABLED = bool(QUICKBOOKS_CLIENT_ID and QUICKBOOKS_CLIENT_SECRET)
 # Used by the low-margin early-warning below.
 QUICKBOOKS_MARGIN_WARNING_THRESHOLD_PCT = float(os.getenv("QUICKBOOKS_MARGIN_WARNING_THRESHOLD_PCT") or "20")
 
-# ---- Sale logging: COGS Journal Entry + FB/in-person Sales Receipt ----
+# ---- Sale logging: FB/in-person Sales Receipt (cash-basis accounting) ----
 # See /finance log-sale (cogs/finance.py). These default to the real IDs in
 # the connected company as of when this was built (looked up directly via
 # QuickBooks' own API, not guessed) - override in .env only if the QuickBooks
 # setup changes (a renamed/re-created account, item, or customer).
 #
+# Cash basis: a pallet's full purchase price is expensed to
+# QUICKBOOKS_COGS_ACCOUNT_ID immediately when its charge is claimed (see
+# cogs/pallet_setup.py's _claim_charges_for_pallet, cogs/finance.py's
+# _handle_allocation_choice) - there is no Inventory asset to relieve later,
+# so /finance log-sale posts ONLY a Sales Receipt at sale time (no COGS
+# Journal Entry). The per-item cost/COGS figure entered there (pre-filled
+# from a matched manifest line - see database.get_item_manifest_cost) is
+# still recorded in sale_items for this bot's own profit-per-item reporting
+# (database.get_pallet_cogs_logged_total, the finance dashboard) - it just
+# never gets pushed to QuickBooks as its own entry anymore, since the cost
+# was already recognized at purchase.
+#
 #   Item "Merchandise Sales (Cash/Local)" -> income account "Sales" (7)
 #   Customer "Cash & Local Sales Customer"
 #   Account "eBay Sales" (98) - a sub-account of "Sales" (7), used instead
 #     of the Item's own default income account for eBay-platform sales
-#   Account "Cost of goods sold" (48) / "Inventory" (20) - the COGS Journal
-#     Entry's Debit/Credit pair
+#   Account "Cost of goods sold" (48) - every pallet purchase's expense
+#     category (cash basis), not a Journal Entry debit anymore
 #   Account "Undeposited funds" (24) - default Sales Receipt deposit target
 #     unless a sale is logged as already_deposited
 QUICKBOOKS_CASH_SALES_ITEM_ID = os.getenv("QUICKBOOKS_CASH_SALES_ITEM_ID", "2")
@@ -689,7 +701,6 @@ QUICKBOOKS_CASH_SALES_CUSTOMER_ID = os.getenv("QUICKBOOKS_CASH_SALES_CUSTOMER_ID
 QUICKBOOKS_SALES_INCOME_ACCOUNT_ID = os.getenv("QUICKBOOKS_SALES_INCOME_ACCOUNT_ID", "7")
 QUICKBOOKS_EBAY_SALES_ACCOUNT_ID = os.getenv("QUICKBOOKS_EBAY_SALES_ACCOUNT_ID", "98")
 QUICKBOOKS_COGS_ACCOUNT_ID = os.getenv("QUICKBOOKS_COGS_ACCOUNT_ID", "48")
-QUICKBOOKS_INVENTORY_ACCOUNT_ID = os.getenv("QUICKBOOKS_INVENTORY_ACCOUNT_ID", "20")
 QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID = os.getenv("QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID", "24")
 # Only used when a sale is logged as already_deposited=True (cash already
 # physically deposited by the time it's entered) - the real bank/cash

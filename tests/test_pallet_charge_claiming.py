@@ -104,6 +104,25 @@ def test_claim_single_charge_creates_pallet_cost_and_removes_card(pallet, fresh_
     assert awaiting_msg.deleted is True
 
 
+def test_claim_categorizes_the_quickbooks_expense_as_cogs(pallet, fresh_db, monkeypatch):
+    """Cash basis: a claimed pallet purchase is expensed straight to
+    QUICKBOOKS_COGS_ACCOUNT_ID, not left for QuickBooks' own default -
+    there's no Inventory asset to relieve later at sale time."""
+    calls = []
+    async def fake_create_expense(*args, **kwargs):
+        calls.append(kwargs)
+        return {"id": "qb-1"}
+    monkeypatch.setattr(qb, "create_expense", fake_create_expense)
+    monkeypatch.setattr(config, "QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID", "77")
+    monkeypatch.setattr(config, "QUICKBOOKS_COGS_ACCOUNT_ID", "48")
+
+    charge_id = fresh_db.create_awaiting_pallet_charge("txn-cogs", 55.0, "Freight Co", "2026-09-10", allocated_by=1)
+    interaction = _FakeInteraction(_FakeClient())
+    asyncio.run(_claim_awaiting_charges(interaction, pallet["id"], pallet["name"], [str(charge_id)]))
+
+    assert calls[0]["expense_account_ref"] == "48"
+
+
 def test_claim_posts_to_the_audit_log(pallet, fresh_db, monkeypatch):
     async def fake_create_expense(*args, **kwargs):
         return {"id": "qb-2"}

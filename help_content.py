@@ -138,7 +138,7 @@ ENTRIES = (
     ),
     HelpEntry(
         "/finance log-sale <items> <total_price>",
-        "Log a sale (single item or cross-pallet bundle) and book it to QuickBooks: a Sales Receipt plus a COGS journal entry.",
+        "Log a sale (single item or cross-pallet bundle) and book a Sales Receipt to QuickBooks - cash basis, so there's no separate COGS journal entry (the pallet's cost was already expensed at purchase).",
         ("log sale", "book sale", "cogs", "cost of goods sold", "sales receipt", "sales tax"),
     ),
     HelpEntry(

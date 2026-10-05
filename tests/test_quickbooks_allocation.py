@@ -314,13 +314,18 @@ def test_account_picker_falls_back_to_no_accounts_on_quickbooks_error(fresh_db, 
     assert isinstance(view, ExpenseAccountSelectView)
 
 
-def test_picking_dont_categorize_allocates_with_no_account_ref(pallet, fresh_db, monkeypatch):
+def test_picking_the_default_option_allocates_to_cogs_account(pallet, fresh_db, monkeypatch):
+    """Cash basis: picking the default option (no explicit override) still
+    categorizes the expense, to QUICKBOOKS_COGS_ACCOUNT_ID - a pallet
+    purchase's cost is always recognized immediately, never left
+    uncategorized the way the old "Don't categorize" default used to."""
     calls = []
     async def fake_create_expense(*args, **kwargs):
         calls.append(kwargs)
         return {"id": "x"}
     monkeypatch.setattr(qb, "create_expense", fake_create_expense)
     monkeypatch.setattr(config, "QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID", "77")
+    monkeypatch.setattr(config, "QUICKBOOKS_COGS_ACCOUNT_ID", "48")
 
     account_select = ExpenseAccountSelect(
         "txn-11", 20.0, "Staples", "2026-09-20", _FakeMessage(), pallet["id"], accounts=[],
@@ -330,7 +335,7 @@ def test_picking_dont_categorize_allocates_with_no_account_ref(pallet, fresh_db,
 
     asyncio.run(account_select.callback(interaction))
 
-    assert calls[0]["expense_account_ref"] is None
+    assert calls[0]["expense_account_ref"] == "48"
     assert len(fresh_db.get_pallet_costs(pallet["id"])) == 1
 
 

@@ -87,7 +87,7 @@ def test_dashboard_shows_live_account_balances_when_connected(fresh_db, monkeypa
     fields = {f.name: f.value for f in embed.fields}
     assert fields["Cash"] == "$42.00"
     assert fields["Undeposited Funds"] == "$42.00"
-    assert fields["Inventory"] == "$42.00"
+    assert fields["Cost of Goods Sold"] == "$42.00"
 
 
 def test_dashboard_includes_business_wide_cogs_and_pallet_progress(fresh_db):
