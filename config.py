@@ -680,13 +680,10 @@ QUICKBOOKS_MARGIN_WARNING_THRESHOLD_PCT = float(os.getenv("QUICKBOOKS_MARGIN_WAR
 # QUICKBOOKS_COGS_ACCOUNT_ID immediately when its charge is claimed (see
 # cogs/pallet_setup.py's _claim_charges_for_pallet, cogs/finance.py's
 # _handle_allocation_choice) - there is no Inventory asset to relieve later,
-# so /finance log-sale posts ONLY a Sales Receipt at sale time (no COGS
-# Journal Entry). The per-item cost/COGS figure entered there (pre-filled
-# from a matched manifest line - see database.get_item_manifest_cost) is
-# still recorded in sale_items for this bot's own profit-per-item reporting
-# (database.get_pallet_cogs_logged_total, the finance dashboard) - it just
-# never gets pushed to QuickBooks as its own entry anymore, since the cost
-# was already recognized at purchase.
+# so /finance log-sale posts ONLY a Sales Receipt at sale time. No per-item
+# cost/COGS figure is entered or tracked anywhere - the full cost was
+# already recognized at purchase time, so there's nothing left to book (or
+# track) at sale time.
 #
 #   Item "Merchandise Sales (Cash/Local)" -> income account "Sales" (7)
 #   Customer "Cash & Local Sales Customer"

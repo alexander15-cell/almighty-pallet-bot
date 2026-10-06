@@ -158,7 +158,7 @@ def test_unwind_moving_to_sold_does_not_reverse_itself(fresh_db, sold_item):
 
 def test_unwind_refuses_when_sale_already_logged_to_quickbooks(fresh_db, sold_item):
     sale_id = fresh_db.create_sale("eBay", "2026-01-01", 9.99, False, created_by=1)
-    fresh_db.add_sale_item(sale_id, sold_item["id"], 9.99, 4.0, 4.0)
+    fresh_db.add_sale_item(sale_id, sold_item["id"], 9.99)
 
     with pytest.raises(ValueError, match="already logged to QuickBooks"):
         db.unwind_item_downstream_data(sold_item["id"], db.STATUS_QUEUE_REVIEW, actor_id=1)
@@ -238,7 +238,7 @@ def test_admin_move_item_to_automated_review_reruns_ai(fresh_db, sold_item, bypa
 
 def test_admin_move_refuses_when_sale_already_logged(fresh_db, sold_item, bypass_role_check):
     sale_id = fresh_db.create_sale("eBay", "2026-01-01", 9.99, False, created_by=1)
-    fresh_db.add_sale_item(sale_id, sold_item["id"], 9.99, 4.0, 4.0)
+    fresh_db.add_sale_item(sale_id, sold_item["id"], 9.99)
     cog = ItemFlow(_FakeBot({}))
     client = _FakeBot({}, item_flow_cog=cog)
     interaction = _FakeInteraction(client, role=bypass_role_check)

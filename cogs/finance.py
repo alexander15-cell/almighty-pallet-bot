@@ -50,7 +50,6 @@ status card in #pallet-discussion via finance_utils.
 """
 import logging
 import os
-import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -63,7 +62,6 @@ import config
 import database as db
 import discord_resilience
 import finance_utils
-import manifest_import
 import pirate_ship_import
 import quickbooks
 import runtime_settings
@@ -84,63 +82,6 @@ def invoice_dir_for(charge_id: int) -> Path:
     d = INVOICE_DIR / str(charge_id)
     d.mkdir(parents=True, exist_ok=True)
     return d
-
-
-# A manifest spreadsheet is told apart from the invoice photo/PDF purely by
-# extension - liquidators send these as CSV or XLSX (see manifest_import.py),
-# never as an image, so this never collides with the actual invoice file.
-_MANIFEST_EXTENSIONS = (".csv", ".xlsx", ".xlsm")
-
-
-def _find_manifest_attachment(message: discord.Message):
-    for attachment in message.attachments:
-        if Path(attachment.filename).suffix.lower() in _MANIFEST_EXTENSIONS:
-            return attachment
-    return None
-
-
-def _find_invoice_attachment(message: discord.Message):
-    for attachment in message.attachments:
-        if Path(attachment.filename).suffix.lower() not in _MANIFEST_EXTENSIONS:
-            return attachment
-    return None
-
-
-async def _attach_manifest(charge_id: int, attachment: discord.Attachment, submitted_by: int) -> str:
-    """
-    Downloads, parses (manifest_import.parse_manifest), and stores a
-    manifest against an existing #submit-invoices charge - shared by both
-    ways a manifest can arrive (same message as the invoice, or as its own
-    follow-up message). Returns one line summarizing what was parsed (or
-    exactly what's wrong, per the user's explicit "I don't want to have to
-    change it later if the file is incorrect" requirement) to show right
-    away rather than silently accepting a possibly-wrong file.
-    """
-    raw = await attachment.read()
-    result = manifest_import.parse_manifest(raw, attachment.filename)
-    if not result["ok"]:
-        return (
-            f"⚠️ Manifest **{attachment.filename}** couldn't be read: {result['error']} "
-            f"Fix the file and send it again (just the file, no need to repeat the amount)."
-        )
-
-    charge = db.get_awaiting_pallet_charge(charge_id)
-    invoice_amount = charge["amount"] if charge else 0.0
-    db.upsert_manifest_lot(
-        charge_id, invoice_amount, result["total_retail_value"], attachment.filename,
-        submitted_by, result["lines"],
-    )
-    columns = result["columns_used"]
-    column_summary = ", ".join(
-        f"{field.replace('_', ' ')} = \"{columns[field]}\""
-        for field in ("sku", "product", "quantity", "retail_price") if field in columns
-    )
-    warning_text = "".join(f"\n⚠️ {w}" for w in result["warnings"])
-    return (
-        f"📋 Manifest **{attachment.filename}** parsed: {result['total_units']} unit(s), "
-        f"${result['total_retail_value']:,.2f} total retail value (columns used - {column_summary}). "
-        f"If that doesn't look right, just send the corrected file again.{warning_text}"
-    )
 
 
 def _has_role(interaction: discord.Interaction, role_name: str) -> bool:
@@ -721,28 +662,11 @@ class UnmatchedShippingSelect(discord.ui.Select):
 # (taxable for everything except eBay, which already collects/remits tax -
 # still gets a non-taxable receipt posted to the eBay Sales account so every
 # channel's revenue shows up in the books consistently). That's the ONLY
-# QuickBooks entry a sale creates - cash basis means the pallet's purchase
-# cost was already expensed in full back when it was claimed, so there's no
-# COGS Journal Entry here to avoid double-counting it. Purchase price and
-# COGS are still entered fresh by a partner here (pre-filled from a matched
-# manifest line when available) - stored for this bot's own profit-per-item
-# reporting, never pulled from any stored/default value, and never pushed
-# to QuickBooks as its own entry.
-
-_COST_COGS_RE = re.compile(
-    r"cost\s*[:=]?\s*\$?\s*([\d]+(?:\.\d+)?).*?cogs\s*[:=]?\s*\$?\s*([\d]+(?:\.\d+)?)",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def _parse_combined_line(line: str):
-    match = _COST_COGS_RE.search(line)
-    if not match:
-        return None
-    try:
-        return float(match.group(1)), float(match.group(2))
-    except ValueError:
-        return None
+# QuickBooks entry a sale creates - pure cash basis means the pallet's full
+# purchase cost was already expensed in full back when it was claimed (see
+# cogs/pallet_setup.py's _claim_charges_for_pallet), so there's no per-item
+# cost/COGS entry here at all - no modal, no manual entry, nothing stored
+# per item beyond the sale itself.
 
 
 def _parse_item_references(text: str):
@@ -799,128 +723,14 @@ def _split_evenly(total: float, n: int) -> list:
     return [s / 100 for s in shares]
 
 
-def _parse_cogs_entry(text: str, references: list, resolved_items: list) -> dict:
-    """
-    Parses the cost/COGS modal's free-text entry - either ONE combined line
-    (cost/COGS split evenly across every item in the sale) or exactly one
-    line per item, each starting with that item's own reference - never a
-    mix (the original spec's "all-or-nothing" requirement, so a sale can
-    never end up itemized for some items and combined for others). Returns
-    {item_id: (purchase_price, cogs_amount)}; raises ValueError with a
-    user-facing message on anything malformed, rather than guessing.
-    """
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not lines:
-        raise ValueError("Nothing entered - type at least one line.")
-
-    starts_with_a_reference = any(lines[0].lower().startswith(ref.lower() + ":") for ref in references)
-    if len(lines) == 1 and not starts_with_a_reference:
-        parsed = _parse_combined_line(lines[0])
-        if not parsed:
-            raise ValueError(f'Couldn\'t read a cost/COGS pair from "{lines[0]}" - expected e.g. "cost 10.00, cogs 10.00".')
-        cost, cogs = parsed
-        n = len(resolved_items)
-        cost_shares = _split_evenly(cost, n)
-        cogs_shares = _split_evenly(cogs, n)
-        return {item["id"]: (cost_shares[i], cogs_shares[i]) for i, item in enumerate(resolved_items)}
-
-    if len(lines) != len(resolved_items):
-        raise ValueError(
-            f"Got {len(lines)} line(s) but this sale has {len(resolved_items)} item(s) - enter either "
-            "ONE combined line, or exactly one line per item, never a mix."
-        )
-
-    result = {}
-    remaining = list(zip(references, resolved_items))
-    for line in lines:
-        match = next((pair for pair in remaining if line.lower().startswith(pair[0].lower() + ":")), None)
-        if not match:
-            raise ValueError(
-                f'Couldn\'t match line "{line}" to one of this sale\'s items - start each line with the '
-                f'item reference, e.g. "{references[0]}: cost 10.00, cogs 10.00".'
-            )
-        ref, item = match
-        remaining.remove(match)
-        parsed = _parse_combined_line(line)
-        if not parsed:
-            raise ValueError(f'Couldn\'t read a cost/COGS pair from "{line}" - expected e.g. "{ref}: cost 10.00, cogs 10.00".')
-        result[item["id"]] = parsed
-    return result
-
-
-def _cogs_default_line(item: dict, prefix: str = "") -> str:
-    """
-    One item's pre-filled default line for LogSaleCogsModal below. A
-    manifest-matched item pre-fills the real proportional cost (see
-    database.get_item_manifest_cost - the formula confirmed by the user:
-    (price paid for the lot / its manifest's total retail value) * this
-    item's own retail price) for BOTH cost and COGS, instead of an
-    all-zero placeholder that looks the same whether or not real data was
-    available. An item explicitly flagged manifest_unmatched (see Queue
-    Review's manifest-match step) keeps the blank default but says so
-    visibly, rather than looking like an ordinary "nothing known yet" item -
-    the trailing note is plain text after the numbers the cost/COGS parser
-    (_COST_COGS_RE) looks for, so it doesn't interfere with parsing.
-    """
-    manifest_cost = db.get_item_manifest_cost(item["id"])
-    if manifest_cost is not None:
-        return f"{prefix}cost {manifest_cost:.2f}, cogs {manifest_cost:.2f}"
-    if item.get("manifest_unmatched"):
-        return f"{prefix}cost 0.00, cogs 0.00  (no manifest match - enter manually)"
-    return f"{prefix}cost 0.00, cogs 0.00"
-
-
-class LogSaleCogsModal(discord.ui.Modal, title="Enter cost + COGS"):
-    entries = discord.ui.TextInput(
-        label="Cost & COGS - see pre-filled text for format",
-        style=discord.TextStyle.paragraph,
-        max_length=4000,
-    )
-
-    def __init__(self, resolved_items: list, references: list, platform: str, total_price: float,
-                 already_deposited: bool, sale_date: str):
-        super().__init__()
-        self.resolved_items = resolved_items
-        self.references = references
-        self.platform = platform
-        self.total_price = total_price
-        self.already_deposited = already_deposited
-        self.sale_date = sale_date
-        if len(references) == 1:
-            self.entries.default = _cogs_default_line(resolved_items[0])
-        else:
-            self.entries.default = "\n".join(
-                _cogs_default_line(item, prefix=f"{ref}: ") for ref, item in zip(references, resolved_items)
-            )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            parsed = _parse_cogs_entry(self.entries.value, self.references, self.resolved_items)
-        except ValueError as e:
-            await interaction.response.send_message(f"⚠️ {e}", ephemeral=True)
-            return
-        await _show_log_sale_confirmation(
-            interaction, self.resolved_items, parsed, self.platform,
-            self.total_price, self.already_deposited, self.sale_date,
-        )
-
-
-async def _show_log_sale_confirmation(interaction: discord.Interaction, resolved_items: list, parsed: dict,
+async def _show_log_sale_confirmation(interaction: discord.Interaction, resolved_items: list,
                                        platform: str, total_price: float, already_deposited: bool, sale_date: str):
     n = len(resolved_items)
     allocated_shares = _split_evenly(total_price, n)
     lines = []
-    total_cost = 0.0
-    total_cogs = 0.0
     for i, item in enumerate(resolved_items):
         pallet = db.get_pallet(item["pallet_id"])
-        purchase_price, cogs_amount = parsed[item["id"]]
-        total_cost += purchase_price
-        total_cogs += cogs_amount
-        lines.append(
-            f"**{pallet['name']}#{item['item_number']}** - sale ${allocated_shares[i]:.2f}, "
-            f"cost ${purchase_price:.2f}, COGS ${cogs_amount:.2f}"
-        )
+        lines.append(f"**{pallet['name']}#{item['item_number']}** - sale ${allocated_shares[i]:.2f}")
 
     is_ebay = platform.strip().lower() == "ebay"
     tax_note = (
@@ -930,24 +740,22 @@ async def _show_log_sale_confirmation(interaction: discord.Interaction, resolved
     )
     deposit_note = "Already deposited" if already_deposited else "Undeposited Funds"
 
-    embed = discord.Embed(title="Confirm sale + COGS", color=discord.Color.gold())
+    embed = discord.Embed(title="Confirm sale", color=discord.Color.gold())
     embed.add_field(name=f"{n} item(s) - {platform}", value="\n".join(lines), inline=False)
     embed.add_field(name="Total Sale Price (pre-tax)", value=f"${total_price:.2f}", inline=True)
-    embed.add_field(name="Total COGS", value=f"${total_cogs:.2f}", inline=True)
     embed.add_field(name="Deposit To", value=deposit_note, inline=True)
     embed.add_field(name="Sales Tax", value=tax_note, inline=False)
     embed.set_footer(text="Nothing is sent to QuickBooks until you confirm.")
 
-    view = LogSaleConfirmView(resolved_items, parsed, platform, total_price, already_deposited, sale_date)
+    view = LogSaleConfirmView(resolved_items, platform, total_price, already_deposited, sale_date)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 class LogSaleConfirmView(discord.ui.View):
-    def __init__(self, resolved_items: list, parsed: dict, platform: str, total_price: float,
+    def __init__(self, resolved_items: list, platform: str, total_price: float,
                  already_deposited: bool, sale_date: str):
         super().__init__(timeout=300)
         self.resolved_items = resolved_items
-        self.parsed = parsed
         self.platform = platform
         self.total_price = total_price
         self.already_deposited = already_deposited
@@ -956,7 +764,7 @@ class LogSaleConfirmView(discord.ui.View):
     @discord.ui.button(label="Confirm & log to QuickBooks", style=discord.ButtonStyle.success, emoji="✅")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _finalize_log_sale(
-            interaction, self.resolved_items, self.parsed, self.platform,
+            interaction, self.resolved_items, self.platform,
             self.total_price, self.already_deposited, self.sale_date,
         )
 
@@ -978,10 +786,7 @@ async def _post_sale_to_quickbooks(sale_id: int, platform: str, total_price: flo
     - the pallet's purchase cost was already expensed in full back when it
     was claimed (see cogs/pallet_setup.py's _claim_charges_for_pallet,
     QUICKBOOKS_COGS_ACCOUNT_ID), so booking it again here at sale time
-    would double it. The per-item cost/COGS figure entered in
-    /finance log-sale is still saved to sale_items for this bot's own
-    profit-per-item reporting - it just never becomes its own QuickBooks
-    entry.
+    would double it.
 
     Returns {'ok': True, 'sales_receipt_doc'} on success, or
     {'ok': False, 'error'} - never raises, so a QuickBooks outage never
@@ -1012,7 +817,7 @@ async def _post_sale_to_quickbooks(sale_id: int, platform: str, total_price: flo
     return {"ok": True, "sales_receipt_doc": receipt.get("doc_number") or receipt["id"]}
 
 
-async def _finalize_log_sale(interaction: discord.Interaction, resolved_items: list, parsed: dict, platform: str,
+async def _finalize_log_sale(interaction: discord.Interaction, resolved_items: list, platform: str,
                               total_price: float, already_deposited: bool, sale_date: str):
     await interaction.response.defer(ephemeral=True, thinking=True)
     try:
@@ -1040,9 +845,8 @@ async def _finalize_log_sale(interaction: discord.Interaction, resolved_items: l
 
     affected_pallets = set()
     for i, item in enumerate(resolved_items):
-        purchase_price, cogs_amount = parsed[item["id"]]
         allocated_price = allocated_shares[i]
-        db.add_sale_item(sale_id, item["id"], allocated_price, purchase_price, cogs_amount)
+        db.add_sale_item(sale_id, item["id"], allocated_price)
         db.record_item_sale(item["id"], allocated_price, platform, actor_id=interaction.user.id)
         affected_pallets.add(item["pallet_id"])
 
@@ -1101,15 +905,6 @@ class Finance(commands.Cog):
         QuickBooks-sourced charge - the QuickBooks API being unavailable
         means this is the real, working replacement for that automatic
         path, not a fallback for when it fails.
-
-        A manifest spreadsheet (see manifest_import.py) for the same lot can
-        ride along as a second attachment on that same message, OR arrive
-        as its own later message containing ONLY a manifest file and no
-        dollar amount - attached to whichever unclaimed invoice this same
-        person most recently submitted (see
-        database.get_latest_unclaimed_manual_charge_for_user), so a
-        manifest that isn't ready yet, or needs re-uploading after a
-        rejection, never has to repeat the invoice photo/amount.
         """
         if message.author.bot:
             return
@@ -1129,52 +924,7 @@ class Finance(commands.Cog):
         if not message.attachments:
             await message.reply(
                 "Attach the invoice (photo or PDF) and put just the dollar amount in the same "
-                "message, e.g. \"125.50\". If you have a manifest (CSV/XLSX) for this lot, attach "
-                "it alongside the invoice, or send it on its own afterward.",
-                delete_after=15,
-            )
-            return
-
-        manifest_attachment = _find_manifest_attachment(message)
-        invoice_attachment = _find_invoice_attachment(message)
-
-        # Manifest-only follow-up: no real invoice attachment here, and no
-        # dollar amount typed - this is a manifest riding solo, meant for
-        # whatever invoice this person most recently submitted.
-        if manifest_attachment and not invoice_attachment:
-            try:
-                shop_values.parse_price_cents(message.content or "")
-                has_amount = True
-            except shop_values.ShopValidationError:
-                has_amount = False
-            if not has_amount:
-                charge = db.get_latest_unclaimed_manual_charge_for_user(message.author.id)
-                if not charge:
-                    await message.reply(
-                        "No unclaimed invoice from you to attach this manifest to - submit the "
-                        "invoice (photo/PDF + dollar amount) first, then send the manifest.",
-                        delete_after=20,
-                    )
-                    return
-                summary = await _attach_manifest(charge["id"], manifest_attachment, message.author.id)
-                if not config.PRESERVE_DISCORD_HISTORY:
-                    try:
-                        await message.delete()
-                    except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-                        pass
-                await message.channel.send(summary, delete_after=30)
-                return
-            await message.reply(
-                "That looks like a manifest file, not an invoice - attach the actual invoice "
-                "(photo/PDF) too, or send just the manifest with no dollar amount if the invoice's "
-                "already logged.",
-                delete_after=20,
-            )
-            return
-
-        if not invoice_attachment:
-            await message.reply(
-                "Attach the invoice (photo or PDF) and put just the dollar amount in the same message.",
+                "message, e.g. \"125.50\".",
                 delete_after=15,
             )
             return
@@ -1189,15 +939,12 @@ class Finance(commands.Cog):
             return
 
         amount = cents / 100
+        attachment = message.attachments[0]
         charge_id = db.create_manual_invoice_charge(amount, message.author.id)
-        ext = Path(invoice_attachment.filename).suffix or ".jpg"
+        ext = Path(attachment.filename).suffix or ".jpg"
         dest = invoice_dir_for(charge_id) / f"invoice{ext}"
-        await invoice_attachment.save(dest)
+        await attachment.save(dest)
         db.set_awaiting_pallet_charge_invoice_photo(charge_id, str(dest))
-
-        manifest_summary = None
-        if manifest_attachment:
-            manifest_summary = await _attach_manifest(charge_id, manifest_attachment, message.author.id)
 
         charge = db.get_awaiting_pallet_charge(charge_id)
         try:
@@ -1210,18 +957,11 @@ class Finance(commands.Cog):
                 await message.delete()
             except discord_resilience.TRANSIENT_DISCORD_ERRORS:
                 pass
-        confirmation = (
+        await message.channel.send(
             f"✅ Invoice for ${amount:.2f} logged - it'll show up in #awaiting-pallet-charges "
-            f"until a matching pallet is created."
+            f"until a matching pallet is created.",
+            delete_after=15,
         )
-        if manifest_summary:
-            confirmation += f"\n{manifest_summary}"
-        else:
-            confirmation += (
-                "\nNo manifest attached yet - send one (CSV/XLSX) here whenever it's ready, so "
-                "Queue Review can match items to it for accurate per-item COGS."
-            )
-        await message.channel.send(confirmation, delete_after=30)
 
     finance_group = app_commands.Group(name="finance", description="Finance Management commands")
 
@@ -1327,7 +1067,7 @@ class Finance(commands.Cog):
 
     @finance_group.command(
         name="log-sale",
-        description="Log a sale (single item or bundle) - opens a form for cost/COGS, then books it to QuickBooks.",
+        description="Log a sale (single item or bundle) and book it to QuickBooks.",
     )
     @app_commands.describe(
         items='Item references, comma-separated: "PalletName#3" or "PalletName#3, OtherPallet#7" for a bundle',
@@ -1377,8 +1117,8 @@ class Finance(commands.Cog):
                 return
 
         sale_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        await interaction.response.send_modal(
-            LogSaleCogsModal(resolved_items, references, platform, total_price, already_deposited, sale_date)
+        await _show_log_sale_confirmation(
+            interaction, resolved_items, platform, total_price, already_deposited, sale_date
         )
 
     @finance_group.command(
@@ -1689,10 +1429,6 @@ class Finance(commands.Cog):
                 value=f"${fin['pending_sale_value']:.2f} ({fin['items_pending_sale']} priced, not yet sold)",
                 inline=True,
             )
-
-        cogs_logged = db.get_pallet_cogs_logged_total(pallet["id"])
-        if cogs_logged:
-            embed.add_field(name="COGS Logged", value=f"${cogs_logged:.2f}", inline=True)
 
         if fin["cost"] is not None:
             margin_pct = (fin["profit_so_far"] / fin["revenue_so_far"] * 100) if fin["revenue_so_far"] else None

@@ -148,13 +148,13 @@ ENTRIES = (
     ),
     HelpEntry(
         "Mark as Sold platform picker",
-        "Choosing where an item sold (eBay/Facebook/In Person/Other) right when it's marked sold - needed for sales tax, and posts it to #accounting for COGS entry.",
+        "Choosing where an item sold (eBay/Facebook/In Person/Other) right when it's marked sold - needed for sales tax, and posts it to #accounting for Finance Management to log with /finance log-sale.",
         ("mark sold platform", "where did it sell", "sales tax platform"),
     ),
     HelpEntry(
         "#accounting",
-        "Sold items land here for Finance Management to log cost/COGS with /finance log-sale.",
-        ("accounting channel", "cogs channel", "log cogs"),
+        "Sold items land here for Finance Management to log with /finance log-sale.",
+        ("accounting channel", "log sale"),
     ),
     HelpEntry(
         "#finance-audit-log",

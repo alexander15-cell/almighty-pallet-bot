@@ -1,9 +1,7 @@
 """
 Pure parsing/splitting helpers behind /finance log-sale (cogs/finance.py):
-_parse_item_references (the "PalletName#3, OtherPallet#7" bundle syntax),
-_split_evenly (rounding a total into per-item shares that sum exactly), and
-_parse_cogs_entry (the cost/COGS modal's free-text, combined-or-itemized,
-never-a-mix input).
+_parse_item_references (the "PalletName#3, OtherPallet#7" bundle syntax) and
+_split_evenly (rounding a total into per-item shares that sum exactly).
 """
 import os
 
@@ -11,7 +9,7 @@ os.environ.setdefault("DISCORD_BOT_TOKEN", "test-token")
 
 import pytest
 
-from cogs.finance import _parse_item_references, _split_evenly, _parse_cogs_entry
+from cogs.finance import _parse_item_references, _split_evenly
 
 
 # --------------------------------------------------------- _parse_item_references
@@ -90,69 +88,3 @@ def test_split_evenly_sums_exactly_despite_rounding():
 
 def test_split_evenly_single_item_returns_the_whole_amount():
     assert _split_evenly(19.99, 1) == [19.99]
-
-
-# ----------------------------------------------------------- _parse_cogs_entry
-
-
-def _item(item_id, number):
-    return {"id": item_id, "item_number": number}
-
-
-def test_combined_single_line_splits_evenly_across_items():
-    items = [_item(1, 1), _item(2, 2)]
-    result = _parse_cogs_entry("cost 10.00, cogs 8.00", ["Pallet A#1", "Pallet A#2"], items)
-    assert result[1] == (5.0, 4.0)
-    assert result[2] == (5.0, 4.0)
-
-
-def test_combined_single_line_works_for_one_item_too():
-    items = [_item(1, 1)]
-    result = _parse_cogs_entry("cost 12.50, cogs 12.50", ["Pallet A#1"], items)
-    assert result[1] == (12.5, 12.5)
-
-
-def test_itemized_lines_match_by_reference_prefix():
-    items = [_item(1, 1), _item(2, 2)]
-    text = "Pallet A#1: cost 4.50, cogs 4.50\nPallet A#2: cost 6.00, cogs 5.00"
-    result = _parse_cogs_entry(text, ["Pallet A#1", "Pallet A#2"], items)
-    assert result[1] == (4.5, 4.5)
-    assert result[2] == (6.0, 5.0)
-
-
-def test_itemized_lines_work_in_any_order():
-    items = [_item(1, 1), _item(2, 2)]
-    text = "Pallet A#2: cost 6.00, cogs 5.00\nPallet A#1: cost 4.50, cogs 4.50"
-    result = _parse_cogs_entry(text, ["Pallet A#1", "Pallet A#2"], items)
-    assert result[1] == (4.5, 4.5)
-    assert result[2] == (6.0, 5.0)
-
-
-def test_rejects_empty_input():
-    with pytest.raises(ValueError, match="Nothing entered"):
-        _parse_cogs_entry("   \n  ", ["Pallet A#1"], [_item(1, 1)])
-
-
-def test_rejects_a_combined_line_it_cant_parse():
-    with pytest.raises(ValueError, match="Couldn't read a cost/COGS pair"):
-        _parse_cogs_entry("this isn't the right format", ["Pallet A#1"], [_item(1, 1)])
-
-
-def test_rejects_a_mix_of_wrong_line_count():
-    items = [_item(1, 1), _item(2, 2)]
-    with pytest.raises(ValueError, match="never a mix"):
-        _parse_cogs_entry("Pallet A#1: cost 1, cogs 1", ["Pallet A#1", "Pallet A#2"], items)
-
-
-def test_rejects_an_itemized_line_that_doesnt_match_any_reference():
-    items = [_item(1, 1), _item(2, 2)]
-    text = "Pallet A#1: cost 1, cogs 1\nSomewhere Else#9: cost 2, cogs 2"
-    with pytest.raises(ValueError, match="Couldn't match line"):
-        _parse_cogs_entry(text, ["Pallet A#1", "Pallet A#2"], items)
-
-
-def test_rejects_an_itemized_line_with_unparseable_amounts():
-    items = [_item(1, 1), _item(2, 2)]
-    text = "Pallet A#1: cost 1, cogs 1\nPallet A#2: garbage"
-    with pytest.raises(ValueError, match="Couldn't read a cost/COGS pair"):
-        _parse_cogs_entry(text, ["Pallet A#1", "Pallet A#2"], items)

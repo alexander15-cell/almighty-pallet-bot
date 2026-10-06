@@ -40,7 +40,7 @@ def full_history_pallet(fresh_db):
     fresh_db.claim_awaiting_pallet_charge(charge_id, pallet_id, actor_id=1)
 
     sale_id = fresh_db.create_sale("eBay", "2026-09-29", 25.0, False, created_by=1)
-    fresh_db.add_sale_item(sale_id, item_id, 25.0, 5.0, 5.0)
+    fresh_db.add_sale_item(sale_id, item_id, 25.0)
 
     return pallet_id, item_id, charge_id
 
@@ -90,8 +90,8 @@ def test_delete_pallet_permanently_leaves_a_cross_pallet_sale_intact(fresh_db):
     item1 = fresh_db.create_item(p1, "Widget", [], 1)
     item2 = fresh_db.create_item(p2, "Gadget", [], 1)
     sale_id = fresh_db.create_sale("In Person", "2026-09-29", 20.0, False, created_by=1)
-    fresh_db.add_sale_item(sale_id, item1, 10.0, 3.0, 3.0)
-    fresh_db.add_sale_item(sale_id, item2, 10.0, 4.0, 4.0)
+    fresh_db.add_sale_item(sale_id, item1, 10.0)
+    fresh_db.add_sale_item(sale_id, item2, 10.0)
 
     fresh_db.delete_pallet_permanently(p1)  # must not raise
 

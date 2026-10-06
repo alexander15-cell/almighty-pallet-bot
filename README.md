@@ -295,31 +295,34 @@ automatically from QuickBooks:
 - It then shows up in `#awaiting-pallet-charges` with the invoice attached,
   exactly like a QuickBooks-sourced charge - **Start New Pallet** offers to
   attach any unclaimed ones (of either kind) to the pallet being created.
-- Unlike a QuickBooks-sourced charge, claiming one never pushes anything to
-  QuickBooks automatically (there's no real transaction to push) - it's
-  filed under the `invoice` cost type in the pallet's cost basis
-  (`/finance pallet-summary`), ready for the accountant to enter into
-  QuickBooks by hand from its card.
-- Once **Finance Management** has entered an invoice into QuickBooks by
-  hand, its card in `#awaiting-pallet-charges` has a **Confirm logged in
-  QuickBooks** button - clicking it just removes the card (no Discord
-  trail needed once it's recorded elsewhere). This never touches whether
-  it can still be claimed by a pallet later - that's independent of
-  whether the card exists.
+- Unlike a QuickBooks-sourced charge (which gets a categorized Expense
+  pushed against the credit card account itself), a manually-submitted
+  invoice has no existing QuickBooks transaction to categorize - claiming
+  it instead pushes a **Journal Entry** (debit Cost of Goods Sold, credit
+  Cash) for the full amount, expensing it immediately on a cash basis. It's
+  also filed under the `invoice` cost type in the pallet's cost basis
+  (`/finance pallet-summary`).
+- Its card in `#awaiting-pallet-charges` still has a **Confirm logged in
+  QuickBooks** button in case the Journal Entry push fails and someone
+  enters it by hand instead - clicking it just removes the card (no
+  Discord trail needed once it's recorded elsewhere). This never touches
+  whether it can still be claimed by a pallet later - that's independent
+  of whether the card exists.
 - Both `#credit-card-charges`/`#awaiting-pallet-charges` and
   `#submit-invoices` now live in their own **Finance** category, separate
   from the item-pipeline's Shared Pallet Pipeline category - run
   `/setup shared-channels` again (safe to re-run) to create whatever's
   missing if you're adding this to an existing server.
 
-### Sale logging + Cost of Goods Sold (`#accounting`, `/finance log-sale`)
+### Sale logging - pure cash basis (`#accounting`, `/finance log-sale`)
 
-Books the *sale* side to QuickBooks - a Sales Receipt (revenue) plus a Cost
-of Goods Sold Journal Entry - separately from the credit-card/invoice
-tracking above, which only ever covers what a pallet *cost*. Purchase
-price and COGS are always entered fresh by a partner - never pulled from
-any stored/default value, since per-item purchase cost isn't reliably
-tracked anywhere in this bot.
+Books the *sale* side to QuickBooks - a Sales Receipt, and nothing else.
+This business runs on pure cash-basis accounting: a pallet's full purchase
+cost is expensed in full to Cost of Goods Sold the moment it's claimed (see
+the credit-card/invoice tracking above), so there's no per-item cost or
+COGS figure to enter, track, or push anywhere at sale time - no inventory
+asset to relieve, no manifest to match against, nothing beyond the sale
+itself.
 
 - **Mark as Sold** now asks which platform it sold on first (eBay /
   Facebook Marketplace / In Person / Other) before the item actually moves -
@@ -331,27 +334,23 @@ tracked anywhere in this bot.
   reference like `Pallet-2026-014#3`, or several comma-separated for a
   bundle sold together, even across different pallets - the total sale
   price (pre-tax), and platform (defaults to what was picked at Mark as
-  Sold if every item in the bundle agrees). It opens a form for cost and
-  COGS per item (or one combined figure, split evenly across the bundle -
-  never a mix of both in the same sale), then shows a full confirmation
-  (every item, price, cost, which QuickBooks accounts get hit) before
-  anything is sent anywhere.
+  Sold if every item in the bundle agrees). It shows a full confirmation
+  (every item, price, which QuickBooks accounts get hit) before anything
+  is sent anywhere - no modal, no per-item entry step.
 - On confirmation: a **Sales Receipt** posts to QuickBooks - non-taxable
   and routed to the "eBay Sales" account for eBay, taxable and routed to
   the normal Sales account for everything else, letting **QuickBooks'
   own Automated Sales Tax calculate the tax** rather than this bot
   guessing at a flat rate. Deposits to Undeposited Funds unless the sale
-  is marked as already deposited to the real bank account. A **Journal
-  Entry** (Debit Cost of Goods Sold / Credit Inventory) follows, referencing
-  the Sales Receipt's number in its memo. An item can only ever be logged
-  once (blocks re-submitting the same item into a second sale).
-- If QuickBooks fails partway through, nothing is lost - the sale is saved
-  to the database before either QuickBooks call, and **`/finance
-  retry-sale sale_id:<id>`** picks up exactly where it left off (skipping
-  a Sales Receipt that already went through, so it's never created twice).
+  is marked as already deposited to the real bank account. That's the only
+  QuickBooks entry a sale produces. An item can only ever be logged once
+  (blocks re-submitting the same item into a second sale).
+- If QuickBooks fails, nothing is lost - the sale is saved to the database
+  before the QuickBooks call, and **`/finance retry-sale sale_id:<id>`**
+  picks up exactly where it left off.
 - `/finance pallet-summary` shows revenue net of sales tax (it always was -
-  only the pre-tax price is ever recorded), the real COGS logged so far
-  from this flow, and an explicit breakeven line.
+  only the pre-tax price is ever recorded) and an explicit breakeven line
+  against the pallet's cost basis.
 - The QuickBooks account/item/customer IDs this posts against
   (`QUICKBOOKS_CASH_SALES_ITEM_ID`, `QUICKBOOKS_COGS_ACCOUNT_ID`, etc.) are
   documented in `config.py` and default to the real values already set up
@@ -366,18 +365,19 @@ without needing a finance-specific role:
 
 - **`#finance-audit-log`** - a permanent, plain-text line for every
   completed QuickBooks transaction: a logged sale (`/finance log-sale` or
-  `/finance retry-sale`, with its Sales Receipt/Journal Entry numbers), an
-  allocated credit-card charge (including which account it was categorized
-  under, if any), and a charge claimed from `#awaiting-pallet-charges` at
-  pallet creation. Nothing here is ephemeral, unlike the confirmation
-  messages those commands also send to whoever ran them.
+  `/finance retry-sale`, with its Sales Receipt number), an allocated
+  credit-card charge (including which account it was categorized under, if
+  any), and a charge claimed from `#awaiting-pallet-charges` at pallet
+  creation (an Expense for a credit-card-sourced charge, a Journal Entry
+  for a manually-submitted invoice). Nothing here is ephemeral, unlike the
+  confirmation messages those commands also send to whoever ran them.
 - **`#finance-dashboard`** - a single pinned message the bot keeps updated
-  automatically: live QuickBooks balances (Cash, Undeposited Funds,
-  Inventory, and the configured credit card), month-to-date revenue/spend,
-  total COGS logged, and pallets in progress vs. fully sold out. Refreshes
-  itself every time `finance_utils.refresh_finance_message` runs for any
-  pallet - i.e. after any cost/sale/expense/allocation change anywhere, not
-  just here - so there's nothing to run to keep it current.
+  automatically: live QuickBooks balances (Cash, Undeposited Funds, Cost of
+  Goods Sold, and the configured credit card), month-to-date revenue/spend,
+  and pallets in progress vs. fully sold out. Refreshes itself every time
+  `finance_utils.refresh_finance_message` runs for any pallet - i.e. after
+  any cost/sale/expense/allocation change anywhere, not just here - so
+  there's nothing to run to keep it current.
 
 Both are created by `/setup shared-channels` like every other shared
 channel; the dashboard also gets its first pinned snapshot posted

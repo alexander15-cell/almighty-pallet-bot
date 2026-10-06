@@ -400,12 +400,13 @@ async def create_sales_receipt(customer_id: str, item_id: str, income_account_id
 async def create_journal_entry(debit_account_id: str, credit_account_id: str,
                                 lines: list, date: str, memo: str) -> dict:
     """
-    Creates a QuickBooks Journal Entry - used by /finance log-sale to book
-    Cost of Goods Sold: for each entry in `lines` (`{'amount': float,
-    'description': str}` - one per sold item, or a single combined entry
-    for a bundle logged as one figure), a Debit line against
-    `debit_account_id` (COGS) and a matching Credit line against
-    `credit_account_id` (Inventory).
+    Creates a QuickBooks Journal Entry - used by
+    cogs/pallet_setup.py's _claim_charges_for_pallet to expense a
+    manually-submitted invoice charge in full at purchase time (cash
+    basis): for each entry in `lines` (`{'amount': float, 'description':
+    str}` - normally just one, the whole charge), a Debit line against
+    `debit_account_id` (Cost of Goods Sold) and a matching Credit line
+    against `credit_account_id` (Cash).
 
     Returns {'id': <new JournalEntry id>, 'doc_number': <DocNumber>}.
     """

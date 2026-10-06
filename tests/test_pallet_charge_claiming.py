@@ -185,16 +185,21 @@ def test_create_manual_invoice_charge_generates_unique_synthetic_ids(fresh_db):
     assert {c["source"] for c in unclaimed} == {"manual"}
 
 
-def test_claim_manual_invoice_never_calls_quickbooks(pallet, fresh_db, monkeypatch):
+def test_claim_manual_invoice_pushes_a_journal_entry_not_an_expense(pallet, fresh_db, monkeypatch):
     """
-    Regression guard: a manually-submitted invoice (#submit-invoices) was
-    never a real QuickBooks transaction, so claiming it must never attempt
-    a QuickBooks push - unlike a QuickBooks-sourced charge, which does (see
-    test_claim_single_charge_creates_pallet_cost_and_removes_card above).
+    A manually-submitted invoice (#submit-invoices) has no existing
+    QuickBooks Purchase to categorize (unlike a QuickBooks-sourced credit
+    card charge - see test_claim_single_charge_creates_pallet_cost_and_removes_card
+    above), so claiming it pushes a Journal Entry instead: debit Cost of
+    Goods Sold, credit Cash, for the full amount.
     """
-    create_expense = AsyncMock(side_effect=AssertionError("no QuickBooks push"))
+    create_expense = AsyncMock(side_effect=AssertionError("no Expense push for a manual invoice"))
     monkeypatch.setattr(qb, "create_expense", create_expense)
+    journal_entry = AsyncMock(return_value={"id": "je-1", "doc_number": "JE-1"})
+    monkeypatch.setattr(qb, "create_journal_entry", journal_entry)
     monkeypatch.setattr(config, "QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID", "77")
+    monkeypatch.setattr(config, "QUICKBOOKS_COGS_ACCOUNT_ID", "48")
+    monkeypatch.setattr(config, "QUICKBOOKS_BANK_ACCOUNT_ID", "8")
 
     charge_id = fresh_db.create_manual_invoice_charge(42.50, submitted_by=1)
 
@@ -202,6 +207,11 @@ def test_claim_manual_invoice_never_calls_quickbooks(pallet, fresh_db, monkeypat
     asyncio.run(_claim_awaiting_charges(interaction, pallet["id"], pallet["name"], [str(charge_id)]))
 
     create_expense.assert_not_awaited()
+    journal_entry.assert_awaited_once()
+    assert journal_entry.call_args.kwargs["debit_account_id"] == "48"
+    assert journal_entry.call_args.kwargs["credit_account_id"] == "8"
+    assert journal_entry.call_args.kwargs["lines"][0]["amount"] == 42.50
+
     costs = fresh_db.get_pallet_costs(pallet["id"])
     assert len(costs) == 1
     assert costs[0]["amount"] == 42.50

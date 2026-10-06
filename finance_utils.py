@@ -166,12 +166,12 @@ async def build_dashboard_embed() -> discord.Embed:
     """
     The business-wide "position" snapshot kept in #finance-dashboard - a
     handful of live QuickBooks account balances (Cash, Undeposited Funds,
-    Inventory, and the configured credit card if any) plus the same
-    month-to-date revenue/spend and pallet-progress figures /finance
-    overview already computes, and the total COGS logged so far via
-    /finance log-sale. Refreshed automatically by refresh_dashboard_message
-    every time refresh_finance_message runs for any pallet - i.e. after
-    any cost/sale/expense change anywhere, not just here.
+    Cost of Goods Sold, and the configured credit card if any) plus the
+    same month-to-date revenue/spend and pallet-progress figures /finance
+    overview already computes. Refreshed automatically by
+    refresh_dashboard_message every time refresh_finance_message runs for
+    any pallet - i.e. after any cost/sale/expense change anywhere, not
+    just here.
     """
     embed = discord.Embed(title="📈 Business Position", color=discord.Color.blurple())
 
@@ -201,7 +201,6 @@ async def build_dashboard_embed() -> discord.Embed:
     mtd = db.get_month_to_date_financials()
     embed.add_field(name="Month-to-Date Revenue", value=f"${mtd['revenue']:.2f}", inline=True)
     embed.add_field(name="Month-to-Date Spend", value=f"${mtd['spend']:.2f}", inline=True)
-    embed.add_field(name="Total COGS Logged", value=f"${db.get_total_cogs_logged():.2f}", inline=True)
 
     progress = db.get_pallet_progress_counts()
     embed.add_field(

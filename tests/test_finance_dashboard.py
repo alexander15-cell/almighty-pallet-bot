@@ -90,16 +90,15 @@ def test_dashboard_shows_live_account_balances_when_connected(fresh_db, monkeypa
     assert fields["Cost of Goods Sold"] == "$42.00"
 
 
-def test_dashboard_includes_business_wide_cogs_and_pallet_progress(fresh_db):
+def test_dashboard_includes_pallet_progress(fresh_db):
     pallet_id = fresh_db.create_pallet("Pallet A", category_id=1, created_by=1)
     item_id = fresh_db.create_item(pallet_id, "Widget", [], 1)
     sale_id = fresh_db.create_sale("eBay", "2026-09-30", 10.0, False, created_by=1)
-    fresh_db.add_sale_item(sale_id, item_id, 10.0, 3.0, 3.0)
+    fresh_db.add_sale_item(sale_id, item_id, 10.0)
 
     embed = asyncio.run(finance_utils.build_dashboard_embed())
 
     fields = {f.name: f.value for f in embed.fields}
-    assert fields["Total COGS Logged"] == "$3.00"
     assert "in progress" in fields["Pallets"]
 
 
