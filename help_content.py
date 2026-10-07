@@ -57,6 +57,11 @@ ENTRIES = (
         ("approve item", "reject item", "review item", "edit item", "re-review"),
     ),
     HelpEntry(
+        "Automatic AI retry",
+        "An item whose AI review failed (backend unreachable/timed out) gets retried automatically every AI_RETRY_POLL_MINUTES, up to AI_RETRY_BATCH_SIZE at a time, once the backend's reachable again - no need to click Re-review (AI) by hand.",
+        ("ai retry", "ai backlog", "ollama offline", "ai review failed", "backend down"),
+    ),
+    HelpEntry(
         "Awaiting Listing card buttons (#awaiting-listing)",
         "Add to eBay Batch, Add to FB Marketplace Batch, List on eBay (API), or Mark Listed (Other).",
         ("list item", "list on ebay", "list on facebook", "listing", "awaiting listing"),

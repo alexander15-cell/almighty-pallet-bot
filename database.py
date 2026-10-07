@@ -139,6 +139,7 @@ def _migrate_add_columns(conn):
         # invoice image/PDF (only ever set for source='manual').
         "ALTER TABLE awaiting_pallet_charges ADD COLUMN source TEXT NOT NULL DEFAULT 'quickbooks'",
         "ALTER TABLE awaiting_pallet_charges ADD COLUMN invoice_photo_path TEXT",
+        "ALTER TABLE items ADD COLUMN ai_review_failed INTEGER NOT NULL DEFAULT 0",
     ]
     for stmt in migrations:
         try:
@@ -201,6 +202,7 @@ def init_db():
                 ai_suggested_length_in  REAL,         -- rough AI packaged-dimension guesses (visual estimate) - pre-fill the Queue Review dimensions field
                 ai_suggested_width_in   REAL,
                 ai_suggested_height_in  REAL,
+                ai_review_failed    INTEGER NOT NULL DEFAULT 0, -- set when the last AI review was a fallback (see ai_review._fallback) - cogs/item_flow.py's ai_retry_backlog_loop retries these automatically once the backend's reachable again; cleared on a successful review or a manual edit
                 submitted_by        INTEGER,
                 current_message_id  INTEGER,            -- message representing item in its CURRENT channel
                 listed_at           TEXT,
@@ -2088,7 +2090,8 @@ def set_finance_message(pallet_id: int, message_id: int):
 def save_ai_review(item_id: int, title: str, description: str, flags: str,
                     suggested_category: str = None, suggested_price: float = None,
                     suggested_weight_lb: float = None, suggested_length_in: float = None,
-                    suggested_width_in: float = None, suggested_height_in: float = None):
+                    suggested_width_in: float = None, suggested_height_in: float = None,
+                    backend_failed: bool = False):
     """
     suggested_category/suggested_price/suggested_weight_lb/suggested_*_in
     are Automated Review's own guesses (see ai_review.SYSTEM_PROMPT) -
@@ -2101,24 +2104,55 @@ def save_ai_review(item_id: int, title: str, description: str, flags: str,
     actual measurement. All of these are just pre-fills for Queue Review's
     approval flow - never authoritative,
     always human-editable/overridable before Approve.
+
+    backend_failed mirrors ai_review._fallback's own "ai_backend_failed"
+    marker (True only on a fallback result, never on a real one from
+    either backend) - sets/clears items.ai_review_failed, which
+    ai_retry_backlog_loop (cogs/item_flow.py) polls to automatically retry
+    this item once the backend's reachable again.
     """
     with get_conn() as conn:
         conn.execute(
             """UPDATE items SET ai_title = ?, ai_description = ?, ai_flags = ?,
                ai_suggested_category = ?, ai_suggested_price = ?, ai_suggested_weight_lb = ?,
                ai_suggested_length_in = ?, ai_suggested_width_in = ?, ai_suggested_height_in = ?,
-               updated_at = ? WHERE id = ?""",
+               ai_review_failed = ?, updated_at = ? WHERE id = ?""",
             (title, description, flags, suggested_category, suggested_price, suggested_weight_lb,
-             suggested_length_in, suggested_width_in, suggested_height_in, _now(), item_id),
+             suggested_length_in, suggested_width_in, suggested_height_in,
+             int(backend_failed), _now(), item_id),
         )
 
 
 def update_description(item_id: int, new_description: str):
+    """
+    Also clears ai_review_failed - a manual edit (Queue Review's Edit
+    button) already fixed the description by hand, so there's nothing
+    left for ai_retry_backlog_loop to automatically retry, and an
+    unattended retry overwriting this edit later would be a real bug.
+    """
     with get_conn() as conn:
         conn.execute(
-            "UPDATE items SET ai_description = ?, updated_at = ? WHERE id = ?",
+            "UPDATE items SET ai_description = ?, ai_review_failed = 0, updated_at = ? WHERE id = ?",
             (new_description, _now(), item_id),
         )
+
+
+def get_items_needing_ai_retry(limit: int) -> list:
+    """
+    Items still sitting in Queue Review whose last AI review was a fallback
+    (ai_review_failed, set by save_ai_review) - oldest first, capped at
+    `limit` so ai_retry_backlog_loop never processes an entire overnight
+    backlog in one tick. Deliberately scoped to STATUS_QUEUE_REVIEW only,
+    same as Queue Review's own manual "Re-review (AI)" button - an item
+    already approved/listed/sold is never touched by this.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM items WHERE status = ? AND ai_review_failed = 1 "
+            "ORDER BY updated_at ASC LIMIT ?",
+            (STATUS_QUEUE_REVIEW, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def get_stale_listed_items(days_threshold: int):

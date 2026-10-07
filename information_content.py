@@ -96,7 +96,9 @@ def _pipeline_embed() -> discord.Embed:
             "Approving walks through condition, category (AI match or manual search), "
             "fixed-price/auction format, then a final form for title/price/weight/dimensions/"
             "specifics. Re-review (AI) re-runs the AI pass (picking up any Edit correction) - "
-            "for after fixing the description, or when the first pass errored/timed out."
+            "for after fixing the description, or when the first pass errored/timed out. An "
+            "item whose first pass errored/timed out also gets retried automatically later "
+            "(no click needed) once the AI backend's reachable again."
         ),
         inline=False,
     )

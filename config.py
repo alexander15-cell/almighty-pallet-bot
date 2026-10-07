@@ -114,6 +114,17 @@ OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX") or "4096")
 # means legitimate reviews are getting cut off.
 AI_TIMEOUT_SECONDS = float(os.getenv("AI_TIMEOUT_SECONDS") or "90")
 
+# How often cogs/item_flow.py's ai_retry_backlog_loop checks for items whose
+# first AI review failed (backend unreachable, timed out, bad JSON - see
+# ai_review._fallback) and automatically retries them - the unattended
+# version of Queue Review's own "Re-review (AI)" button, for whenever the
+# backend (e.g. a local Ollama server on another machine) was down and
+# nobody's there to click it once it's back. AI_RETRY_BATCH_SIZE caps how
+# many it retries per tick, so a backlog that piled up overnight doesn't
+# hammer the backend (or blow through AI_TIMEOUT_SECONDS * N) all at once.
+AI_RETRY_POLL_MINUTES = int(os.getenv("AI_RETRY_POLL_MINUTES") or "15")
+AI_RETRY_BATCH_SIZE = int(os.getenv("AI_RETRY_BATCH_SIZE") or "10")
+
 # Whether the Automated Review (AI) step is active:
 #   - "anthropic" backend: on the moment a real ANTHROPIC_API_KEY is set.
 #   - "ollama" backend: always on - there's no key to check for a local

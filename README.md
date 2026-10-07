@@ -561,7 +561,26 @@ to or slower than the cloud call despite running locally. Queue Review's
 **Edit** button exists for exactly this kind of touch-up. If a review ever
 fails (Ollama not running, model not pulled, bad JSON out of the model), it
 falls back to the raw submitted note, same as any other AI hiccup - nothing
-gets stuck.
+gets stuck, and the item is automatically retried later (see below).
+
+**`OLLAMA_BASE_URL` doesn't have to point at the same machine the bot runs
+on** - it's just a URL. Running Ollama on a second computer (e.g. one with a
+better GPU) works by setting `OLLAMA_BASE_URL=http://<that machine's LAN
+IP>:11434` and making sure Ollama is bound to listen on the network, not
+just `localhost` (`OLLAMA_HOST=0.0.0.0 ollama serve`), and reachable from
+the bot's machine (same LAN, or a VPN like Tailscale if they're not).
+
+**If that second machine goes offline**, every in-flight item's AI review
+just falls back to the raw note as above - nothing crashes, nothing blocks.
+Separately, every `AI_RETRY_POLL_MINUTES` (default 15), the bot
+automatically retries up to `AI_RETRY_BATCH_SIZE` (default 10) items whose
+last review fell back like that, re-running them against whatever backend
+is configured and refreshing their already-posted Queue Review card in
+place if it succeeds - the unattended version of Queue Review's own
+**Re-review (AI)** button, for whenever the backend was down and nobody's
+there to click it once it's back. A manual edit (Queue Review's **Edit**
+button) on an item still waiting for retry cancels the retry for that item -
+a human already fixed it by hand, so there's nothing left to overwrite.
 
 Switch back to the cloud model any time by setting `AI_REVIEW_BACKEND=anthropic`
 (or removing the line - that's the default) and restarting - no code changes

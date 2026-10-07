@@ -17,6 +17,14 @@ def test_fallback_has_expected_shape_and_null_suggestions():
     assert "some reason" in result["flags"][0]
 
 
+def test_fallback_flags_itself_as_a_backend_failure():
+    """The one marker cogs/item_flow.py's run_ai_review checks to flag an
+    item for ai_retry_backlog_loop - must never be set on a real result
+    from either backend, only this fallback."""
+    result = ai_review._fallback("a raw note", "some reason")
+    assert result["ai_backend_failed"] is True
+
+
 def test_fallback_has_null_weight_and_dimensions():
     # A failed AI call must never invent a weight/dimensions guess - those
     # feed eBay's Calculated shipping and have a real dollar cost if wrong,

@@ -1161,10 +1161,12 @@ class ItemFlow(commands.Cog):
     async def cog_load(self):
         if not config.PRESERVE_DISCORD_HISTORY:
             self.stale_check_loop.start()
+            self.ai_retry_backlog_loop.start()
         self.bot.add_dynamic_items(ConfirmEbayListedButton, ConfirmFbMarketplaceListedButton, HoldResolvedButton)
 
     def cog_unload(self):
         self.stale_check_loop.cancel()
+        self.ai_retry_backlog_loop.cancel()
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -1484,6 +1486,7 @@ class ItemFlow(commands.Cog):
                 suggested_length_in=_safe_float(result.get("estimated_length_in")),
                 suggested_width_in=_safe_float(result.get("estimated_width_in")),
                 suggested_height_in=_safe_float(result.get("estimated_height_in")),
+                backend_failed=bool(result.get("ai_backend_failed")),
             )
 
         if not config.PRESERVE_DISCORD_HISTORY:
@@ -2294,6 +2297,58 @@ class ItemFlow(commands.Cog):
 
     @stale_check_loop.before_loop
     async def before_stale_check(self):
+        await self.bot.wait_until_ready()
+
+    # ---------------------------------------------------------- AI retry --
+
+    @tasks.loop(minutes=config.AI_RETRY_POLL_MINUTES)
+    async def ai_retry_backlog_loop(self):
+        """
+        Automatically retries items whose first AI review failed (backend
+        unreachable, timed out, bad JSON - see ai_review._fallback and
+        db.get_items_needing_ai_retry) - the unattended version of Queue
+        Review's own "Re-review (AI)" button (rereview_item), for whenever
+        the backend was down overnight and nobody's there to click it.
+        No-ops entirely while AI review is off, so this is harmless for
+        anyone not using it at all.
+
+        Re-checks each item fresh right before touching it (same guard
+        rereview_item uses) rather than trusting the query above - plenty
+        of time can pass while working through a batch, and a human could
+        have approved, edited, or moved the item on in the meantime; any of
+        those means skip it, not overwrite it.
+        """
+        if config.PRESERVE_DISCORD_HISTORY or not config.AI_ENABLED:
+            return
+        backlog = db.get_items_needing_ai_retry(config.AI_RETRY_BATCH_SIZE)
+        for stub in backlog:
+            item = db.get_item(stub["id"])
+            if not item or item["status"] != db.STATUS_QUEUE_REVIEW or not item["ai_review_failed"]:
+                continue
+
+            pallet_id = item["pallet_id"]
+            queue_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "queue-review"))
+            automated_review_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "automated-review"))
+            if automated_review_channel is None:
+                continue
+
+            if queue_channel is not None and item.get("current_message_id"):
+                try:
+                    old_msg = await queue_channel.fetch_message(int(item["current_message_id"]))
+                    await self._clear_old_card(old_msg, item["id"], "automatic AI retry")
+                except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                    pass
+
+            pallet = db.get_pallet(pallet_id)
+            pallet_name = pallet["name"] if pallet else f"pallet #{pallet_id}"
+            placeholder = await automated_review_channel.send(
+                f"🔄 Retrying AI review for **{pallet_name}** item #{item['item_number']} "
+                f"(backend was unavailable earlier)..."
+            )
+            await self.run_ai_review([item["id"]], placeholder)
+
+    @ai_retry_backlog_loop.before_loop
+    async def before_ai_retry_backlog(self):
         await self.bot.wait_until_ready()
 
 

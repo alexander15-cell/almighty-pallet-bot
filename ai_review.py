@@ -167,8 +167,17 @@ def _build_system_prompt() -> str:
 
 
 def _fallback(raw_description: str, reason: str) -> dict:
-    """Safe default so a single AI hiccup (either backend) never silently
-    loses an item - it just falls through to the raw submitted note."""
+    """
+    Safe default so a single AI hiccup (either backend) never silently
+    loses an item - it just falls through to the raw submitted note.
+
+    ai_backend_failed=True is the one field a real (non-fallback) result
+    from either backend never sets - item_flow.py's run_ai_review checks
+    it to flag the item for cogs/item_flow.py's ai_retry_backlog_loop,
+    which automatically re-runs the review once the backend's reachable
+    again. Deliberately distinct from "confidence": "low", which a
+    genuinely successful review can also return for an ambiguous item.
+    """
     return {
         "identified_item": "Unknown - AI review failed",
         "suggested_title": (raw_description or "Untitled item")[:80],
@@ -181,6 +190,7 @@ def _fallback(raw_description: str, reason: str) -> dict:
         "estimated_length_in": None,
         "estimated_width_in": None,
         "estimated_height_in": None,
+        "ai_backend_failed": True,
     }
 
 
