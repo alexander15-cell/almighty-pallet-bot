@@ -1,8 +1,12 @@
 """ai_review.py - the fallback shape, the free-text category-guess prompt
 (resolved against eBay's real taxonomy separately, see
 tests/test_ebay_taxonomy.py and test_item_flow_ebay_category_search.py),
-and the timeout path (a hung backend call must not block forever)."""
+the timeout path (a hung backend call must not block forever), and the
+two separate system prompts (SYSTEM_PROMPT_TEMPLATE for anthropic,
+OLLAMA_SYSTEM_PROMPT for ollama - see ai_review.py's module docstring for
+why they're never shared)."""
 import asyncio
+import json
 import time
 
 import ai_review
@@ -90,3 +94,76 @@ def test_review_item_times_out_instead_of_hanging(monkeypatch):
     assert elapsed < 2.0, f"review_item should give up around the configured timeout, took {elapsed:.1f}s"
     assert "timed out" in result["flags"][0].lower()
     assert result["suggested_title"] == "a note"
+
+
+# ------------------------------------------------- the two separate prompts
+
+
+def test_ollama_prompt_is_a_distinct_constant_from_the_claude_prompt():
+    assert ai_review.OLLAMA_SYSTEM_PROMPT != ai_review.SYSTEM_PROMPT_TEMPLATE
+
+
+def test_claude_prompt_is_unaffected_by_the_ollama_prompt_existing():
+    # Regression guard for the fix itself: _build_system_prompt() (used by
+    # the anthropic backend) must keep returning exactly SYSTEM_PROMPT_TEMPLATE,
+    # never anything merged with or swapped for OLLAMA_SYSTEM_PROMPT.
+    assert ai_review._build_system_prompt() == ai_review.SYSTEM_PROMPT_TEMPLATE
+
+
+def test_ollama_prompt_has_no_embedded_example_answers():
+    """
+    Regression guard for the real production bug this was built to fix:
+    SYSTEM_PROMPT_TEMPLATE's category instruction uses "cordless impact
+    wrench" / "ceiling fan" / "kitchen faucet" as few-shot examples - Claude
+    treats those as illustrations, but llava:7b echoed "cordless impact
+    wrench" straight back as its actual answer (plus a hallucinated "3/8"
+    drive-size detail) for a photo of an HDMI/VGA adapter. OLLAMA_SYSTEM_PROMPT
+    must never reintroduce concrete example answers a small model could copy.
+    """
+    prompt_lower = ai_review.OLLAMA_SYSTEM_PROMPT.lower()
+    for leaked_example in ("cordless impact wrench", "ceiling fan", "kitchen faucet"):
+        assert leaked_example not in prompt_lower
+
+
+def test_ollama_prompt_requests_the_same_json_fields_as_claude():
+    # Both backends must stay interchangeable downstream (run_ai_review in
+    # cogs/item_flow.py reads the same keys regardless of which ran) even
+    # though the wording/structure of the two prompts differs completely.
+    for field in (
+        "identified_item", "suggested_title", "suggested_description", "flags",
+        "confidence", "suggested_category", "suggested_price",
+        "estimated_weight_lb", "estimated_length_in", "estimated_width_in",
+        "estimated_height_in",
+    ):
+        assert field in ai_review.OLLAMA_SYSTEM_PROMPT
+
+
+def test_ollama_prompt_tells_the_model_to_null_rather_than_guess_numbers():
+    prompt_lower = ai_review.OLLAMA_SYSTEM_PROMPT.lower()
+    assert "null" in prompt_lower
+    assert "guess" in prompt_lower
+
+
+def test_call_ollama_sends_the_ollama_specific_prompt_not_claudes(monkeypatch):
+    captured = {}
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"response": "{}"}).encode("utf-8")
+
+    def fake_urlopen(request, timeout=None):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _FakeResponse()
+
+    monkeypatch.setattr(ai_review.urllib.request, "urlopen", fake_urlopen)
+
+    ai_review._call_ollama("Submitted note from intake: a note", [])
+
+    assert captured["payload"]["system"] == ai_review.OLLAMA_SYSTEM_PROMPT
+    assert captured["payload"]["system"] != ai_review.SYSTEM_PROMPT_TEMPLATE

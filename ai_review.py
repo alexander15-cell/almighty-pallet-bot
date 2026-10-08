@@ -31,8 +31,23 @@ Automated Review step. Two backends, switched by config.AI_REVIEW_BACKEND:
                 "request (N tokens) exceeds the available context size"
                 error, meaning images/prompts have grown past the window.
 
-Both backends return the same dict shape (see SYSTEM_PROMPT_TEMPLATE) and
-this module NEVER modifies or regenerates the photos themselves - only text
+Both backends return the same dict shape, but each has its OWN system prompt
+(SYSTEM_PROMPT_TEMPLATE for anthropic, OLLAMA_SYSTEM_PROMPT for ollama) -
+deliberately not shared. Claude reliably treats a few-shot example embedded
+in instructions as just that: an example. A small local vision model does
+not - it can echo example text back as its actual answer instead of
+reasoning from the real photo (confirmed in production: the Claude-tuned
+prompt's "(e.g. "cordless impact wrench", ...)" category example got
+echoed back verbatim, complete with a hallucinated "3/8" drive-size detail,
+for an item that was an HDMI/VGA adapter). OLLAMA_SYSTEM_PROMPT is written
+for that failure mode specifically - no embedded examples anywhere, shorter
+and flatter instructions (small models follow a short direct list far more
+reliably than nested conditionals), and a blunt, repeated null-over-guess
+rule for every numeric field. Editing one must never silently change the
+other - keep them as two separate constants, not a shared template with a
+backend flag.
+
+This module NEVER modifies or regenerates the photos themselves - only text
 is produced.
 
 Photos are read from local disk (see item_flow.py, which saves every
@@ -147,7 +162,55 @@ def _build_system_prompt() -> str:
     return SYSTEM_PROMPT_TEMPLATE
 
 
-# suggested_price (step 7 above) is a guess from the model's general
+# Written for a small local vision model (moondream/llava/llama3.2-vision via
+# Ollama), not adapted from SYSTEM_PROMPT_TEMPLATE above - see this module's
+# docstring for why the two are kept fully separate. Same core policy (trust
+# the note, use the photo only to catch a real contradiction) and the exact
+# same JSON field names so both backends stay interchangeable downstream,
+# but: no embedded example answers anywhere (a small model will echo one back
+# as its real answer instead of reasoning from the photo), short flat rules
+# instead of nested conditionals (small models follow a plain list far more
+# reliably than "only do X unless Y, except when Z"), and a blunt, repeated
+# null-over-guess rule for every numeric field, since a confidently wrong
+# number is the single costliest failure mode here (a bad weight/dimension
+# guess becomes a real shipping-label purchase - see pirate_ship_csv.py).
+OLLAMA_SYSTEM_PROMPT = """You write short, honest resale listing drafts from a photo and a \
+warehouse note. Follow these rules exactly.
+
+RULES:
+- Trust the note. If it names a brand, character, model, or any other detail, treat that as \
+fact and use it in your title and description, even if the photo alone doesn't prove it.
+- Use the photo only to check the note isn't wrong. Only disagree with the note if the photo \
+clearly and obviously shows something different. If the photo simply doesn't confirm a detail \
+the note gave you, that is normal - say nothing about it, don't flag it, don't hedge on it.
+- Never copy an example from these instructions into your answer. Base every field only on the \
+real photo and the real note below - nothing else.
+- For every number field (price, weight, length, width, height): if you are not confident, \
+output null. Do NOT invent a plausible-sounding number - a wrong guess here costs real money, \
+so null is always the safer answer than a guess.
+- If the note gives you nothing useful and you truly cannot identify the item from the photo \
+either, say so plainly in "identified_item" instead of guessing.
+- The description must end with exactly this one sentence and nothing after it: "Sold as-is; \
+please review photos closely for exact condition."
+
+Respond with ONLY the JSON object below - no other text, no explanation, before or after it:
+{
+  "identified_item": "short string describing what this physically is",
+  "suggested_title": "listing title, under 80 characters",
+  "suggested_description": "2-3 plain sentences on the item and its condition, ending with the exact disclaimer sentence above",
+  "flags": ["only a REAL conflict between the note and the photo - empty list if there is none"],
+  "confidence": "high" | "medium" | "low",
+  "suggested_category": "a few plain words for the product type, based only on what you see - or null if you truly cannot tell",
+  "suggested_price": number or null,
+  "estimated_weight_lb": number or null,
+  "estimated_length_in": number or null,
+  "estimated_width_in": number or null,
+  "estimated_height_in": number or null
+}"""
+
+
+# suggested_price (step 7 of SYSTEM_PROMPT_TEMPLATE above; the price rule in
+# OLLAMA_SYSTEM_PROMPT above that) is a guess from the model's general
 # training knowledge of resale values - it has no access to real market
 # data and is never treated as authoritative anywhere downstream (Queue
 # Review's price field just pre-fills with it, always human-editable before
@@ -157,7 +220,8 @@ def _build_system_prompt() -> str:
 # not implemented here, since it needs its own eBay API credentials/calls
 # beyond what config.EBAY_ENABLED currently gates.
 
-# estimated_weight_lb/estimated_*_in (step 8 above) are visual guesses from
+# estimated_weight_lb/estimated_*_in (step 8 of SYSTEM_PROMPT_TEMPLATE; the
+# weight/dimensions rule in OLLAMA_SYSTEM_PROMPT) are visual guesses from
 # the photo, same "never authoritative" status as suggested_price - the
 # eBay listing modal pre-fills these fields but always requires a human to
 # confirm or correct them before Approve, since the Pirate Ship CSV export
@@ -316,7 +380,7 @@ def _call_ollama(prompt: str, images_b64: list[str]) -> str:
     """
     payload = json.dumps({
         "model": config.OLLAMA_VISION_MODEL,
-        "system": _build_system_prompt(),
+        "system": OLLAMA_SYSTEM_PROMPT,
         "prompt": prompt,
         "images": images_b64,
         "format": "json",
