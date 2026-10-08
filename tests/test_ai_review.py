@@ -125,6 +125,23 @@ def test_ollama_prompt_has_no_embedded_example_answers():
         assert leaked_example not in prompt_lower
 
 
+def test_ollama_prompt_schema_has_no_copyable_sentences_as_field_values():
+    """
+    Second occurrence of the exact same failure mode, caught in production
+    again: the first fix moved the leaked example out of the rules, but the
+    JSON schema block itself still wrote each field's explanation as a
+    quoted "example value" (flags: ["only a REAL conflict between the note
+    and the photo - empty list if there is none"]) - llava copied that
+    whole placeholder sentence verbatim into the real flags output. The
+    schema block must hold only bare structural placeholders (<string>,
+    [], a short enum hint) - never a full explanatory sentence that reads
+    as plausible real content to copy.
+    """
+    schema = ai_review.OLLAMA_SYSTEM_PROMPT[ai_review.OLLAMA_SYSTEM_PROMPT.index("{"):]
+    assert "only a real conflict" not in schema.lower()
+    assert ". " not in schema, f"schema block contains a full sentence, not a bare placeholder: {schema!r}"
+
+
 def test_ollama_prompt_requests_the_same_json_fields_as_claude():
     # Both backends must stay interchangeable downstream (run_ai_review in
     # cogs/item_flow.py reads the same keys regardless of which ran) even

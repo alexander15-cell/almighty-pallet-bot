@@ -167,13 +167,25 @@ def _build_system_prompt() -> str:
 # docstring for why the two are kept fully separate. Same core policy (trust
 # the note, use the photo only to catch a real contradiction) and the exact
 # same JSON field names so both backends stay interchangeable downstream,
-# but: no embedded example answers anywhere (a small model will echo one back
-# as its real answer instead of reasoning from the photo), short flat rules
-# instead of nested conditionals (small models follow a plain list far more
-# reliably than "only do X unless Y, except when Z"), and a blunt, repeated
-# null-over-guess rule for every numeric field, since a confidently wrong
-# number is the single costliest failure mode here (a bad weight/dimension
-# guess becomes a real shipping-label purchase - see pirate_ship_csv.py).
+# but: no embedded example answers anywhere - including inside the JSON
+# schema itself (confirmed in production TWICE: first the Claude-tuned
+# prompt's "(e.g. "cordless impact wrench", ...)" category example got
+# echoed back as the real answer; then, after that was removed here, THIS
+# prompt's own schema originally wrote out each field's explanation as a
+# quoted "example value" - e.g. flags: ["only a REAL conflict ... empty
+# list if there is none"] - and llava copied that placeholder sentence
+# verbatim into the flags field as if it were a real flag. Lesson: a small
+# model can't reliably tell "this text in the schema describes what goes
+# here" from "this text in the schema IS what goes here" - so every field's
+# explanation now lives ONLY in the prose rules below, and the schema block
+# itself holds nothing but bare, non-sentence placeholders (<...>, [], a
+# bare number) that don't read as plausible real content to copy. Also:
+# short flat rules instead of nested conditionals (small models follow a
+# plain list far more reliably than "only do X unless Y, except when Z"),
+# and a blunt, repeated null-over-guess rule for every numeric field, since
+# a confidently wrong number is the costliest failure mode here (a bad
+# weight/dimension guess becomes a real shipping-label purchase - see
+# pirate_ship_csv.py).
 OLLAMA_SYSTEM_PROMPT = """You write short, honest resale listing drafts from a photo and a \
 warehouse note. Follow these rules exactly.
 
@@ -181,31 +193,41 @@ RULES:
 - Trust the note. If it names a brand, character, model, or any other detail, treat that as \
 fact and use it in your title and description, even if the photo alone doesn't prove it.
 - Use the photo only to check the note isn't wrong. Only disagree with the note if the photo \
-clearly and obviously shows something different. If the photo simply doesn't confirm a detail \
-the note gave you, that is normal - say nothing about it, don't flag it, don't hedge on it.
-- Never copy an example from these instructions into your answer. Base every field only on the \
-real photo and the real note below - nothing else.
+clearly and obviously shows something different from a specific detail the note gave. If the \
+photo simply doesn't confirm a detail the note gave you, that is normal - say nothing about it.
+- identified_item: a short plain description of what the physical object actually is.
+- suggested_title: a real listing title, under 80 characters, using any brand/model the note gave.
+- suggested_description: 2-3 plain sentences about the item and its condition, then add this \
+exact sentence after them and nothing else: "Sold as-is; please review photos closely for exact \
+condition."
+- flags: leave this an empty list unless the photo clearly and obviously contradicts a specific \
+detail the note gave you. An empty list is the normal, expected answer - do not put anything in \
+it just to have something there.
+- confidence: exactly one of high, medium, or low.
+- suggested_category: a few plain words for the product type, based only on what you see - or \
+null if you truly cannot tell.
 - For every number field (price, weight, length, width, height): if you are not confident, \
 output null. Do NOT invent a plausible-sounding number - a wrong guess here costs real money, \
 so null is always the safer answer than a guess.
 - If the note gives you nothing useful and you truly cannot identify the item from the photo \
-either, say so plainly in "identified_item" instead of guessing.
-- The description must end with exactly this one sentence and nothing after it: "Sold as-is; \
-please review photos closely for exact condition."
+either, say so plainly in identified_item instead of guessing.
+- Never copy any instruction, explanation, or placeholder text from this prompt into your \
+answer. Every field must come only from the real photo and the real note below - nothing else.
 
-Respond with ONLY the JSON object below - no other text, no explanation, before or after it:
+The schema below is structure only - every placeholder inside it (anything written as <...>) is \
+a type hint, not text to copy. Respond with ONLY this JSON object, no other text before or after:
 {
-  "identified_item": "short string describing what this physically is",
-  "suggested_title": "listing title, under 80 characters",
-  "suggested_description": "2-3 plain sentences on the item and its condition, ending with the exact disclaimer sentence above",
-  "flags": ["only a REAL conflict between the note and the photo - empty list if there is none"],
-  "confidence": "high" | "medium" | "low",
-  "suggested_category": "a few plain words for the product type, based only on what you see - or null if you truly cannot tell",
-  "suggested_price": number or null,
-  "estimated_weight_lb": number or null,
-  "estimated_length_in": number or null,
-  "estimated_width_in": number or null,
-  "estimated_height_in": number or null
+  "identified_item": "<string>",
+  "suggested_title": "<string>",
+  "suggested_description": "<string>",
+  "flags": [],
+  "confidence": "<high, medium, or low>",
+  "suggested_category": "<string, or null>",
+  "suggested_price": "<number, or null>",
+  "estimated_weight_lb": "<number, or null>",
+  "estimated_length_in": "<number, or null>",
+  "estimated_width_in": "<number, or null>",
+  "estimated_height_in": "<number, or null>"
 }"""
 
 
