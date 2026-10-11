@@ -40,9 +40,19 @@ user consent/refresh token involved), since Metadata API's standard-
 condition data is public and doesn't need this seller's own consent. Its
 own cache (_cached_app_token) is kept separate from the user token's
 cache above for exactly that reason.
+
+search_categories() reuses that same application token for eBay's
+Taxonomy API (getCategorySuggestions) - a live, search-relevance-ranked
+category lookup that replaces ebay_taxonomy.py's local keyword matching
+wherever Queue Review or Automated Review need to find a category
+(falling back to that local search on any failure/timeout, same pattern
+as the condition check above). Hardcoded to category tree ID "0" (eBay's
+stable ID for the EBAY_US marketplace) rather than resolved via a separate
+getDefaultCategoryTreeId call, since this bot only supports EBAY_US.
 """
 import asyncio
 import json
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -73,6 +83,17 @@ _cached_app_token_expires_at: datetime = None
 # is a nice-to-have accuracy improvement, never worth blocking a listing
 # over a slow/unreachable eBay endpoint.
 _CONDITION_POLICY_TIMEOUT_SECONDS = 10
+
+# Same reasoning for the Taxonomy API category search below - an accuracy
+# improvement over ebay_taxonomy.py's local keyword search, never worth
+# blocking a reviewer over.
+_CATEGORY_SEARCH_TIMEOUT_SECONDS = 10
+
+# eBay's stable category tree ID for the EBAY_US marketplace - this bot
+# only supports EBAY_US (see config.EBAY_MARKETPLACE_ID and
+# ebay_taxonomy.py's own docstring), so this is hardcoded rather than
+# fetched via a separate getDefaultCategoryTreeId call on every search.
+_EBAY_US_CATEGORY_TREE_ID = "0"
 
 # eBay's classic numeric condition IDs (config.EBAY_CONDITIONS) mapped to
 # the Inventory API's own ConditionEnum string values - confirmed against
@@ -119,6 +140,12 @@ def _metadata_base_url() -> str:
     if config.EBAY_ENVIRONMENT == "sandbox":
         return "https://api.sandbox.ebay.com/sell/metadata/v1"
     return "https://api.ebay.com/sell/metadata/v1"
+
+
+def _taxonomy_base_url() -> str:
+    if config.EBAY_ENVIRONMENT == "sandbox":
+        return "https://api.sandbox.ebay.com/commerce/taxonomy/v1"
+    return "https://api.ebay.com/commerce/taxonomy/v1"
 
 
 async def get_access_token() -> str:
@@ -269,6 +296,63 @@ async def resolve_condition_id_with_live_check(category_id: str, condition_id: s
         f"{category_id!r} per the live lookup (allowed: {sorted(allowed)}) - falling back to {fallback!r}."
     )
     return fallback
+
+
+async def _fetch_category_suggestions(query: str) -> list:
+    """
+    Raw Taxonomy API call - raises on any failure, same as
+    get_condition_policies. search_categories() below is what callers
+    should actually use (it adds the timeout + local-fallback behavior).
+    """
+    access_token = await get_app_access_token()
+    encoded_query = urllib.parse.quote(query)
+    url = f"{_taxonomy_base_url()}/category_tree/{_EBAY_US_CATEGORY_TREE_ID}/get_category_suggestions?q={encoded_query}"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    async with aiohttp.ClientSession() as session:
+        async with session.request("GET", url, headers=headers) as resp:
+            body = await resp.json(content_type=None)
+            if resp.status >= 300:
+                _raise_for_ebay_error(resp.status, body, "getCategorySuggestions")
+
+    results = []
+    for suggestion in body.get("categorySuggestions") or []:
+        category = suggestion.get("category") or {}
+        category_id = category.get("categoryId")
+        category_name = category.get("categoryName")
+        if not category_id or not category_name:
+            continue
+        # eBay returns ancestors nearest-parent-first; ebay_taxonomy.py's
+        # "L1 > L2 > ... > leaf" breadcrumb convention is root-first, so
+        # reverse before appending the leaf's own name.
+        ancestors = suggestion.get("categoryTreeNodeAncestors") or []
+        ancestor_names = [a["categoryName"] for a in reversed(ancestors) if a.get("categoryName")]
+        full_path = " > ".join(ancestor_names + [category_name])
+        results.append((category_id, full_path))
+    return results
+
+
+async def search_categories(query: str, limit: int = 10) -> list:
+    """
+    Live eBay category search via the Taxonomy API's getCategorySuggestions,
+    ranked by eBay's own search relevance - a drop-in replacement for
+    ebay_taxonomy.search() (same (category_id, full_path) list shape and
+    argument order) that's meaningfully more accurate, since the local
+    taxonomy search is plain keyword matching against category names with
+    no understanding of what items actually sell as. Falls back to
+    ebay_taxonomy.search() on any failure/timeout or an empty result -
+    never worth blocking a reviewer over a flaky/slow external call, same
+    pattern as resolve_condition_id_with_live_check above.
+    """
+    if not (query or "").strip():
+        return []
+    try:
+        results = await asyncio.wait_for(_fetch_category_suggestions(query), timeout=_CATEGORY_SEARCH_TIMEOUT_SECONDS)
+    except Exception as exc:
+        print(f"[ebay_api] live category search for {query!r} failed ({exc!r}) - falling back to the local taxonomy search.")
+        return ebay_taxonomy.search(query, limit=limit)
+    if not results:
+        return ebay_taxonomy.search(query, limit=limit)
+    return results[:limit]
 
 
 def _raise_for_ebay_error(resp_status: int, body: dict, context: str):

@@ -273,6 +273,91 @@ def test_resolve_condition_id_with_live_check_accepts_a_statically_safe_conditio
     assert resolved == "1000"
 
 
+# --------------------------------------------------------------- search_categories
+
+
+def _category_suggestions_responder(suggestions):
+    def responder(method, url, body):
+        if "oauth2/token" in url:
+            return 200, {"access_token": "app-tok-1", "expires_in": 7200}
+        if method == "GET" and "/get_category_suggestions" in url:
+            return 200, {"categorySuggestions": suggestions}
+        raise AssertionError(f"unexpected call: {method} {url}")
+
+    return responder
+
+
+def test_search_categories_returns_live_results_root_first(monkeypatch):
+    suggestions = [
+        {
+            "category": {"categoryId": "176937", "categoryName": "Ceiling Fans"},
+            "categoryTreeNodeAncestors": [
+                {"categoryName": "Lamps, Lighting & Ceiling Fans"},
+                {"categoryName": "Home & Garden"},
+            ],
+        },
+    ]
+    _install_fake_session(monkeypatch, _category_suggestions_responder(suggestions))
+    results = asyncio.run(ebay_api.search_categories("ceiling fan"))
+    assert results == [("176937", "Home & Garden > Lamps, Lighting & Ceiling Fans > Ceiling Fans")]
+
+
+def test_search_categories_handles_a_top_level_category_with_no_ancestors(monkeypatch):
+    suggestions = [{"category": {"categoryId": "1", "categoryName": "Antiques"}, "categoryTreeNodeAncestors": []}]
+    _install_fake_session(monkeypatch, _category_suggestions_responder(suggestions))
+    results = asyncio.run(ebay_api.search_categories("antique"))
+    assert results == [("1", "Antiques")]
+
+
+def test_search_categories_respects_the_limit(monkeypatch):
+    suggestions = [
+        {"category": {"categoryId": str(i), "categoryName": f"Category {i}"}, "categoryTreeNodeAncestors": []}
+        for i in range(5)
+    ]
+    _install_fake_session(monkeypatch, _category_suggestions_responder(suggestions))
+    results = asyncio.run(ebay_api.search_categories("widget", limit=2))
+    assert len(results) == 2
+
+
+def test_search_categories_empty_query_returns_empty_list_without_a_network_call(monkeypatch):
+    calls = _install_fake_session(monkeypatch, _category_suggestions_responder([]))
+    assert asyncio.run(ebay_api.search_categories("")) == []
+    assert asyncio.run(ebay_api.search_categories("   ")) == []
+    assert calls == []
+
+
+def test_search_categories_falls_back_to_local_taxonomy_on_api_error(monkeypatch):
+    def responder(method, url, body):
+        if "oauth2/token" in url:
+            return 200, {"access_token": "app-tok-1", "expires_in": 7200}
+        return 500, {"errors": [{"message": "Internal error"}]}
+
+    _install_fake_session(monkeypatch, responder)
+    sentinel = [("999", "Fallback > Category")]
+    monkeypatch.setattr(ebay_api.ebay_taxonomy, "search", lambda query, limit=10: sentinel)
+    results = asyncio.run(ebay_api.search_categories("widget"))
+    assert results == sentinel
+
+
+def test_search_categories_falls_back_to_local_taxonomy_on_empty_live_result(monkeypatch):
+    _install_fake_session(monkeypatch, _category_suggestions_responder([]))
+    sentinel = [("999", "Fallback > Category")]
+    monkeypatch.setattr(ebay_api.ebay_taxonomy, "search", lambda query, limit=10: sentinel)
+    results = asyncio.run(ebay_api.search_categories("widget"))
+    assert results == sentinel
+
+
+def test_search_categories_skips_suggestions_missing_an_id_or_name(monkeypatch):
+    suggestions = [
+        {"category": {"categoryId": "", "categoryName": "No ID"}, "categoryTreeNodeAncestors": []},
+        {"category": {"categoryId": "2", "categoryName": ""}, "categoryTreeNodeAncestors": []},
+        {"category": {"categoryId": "3", "categoryName": "Valid"}, "categoryTreeNodeAncestors": []},
+    ]
+    _install_fake_session(monkeypatch, _category_suggestions_responder(suggestions))
+    results = asyncio.run(ebay_api.search_categories("widget"))
+    assert results == [("3", "Valid")]
+
+
 # --------------------------------------------------------------- create_listing
 
 

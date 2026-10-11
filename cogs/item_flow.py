@@ -320,10 +320,15 @@ class EbayConditionSelectView(discord.ui.View):
         condition_id = self.select.values[0]
         item = db.get_item(self.item_id)
         suggested_query = item.get("ai_suggested_category")
-        matches = ebay_taxonomy.search(suggested_query, limit=1) if suggested_query else []
+        # search_categories() is a live eBay API call that can run past
+        # Discord's 3-second interaction response window - defer first so
+        # a slow (or timed-out-and-falling-back) lookup doesn't show the
+        # reviewer a failed interaction before the edit actually lands.
+        await interaction.response.defer()
+        matches = await ebay_api.search_categories(suggested_query, limit=1) if suggested_query else []
         if matches:
             category_id, category_path = matches[0]
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=(
                     f"eBay category: **{category_path}** (AI suggested \"{suggested_query}\", "
                     "matched against eBay's real category list). Tap \"Change category\" below "
@@ -335,7 +340,7 @@ class EbayConditionSelectView(discord.ui.View):
                 ),
             )
         else:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="Now select this item's eBay category...",
                 view=EbayCategoryPickView(self.item_id, condition_id, source_message_id=self.source_message_id),
             )
@@ -463,14 +468,18 @@ class EbayCategorySearchModal(discord.ui.Modal, title="Search eBay Categories"):
 
     async def on_submit(self, interaction: discord.Interaction):
         query = self.query.value.strip()
-        matches = ebay_taxonomy.search(query, limit=25)
+        # search_categories() is a live eBay API call - defer before it so
+        # a slow lookup (or a timeout-and-fallback) doesn't show the
+        # reviewer a failed interaction before the edit actually lands.
+        await interaction.response.defer()
+        matches = await ebay_api.search_categories(query, limit=25)
         if not matches:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=f"No eBay categories matched \"{query}\" - try different or fewer keywords.",
                 view=EbayCategoryPickView(self.item_id, self.condition_id, source_message_id=self.source_message_id),
             )
             return
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=f"Categories matching \"{query}\" - pick one, or search again:",
             view=EbayCategorySearchResultsView(self.item_id, self.condition_id, matches, source_message_id=self.source_message_id),
         )

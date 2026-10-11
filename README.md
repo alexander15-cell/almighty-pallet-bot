@@ -71,9 +71,14 @@ Every item's card always shows which pallet it belongs to.
   you disagree. The manual category step itself is a quick-pick dropdown of
   categories this team has actually used before (sorted by proven success,
   see "Known limitations" below) plus a "🔍 Search categories" button
-  that searches all ~18,000 real eBay categories by keyword - not a fixed
-  dropdown, since no static list could cover everything a liquidation
-  pallet might contain. Then a format dropdown (Fixed Price or Auction - decided per item, not a global switch;
+  that searches eBay's real category list - not a fixed dropdown, since no
+  static list could cover everything a liquidation pallet might contain.
+  Both the AI's automatic match and the manual search use eBay's own live
+  Taxonomy API (`ebay_api.search_categories()`, ranked by eBay's real
+  search relevance) when the direct API credentials are configured, falling
+  back to a local keyword search against the bundled taxonomy
+  (`ebay_taxonomy.search()`) if that lookup is slow/unreachable or
+  `EBAY_ENABLED` is off. Then a format dropdown (Fixed Price or Auction - decided per item, not a global switch;
   Auction adds one more step for the listing duration: 3/5/7/10 days), then
   a short form for title, price/starting bid, shipping weight (lb) and
   packaged dimensions (L x W x H, in inches) - all pre-filled with the AI's
@@ -940,10 +945,11 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   in Start price/Quantity/Condition ID/Format/Duration for every item it
   recognizes, straight from Queue Review data - see "eBay CSV format"
   above.
-- `/ebay category-search <query>` - looks up real eBay leaf category IDs by
-  keyword against eBay's own official taxonomy (`ebay_taxonomy.py`, ~18,000
-  categories) - mainly for finding an ID to pass to `/ebay retry-item`'s
-  `category_id`.
+- `/ebay category-search <query>` - looks up real eBay leaf category IDs,
+  via eBay's live Taxonomy API when available (falling back to local
+  keyword search against `ebay_taxonomy.py`'s bundled ~18,000-category
+  taxonomy otherwise) - mainly for finding an ID to pass to `/ebay
+  retry-item`'s `category_id`.
 - `/ebay retry-item <item_number> [category_id] [condition_id] [specifics]
   [weight_lb] [dimensions]` - run inside a pallet's category. Re-queues an
   item into the current live CSV so the next `/ebay export-batch` picks it
@@ -1242,13 +1248,15 @@ this scale.
   there's no more equivalent of the old error-87 ("category selected is
   not a leaf category") failures this used to need hand-fixing. Both
   Automated Review's AI suggestion and Queue Review's manual "🔍 Search
-  categories" step search this data by keyword (`ebay_taxonomy.search()`)
-  rather than picking from a small fixed list - there are simply too many
-  real eBay categories to hand the AI a fixed enum or fit in a single
-  Discord dropdown (25-option cap). `/ebay category-search <query>` looks
-  the same data up on demand, e.g. to find an ID for `/ebay retry-item
-  <item_number> category_id:<corrected id>`. Since even a real category ID
-  can turn out to be a poor fit or underperform for this business, Queue
+  categories" step search for a match (`ebay_api.search_categories()` -
+  eBay's live Taxonomy API when `EBAY_ENABLED`, falling back to
+  `ebay_taxonomy.search()`'s local keyword matching against this same data
+  otherwise) rather than picking from a small fixed list - there are simply
+  too many real eBay categories to hand the AI a fixed enum or fit in a
+  single Discord dropdown (25-option cap). `/ebay category-search <query>`
+  looks the same data up on demand, e.g. to find an ID for `/ebay
+  retry-item <item_number> category_id:<corrected id>`. Since even a real
+  category ID can turn out to be a poor fit or underperform for this business, Queue
   Review's quick-pick dropdown still sorts by what's actually **confirmed
   working**: once an item in a category is confirmed live (via `/ebay
   confirm-listed` or a matched success row in `/ebay import-results`), that

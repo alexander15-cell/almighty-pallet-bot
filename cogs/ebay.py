@@ -55,10 +55,10 @@ from discord.ext import commands
 
 import config
 import database as db
+import ebay_api
 import ebay_csv
 import ebay_recommendations
 import ebay_results
-import ebay_taxonomy
 import finance_utils
 import runtime_settings
 
@@ -391,12 +391,16 @@ class Ebay(commands.Cog):
     async def category_search(self, interaction: discord.Interaction, query: str):
         if not await _require_admin(interaction):
             return
-        matches = ebay_taxonomy.search(query, limit=10)
+        # search_categories() is a live eBay API call - defer first so a
+        # slow lookup (or a timeout-and-fallback) doesn't show a failed
+        # interaction before the real response lands.
+        await interaction.response.defer(ephemeral=True)
+        matches = await ebay_api.search_categories(query, limit=10)
         if not matches:
-            await interaction.response.send_message(f"No eBay categories matched `{query}`.", ephemeral=True)
+            await interaction.followup.send(f"No eBay categories matched `{query}`.", ephemeral=True)
             return
         lines = "\n".join(f"`{category_id}` - {path}" for category_id, path in matches)
-        await interaction.response.send_message(f"Categories matching `{query}`:\n{lines}", ephemeral=True)
+        await interaction.followup.send(f"Categories matching `{query}`:\n{lines}", ephemeral=True)
 
     @ebay_group.command(
         name="retry-item",

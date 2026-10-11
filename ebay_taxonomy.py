@@ -6,6 +6,14 @@ picking eBay categories - both Automated Review's AI suggestion and Queue
 Review's manual "Search categories" step (see EbayCategorySearchModal in
 item_flow.py) resolve against this file instead of a hand-typed list.
 
+This is now the FALLBACK path specifically - ebay_api.search_categories()
+tries eBay's own live Taxonomy API first (ranked by eBay's real search
+relevance, not just keyword overlap) and only falls back to this module's
+local search() on a failure/timeout or when EBAY_ENABLED is off. This file
+and its data still matter even when the live API is available, though:
+get_path() (resolving a category ID back to its full breadcrumb) has no
+live equivalent wired up, and the live API needs something to fall back to.
+
 This replaces config.py's old EBAY_CATEGORIES dict, which had to be
 maintained by hand (~30 entries) with no way to verify an ID was real or a
 genuine leaf category without eBay API access - it had already caused
