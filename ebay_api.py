@@ -49,6 +49,12 @@ wherever Queue Review or Automated Review need to find a category
 as the condition check above). Hardcoded to category tree ID "0" (eBay's
 stable ID for the EBAY_US marketplace) rather than resolved via a separate
 getDefaultCategoryTreeId call, since this bot only supports EBAY_US.
+
+get_orders() is the one live-data function here that needs the *user*
+token's scope actually widened beyond what listing creation requires - it
+calls the Fulfillment API (sell.fulfillment scope), a real seller-specific
+endpoint the application token can't touch regardless of what it's
+widened to. See cogs/ebay.py's order_poll_loop for what consumes it.
 """
 import asyncio
 import json
@@ -146,6 +152,12 @@ def _taxonomy_base_url() -> str:
     if config.EBAY_ENVIRONMENT == "sandbox":
         return "https://api.sandbox.ebay.com/commerce/taxonomy/v1"
     return "https://api.ebay.com/commerce/taxonomy/v1"
+
+
+def _fulfillment_base_url() -> str:
+    if config.EBAY_ENVIRONMENT == "sandbox":
+        return "https://api.sandbox.ebay.com/sell/fulfillment/v1"
+    return "https://api.ebay.com/sell/fulfillment/v1"
 
 
 async def get_access_token() -> str:
@@ -353,6 +365,103 @@ async def search_categories(query: str, limit: int = 10) -> list:
     if not results:
         return ebay_taxonomy.search(query, limit=limit)
     return results[:limit]
+
+
+async def get_orders(since: datetime, limit: int = 50) -> list:
+    """
+    Fetches this seller's recent eBay orders via the Fulfillment API (GET
+    /sell/fulfillment/v1/order), filtered to orders created on/after
+    `since`. Uses the USER access token (get_access_token()) - this needs
+    the sell.fulfillment scope on EBAY_REFRESH_TOKEN, a different scope
+    than the sell.inventory one listing creation uses, so this only works
+    once that token's been re-consented with the wider scope list (see
+    README's eBay API section). Unlike search_categories/
+    resolve_condition_id_with_live_check above, there's no local fallback
+    for live order data - a failure here is raised as EbayAPIError, not
+    swallowed, since the order-sync poll loop (cogs/ebay.py) is what
+    decides "failed, try again next poll", the same way credit_card_poll_loop
+    handles a QuickBooksError.
+
+    Returns a list of plain dicts - just what the poll loop needs to match
+    a SKU back to a tracked item and log a sale, not eBay's full raw order
+    object: {'order_id', 'sale_date' (YYYY-MM-DD), 'total_price',
+    'line_items': [{'sku', 'quantity'}, ...]}. An order missing a usable
+    total or with no SKU-bearing line items is left out entirely - there's
+    nothing useful this bot could do with either.
+    """
+    access_token = await get_access_token()
+    since_iso = since.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    filter_value = f"creationdate:[{since_iso}..]"
+    url = f"{_fulfillment_base_url()}/order?filter={urllib.parse.quote(filter_value)}&limit={limit}"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    async with aiohttp.ClientSession() as session:
+        async with session.request("GET", url, headers=headers) as resp:
+            body = await resp.json(content_type=None)
+            if resp.status >= 300:
+                _raise_for_ebay_error(resp.status, body, "getOrders")
+
+    orders = []
+    for raw_order in body.get("orders") or []:
+        parsed = _parse_order(raw_order)
+        if parsed:
+            orders.append(parsed)
+    return orders
+
+
+async def get_order(order_id: str) -> dict:
+    """
+    Fetches one eBay order fresh by ID (GET /sell/fulfillment/v1/order/
+    {orderId}) - what EbayOrderConfirmButton (cogs/ebay.py) calls on click,
+    rather than trusting whatever the confirm card last showed, same
+    "never trust stale card state" reasoning as AllocateChargeButton
+    re-fetching the QuickBooks transaction fresh in cogs/finance.py.
+
+    Returns the same shape as one entry from get_orders(), or raises
+    EbayAPIError if the order can't be fetched or parsed (e.g. it no
+    longer has a usable total or SKU-bearing line items - vanishingly
+    unlikely for an order that already passed through get_orders() once,
+    but not something to silently paper over on a financial action).
+    """
+    access_token = await get_access_token()
+    url = f"{_fulfillment_base_url()}/order/{urllib.parse.quote(order_id, safe='')}"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    async with aiohttp.ClientSession() as session:
+        async with session.request("GET", url, headers=headers) as resp:
+            body = await resp.json(content_type=None)
+            if resp.status >= 300:
+                _raise_for_ebay_error(resp.status, body, "getOrder")
+
+    parsed = _parse_order(body)
+    if not parsed:
+        raise EbayAPIError(f"eBay order {order_id!r} has no usable total or SKU-bearing line items: {body}")
+    return parsed
+
+
+def _parse_order(raw_order: dict):
+    """Shared by get_orders/get_order - see get_orders' docstring for the
+    returned shape and why an order missing a total or SKUs is dropped
+    entirely rather than returned half-usable."""
+    order_id = raw_order.get("orderId")
+    if not order_id:
+        return None
+    total = ((raw_order.get("pricingSummary") or {}).get("total") or {}).get("value")
+    if total is None:
+        return None
+    line_items = [
+        {"sku": li["sku"], "quantity": li.get("quantity") or 1}
+        for li in (raw_order.get("lineItems") or [])
+        if li.get("sku")
+    ]
+    if not line_items:
+        return None
+    creation_date = raw_order.get("creationDate") or ""
+    sale_date = creation_date[:10] if len(creation_date) >= 10 else datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return {
+        "order_id": order_id,
+        "sale_date": sale_date,
+        "total_price": float(total),
+        "line_items": line_items,
+    }
 
 
 def _raise_for_ebay_error(resp_status: int, body: dict, context: str):

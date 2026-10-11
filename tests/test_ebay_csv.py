@@ -55,6 +55,23 @@ def test_custom_label_format():
     assert ebay_csv.custom_label(item) == "pallet-3-item-7"
 
 
+def test_parse_custom_label_reverses_custom_label():
+    item = _fake_item(pallet_id=3, item_number=7)
+    assert ebay_csv.parse_custom_label(ebay_csv.custom_label(item)) == (3, 7)
+
+
+def test_parse_custom_label_rejects_unrelated_formats():
+    assert ebay_csv.parse_custom_label("SOME-OTHER-SKU-123") is None
+    assert ebay_csv.parse_custom_label("pallet-3-item-") is None
+    assert ebay_csv.parse_custom_label("pallet-item-7") is None
+    assert ebay_csv.parse_custom_label("") is None
+    assert ebay_csv.parse_custom_label(None) is None
+
+
+def test_parse_custom_label_tolerates_surrounding_whitespace():
+    assert ebay_csv.parse_custom_label("  pallet-3-item-7  ") == (3, 7)
+
+
 def test_row_includes_core_add_template_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(ebay_csv, "BATCH_CSV_PATH", tmp_path / "batch.csv")
     item = _fake_item(pallet_id=2, item_number=5)

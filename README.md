@@ -655,6 +655,57 @@ downtime, an unrecognized category), it falls back to the exact same
 static safe-set check the CSV path uses - a listing never gets blocked on
 a flaky metadata call.
 
+### eBay order auto-sync
+
+Once the eBay API is set up above, `cogs/ebay.py`'s `order_poll_loop`
+checks for new eBay orders every `EBAY_ORDER_POLL_MINUTES` (default 20) and
+posts a confirm card to **#ebay-orders** for any matched back to a tracked
+item by SKU - clicking **Confirm & log sale** does exactly what `/finance
+log-sale` does (a Sales Receipt via `finance_utils.post_sale_to_quickbooks`),
+just pre-filled from the real eBay order instead of typed in by hand.
+Nothing is sent to QuickBooks until a human clicks that button - same
+confirm-before-acting pattern as `#credit-card-charges`. Run `/setup
+shared-channels` again (safe to re-run) to create `#ebay-orders` if you're
+adding this to a server that already ran that command before this feature
+existed.
+
+This needs more than `EBAY_ENABLED` - it needs `EBAY_REFRESH_TOKEN` to
+carry the **`sell.fulfillment`** scope, which the refresh token from the
+"Running with the eBay API" setup above does *not* include (that one only
+requested `sell.inventory`, enough for listing creation). Getting a token
+with both scopes means repeating the OAuth consent, this time asking for
+both:
+
+1. Find your app's **RuName** (redirect URI name) on developer.ebay.com's
+   Application Keys page, under "Your eBay Sign-in Settings."
+2. Build a consent URL by hand and open it in your browser (replace
+   `YOUR_APP_ID` and `YOUR_RUNAME`):
+   ```
+   https://auth.ebay.com/oauth2/authorize?client_id=YOUR_APP_ID&redirect_uri=YOUR_RUNAME&response_type=code&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope%2Fsell.inventory+https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope%2Fsell.fulfillment
+   ```
+3. Sign in as your **business** eBay account and agree. eBay redirects to
+   a "safe to close this window" page with `?code=...` in the address bar -
+   copy that `code` value (or the whole URL) immediately; it expires in
+   about 5 minutes and is single-use.
+4. Exchange it for tokens yourself via a POST to
+   `https://api.ebay.com/identity/v1/oauth2/token` with
+   `grant_type=authorization_code`, that `code`, and the same `redirect_uri`
+   - Basic-Auth'd with your App ID/Cert ID. The response's `refresh_token`
+   field (not `access_token` - they're very different lengths) is what
+   replaces `EBAY_REFRESH_TOKEN` in `.env`. eBay's own "Get a Token from
+   eBay via Your Application" dashboard tool can be confusing about which
+   of its displayed values is actually the refresh token - doing the
+   exchange directly, as above, removes any ambiguity about which string
+   is which.
+5. Restart the bot. `order_poll_loop` starts checking automatically - no
+   separate command needed.
+
+Until that wider-scope token is in place, `order_poll_loop` runs but every
+poll fails with an `EbayAPIError` (logged, not surfaced anywhere in
+Discord) and nothing gets posted - the same as if eBay itself were briefly
+down, so there's no harm in leaving `EBAY_ENABLED` on with only the
+narrower token while you get to this.
+
 ### eBay CSV format
 
 The eBay batch CSV (`ebay_csv.py`) matches eBay's **classic File Exchange

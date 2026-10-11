@@ -235,6 +235,16 @@ def _finance_channels_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
+        name="#ebay-orders",
+        value=(
+            "New eBay orders show up here automatically once matched to a tracked item by SKU, "
+            "if the direct eBay API is set up with order-sync access. **Confirm & log sale** "
+            "pre-fills the same thing `/finance log-sale` does - nothing is sent to QuickBooks "
+            "until you click it."
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="#finance-audit-log (everyone can see)",
         value=(
             "Read-only permanent record of every completed QuickBooks transaction this bot has posted - "

@@ -320,3 +320,67 @@ async def _post_pallet_warnings(channel: discord.TextChannel, pallet: dict, fin:
         await channel.send("\n".join(warnings))
     except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
         print(f"[finance_utils] Could not post warning(s) for pallet {pallet['id']}: {e}")
+
+
+def split_evenly(total: float, n: int) -> list:
+    """Splits `total` into n amounts rounded to cents that sum EXACTLY to
+    round(total, 2) - the rounding remainder goes on the last share(s), so
+    a $10.00 bundle of 3 items is $3.33/$3.33/$3.34, not three $3.33s that
+    silently lose a cent. Shared by /finance log-sale and the eBay order
+    auto-sync poll loop (cogs/ebay.py) - both split one total price across
+    a bundle of items the same way."""
+    total_cents = round(total * 100)
+    base = total_cents // n
+    remainder = total_cents - base * n
+    shares = [base] * n
+    for i in range(remainder):
+        shares[-(i + 1)] += 1
+    return [s / 100 for s in shares]
+
+
+async def post_sale_to_quickbooks(sale_id: int, platform: str, total_price: float, already_deposited: bool,
+                                   sale_date: str) -> dict:
+    """
+    Creates the Sales Receipt (taxable unless platform is eBay) for one
+    already-saved sale - shared by /finance log-sale, /finance retry-sale,
+    and the eBay order auto-sync poll loop (cogs/ebay.py) so a QuickBooks
+    failure is only ever handled one way regardless of which path logged
+    the sale. Idempotent: returns "(already created)" instead of creating a
+    second receipt if one's already saved on this sale (see
+    database.set_sale_receipt_id). Lives here, not in cogs/finance.py,
+    because cogs/ebay.py needs the same logic - same reasoning as every
+    other function in this module.
+
+    Cash basis, not accrual: this posts revenue ONLY. No COGS Journal Entry
+    - the pallet's purchase cost was already expensed in full back when it
+    was claimed (see cogs/pallet_setup.py's _claim_charges_for_pallet,
+    config.QUICKBOOKS_COGS_ACCOUNT_ID), so booking it again here at sale
+    time would double it.
+
+    Returns {'ok': True, 'sales_receipt_doc'} on success, or
+    {'ok': False, 'error'} - never raises, so a QuickBooks outage never
+    loses the already-saved sale/sale_items rows.
+    """
+    sale = db.get_sale(sale_id)
+    is_ebay = platform.strip().lower() == "ebay"
+    if sale["quickbooks_sales_receipt_id"]:
+        return {"ok": True, "sales_receipt_doc": "(already created)"}
+
+    income_account = config.QUICKBOOKS_EBAY_SALES_ACCOUNT_ID if is_ebay else config.QUICKBOOKS_SALES_INCOME_ACCOUNT_ID
+    deposit_account = (
+        config.QUICKBOOKS_BANK_ACCOUNT_ID if already_deposited else config.QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID
+    )
+    memo = f"Sale #{sale_id} via {platform} on {sale_date}"
+    try:
+        receipt = await quickbooks.create_sales_receipt(
+            customer_id=config.QUICKBOOKS_CASH_SALES_CUSTOMER_ID,
+            item_id=config.QUICKBOOKS_CASH_SALES_ITEM_ID,
+            income_account_id=income_account,
+            deposit_account_id=deposit_account,
+            amount=total_price, date=sale_date, memo=memo,
+            taxable=not is_ebay,
+        )
+    except quickbooks.QuickBooksError as e:
+        return {"ok": False, "error": f"Sales Receipt failed: {e}"}
+    db.set_sale_receipt_id(sale_id, receipt["id"])
+    return {"ok": True, "sales_receipt_doc": receipt.get("doc_number") or receipt["id"]}

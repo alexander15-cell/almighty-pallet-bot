@@ -391,6 +391,15 @@ def init_db():
                 first_seen_at      TEXT NOT NULL
             );
 
+            -- Same idea as quickbooks_seen_charges above, for the eBay
+            -- order auto-sync poll loop (cogs/ebay.py) - every eBay order
+            -- ID it's ever posted a confirm card for, so re-polling never
+            -- posts the same order twice.
+            CREATE TABLE IF NOT EXISTS ebay_seen_orders (
+                ebay_order_id  TEXT PRIMARY KEY,
+                first_seen_at  TEXT NOT NULL
+            );
+
             -- Single-row OAuth token storage for the one connected
             -- QuickBooks company (id is always 1 - CHECK enforces that).
             -- refresh_token is overwritten on every refresh since
@@ -438,7 +447,7 @@ def init_db():
                 -- these. Kept (never backfilled) so old rows stay readable;
                 -- a new sale is now "fully logged" once
                 -- quickbooks_sales_receipt_id is set - see
-                -- cogs/finance.py's _post_sale_to_quickbooks.
+                -- finance_utils.post_sale_to_quickbooks.
                 quickbooks_journal_entry_id   TEXT,
                 cogs_logged_at                TEXT,
                 created_by                    INTEGER NOT NULL,
@@ -1555,7 +1564,7 @@ def set_sale_receipt_id(sale_id: int, sales_receipt_id: str):
     """
     Saved the moment the Sales Receipt is created - on a cash basis this is
     the only QuickBooks artifact a sale ever produces (see
-    cogs/finance.py's _post_sale_to_quickbooks), so a sale is "fully
+    finance_utils.post_sale_to_quickbooks), so a sale is "fully
     logged" once this is set.
     """
     with get_conn() as conn:
@@ -1854,6 +1863,22 @@ def mark_quickbooks_txn_seen(quickbooks_txn_id: str):
         conn.execute(
             "INSERT OR IGNORE INTO quickbooks_seen_charges (quickbooks_txn_id, first_seen_at) VALUES (?, ?)",
             (quickbooks_txn_id, _now()),
+        )
+
+
+def has_seen_ebay_order(ebay_order_id: str) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM ebay_seen_orders WHERE ebay_order_id = ?", (ebay_order_id,)
+        ).fetchone()
+        return row is not None
+
+
+def mark_ebay_order_seen(ebay_order_id: str):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO ebay_seen_orders (ebay_order_id, first_seen_at) VALUES (?, ?)",
+            (ebay_order_id, _now()),
         )
 
 
@@ -2210,6 +2235,9 @@ def wipe_database():
       - quickbooks_connection: the OAuth token for the connected company
       - quickbooks_seen_charges: poll dedup ledger, tied to the bank
         connection, not to any pallet
+      - ebay_seen_orders: same idea as quickbooks_seen_charges, for the
+        eBay order auto-sync poll loop - tied to the eBay connection, not
+        to any pallet
     """
     with get_conn() as conn:
         conn.executescript(

@@ -358,6 +358,169 @@ def test_search_categories_skips_suggestions_missing_an_id_or_name(monkeypatch):
     assert results == [("3", "Valid")]
 
 
+# --------------------------------------------------------------- get_orders
+
+
+def _orders_responder(orders):
+    def responder(method, url, body):
+        if "oauth2/token" in url:
+            return 200, {"access_token": "tok-1", "expires_in": 7200}
+        if method == "GET" and "/sell/fulfillment/v1/order" in url:
+            return 200, {"orders": orders}
+        raise AssertionError(f"unexpected call: {method} {url}")
+
+    return responder
+
+
+def _since():
+    return datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def test_get_orders_parses_the_minimal_shape_needed(monkeypatch):
+    raw_orders = [
+        {
+            "orderId": "12-34567-89012",
+            "creationDate": "2026-02-03T15:22:10.000Z",
+            "pricingSummary": {"total": {"value": "25.50", "currency": "USD"}},
+            "lineItems": [{"sku": "pallet-5-item-3", "quantity": 1}],
+        },
+    ]
+    _install_fake_session(monkeypatch, _orders_responder(raw_orders))
+    orders = asyncio.run(ebay_api.get_orders(_since()))
+    assert orders == [{
+        "order_id": "12-34567-89012",
+        "sale_date": "2026-02-03",
+        "total_price": 25.50,
+        "line_items": [{"sku": "pallet-5-item-3", "quantity": 1}],
+    }]
+
+
+def test_get_orders_sends_the_refresh_token_grant_not_the_app_token(monkeypatch):
+    calls = _install_fake_session(monkeypatch, _orders_responder([]))
+    asyncio.run(ebay_api.get_orders(_since()))
+    token_call = next(c for c in calls if "oauth2/token" in c["url"])
+    assert token_call["data"]["grant_type"] == "refresh_token"
+
+
+def test_get_orders_skips_an_order_with_no_total(monkeypatch):
+    raw_orders = [
+        {"orderId": "1", "creationDate": "2026-02-03T15:22:10.000Z",
+         "pricingSummary": {}, "lineItems": [{"sku": "pallet-5-item-3", "quantity": 1}]},
+    ]
+    _install_fake_session(monkeypatch, _orders_responder(raw_orders))
+    assert asyncio.run(ebay_api.get_orders(_since())) == []
+
+
+def test_get_orders_skips_an_order_with_no_sku_bearing_line_items(monkeypatch):
+    raw_orders = [
+        {"orderId": "1", "creationDate": "2026-02-03T15:22:10.000Z",
+         "pricingSummary": {"total": {"value": "10.00"}}, "lineItems": [{"quantity": 1}]},
+    ]
+    _install_fake_session(monkeypatch, _orders_responder(raw_orders))
+    assert asyncio.run(ebay_api.get_orders(_since())) == []
+
+
+def test_get_orders_skips_an_order_with_no_order_id(monkeypatch):
+    raw_orders = [
+        {"creationDate": "2026-02-03T15:22:10.000Z",
+         "pricingSummary": {"total": {"value": "10.00"}}, "lineItems": [{"sku": "pallet-1-item-1"}]},
+    ]
+    _install_fake_session(monkeypatch, _orders_responder(raw_orders))
+    assert asyncio.run(ebay_api.get_orders(_since())) == []
+
+
+def test_get_orders_handles_multiple_line_items_and_quantity_default(monkeypatch):
+    raw_orders = [
+        {
+            "orderId": "1", "creationDate": "2026-02-03T15:22:10.000Z",
+            "pricingSummary": {"total": {"value": "40.00"}},
+            "lineItems": [{"sku": "pallet-1-item-1"}, {"sku": "pallet-1-item-2", "quantity": 3}],
+        },
+    ]
+    _install_fake_session(monkeypatch, _orders_responder(raw_orders))
+    orders = asyncio.run(ebay_api.get_orders(_since()))
+    assert orders[0]["line_items"] == [
+        {"sku": "pallet-1-item-1", "quantity": 1},
+        {"sku": "pallet-1-item-2", "quantity": 3},
+    ]
+
+
+def test_get_orders_raises_ebay_api_error_on_failure(monkeypatch):
+    def responder(method, url, body):
+        if "oauth2/token" in url:
+            return 200, {"access_token": "tok-1", "expires_in": 7200}
+        return 500, {"errors": [{"message": "Internal error"}]}
+
+    _install_fake_session(monkeypatch, responder)
+    with pytest.raises(ebay_api.EbayAPIError, match="Internal error"):
+        asyncio.run(ebay_api.get_orders(_since()))
+
+
+def test_get_orders_empty_result(monkeypatch):
+    _install_fake_session(monkeypatch, _orders_responder([]))
+    assert asyncio.run(ebay_api.get_orders(_since())) == []
+
+
+# --------------------------------------------------------------- get_order
+
+
+def _single_order_responder(raw_order):
+    def responder(method, url, body):
+        if "oauth2/token" in url:
+            return 200, {"access_token": "tok-1", "expires_in": 7200}
+        if method == "GET" and "/sell/fulfillment/v1/order/" in url:
+            return 200, raw_order
+        raise AssertionError(f"unexpected call: {method} {url}")
+
+    return responder
+
+
+def test_get_order_parses_a_single_order(monkeypatch):
+    raw_order = {
+        "orderId": "12-34567-89012",
+        "creationDate": "2026-02-03T15:22:10.000Z",
+        "pricingSummary": {"total": {"value": "25.50"}},
+        "lineItems": [{"sku": "pallet-5-item-3", "quantity": 1}],
+    }
+    _install_fake_session(monkeypatch, _single_order_responder(raw_order))
+    order = asyncio.run(ebay_api.get_order("12-34567-89012"))
+    assert order == {
+        "order_id": "12-34567-89012",
+        "sale_date": "2026-02-03",
+        "total_price": 25.50,
+        "line_items": [{"sku": "pallet-5-item-3", "quantity": 1}],
+    }
+
+
+def test_get_order_includes_the_order_id_in_the_url(monkeypatch):
+    raw_order = {
+        "orderId": "12-34567-89012", "creationDate": "2026-02-03T15:22:10.000Z",
+        "pricingSummary": {"total": {"value": "10.00"}}, "lineItems": [{"sku": "pallet-1-item-1"}],
+    }
+    calls = _install_fake_session(monkeypatch, _single_order_responder(raw_order))
+    asyncio.run(ebay_api.get_order("12-34567-89012"))
+    order_call = next(c for c in calls if "oauth2/token" not in c["url"])
+    assert "12-34567-89012" in order_call["url"]
+
+
+def test_get_order_raises_when_order_has_no_usable_data(monkeypatch):
+    raw_order = {"orderId": "1", "pricingSummary": {}, "lineItems": []}
+    _install_fake_session(monkeypatch, _single_order_responder(raw_order))
+    with pytest.raises(ebay_api.EbayAPIError, match="no usable total"):
+        asyncio.run(ebay_api.get_order("1"))
+
+
+def test_get_order_raises_on_api_failure(monkeypatch):
+    def responder(method, url, body):
+        if "oauth2/token" in url:
+            return 200, {"access_token": "tok-1", "expires_in": 7200}
+        return 404, {"errors": [{"message": "Order not found"}]}
+
+    _install_fake_session(monkeypatch, responder)
+    with pytest.raises(ebay_api.EbayAPIError, match="Order not found"):
+        asyncio.run(ebay_api.get_order("nonexistent"))
+
+
 # --------------------------------------------------------------- create_listing
 
 

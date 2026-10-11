@@ -45,22 +45,38 @@ All of these require the Pallet Admin role, same as admin_tools.py. The
 actual message/status moving is delegated to the ItemFlow cog (via
 get_cog, same cross-cog pattern QueueReviewView/AwaitingListingView use) so
 that logic stays in one place alongside the rest of the pipeline.
+
+This file also owns order_poll_loop - not a command, a background
+tasks.loop (same pattern as cogs/finance.py's credit_card_poll_loop) that
+checks the direct eBay API for new orders and posts a #ebay-orders confirm
+card for any matched to a tracked item by SKU (see
+_match_order_line_items, ebay_csv.parse_custom_label). Needs EBAY_ENABLED
+AND a refresh token carrying the sell.fulfillment scope - a wider
+re-consent than the sell.inventory scope the listing-creation path needs
+(see README's eBay API section). EbayOrderConfirmButton's click reuses
+finance_utils.post_sale_to_quickbooks/split_evenly, the same functions
+/finance log-sale uses, so a sale logged either way is handled identically.
 """
 import asyncio
+import logging
 import re
+from datetime import datetime, timedelta, timezone
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import config
 import database as db
+import discord_resilience
 import ebay_api
 import ebay_csv
 import ebay_recommendations
 import ebay_results
 import finance_utils
 import runtime_settings
+
+log = logging.getLogger(__name__)
 
 
 def _is_pallet_admin(interaction: discord.Interaction) -> bool:
@@ -73,6 +89,19 @@ async def _require_admin(interaction: discord.Interaction) -> bool:
         return True
     await interaction.response.send_message(
         f"You need the **{config.ROLE_ADMIN}** role to do that.", ephemeral=True
+    )
+    return False
+
+
+async def _require_finance_role(interaction: discord.Interaction) -> bool:
+    """Gates EbayOrderConfirmButton - this is effectively an automated
+    /finance log-sale, so it's gated the same way that command is
+    (ROLE_FINANCE_MGMT, not ROLE_ADMIN)."""
+    finance_role = runtime_settings.resolve_role(interaction.guild, config.ROLE_FINANCE_MGMT)
+    if _is_pallet_admin(interaction) or (finance_role and finance_role in interaction.user.roles):
+        return True
+    await interaction.response.send_message(
+        f"You need the **{config.ROLE_FINANCE_MGMT}** role to do that.", ephemeral=True
     )
     return False
 
@@ -122,9 +151,218 @@ def _parse_dimensions(text: str) -> tuple:
     return length_in, width_in, height_in
 
 
+class EbayOrderConfirmButton(discord.ui.DynamicItem[discord.ui.Button], template=r"ebay_order_confirm:(?P<order_id>.+)"):
+    """
+    The button on every posted #ebay-orders card. A DynamicItem (same as
+    cogs/finance.py's AllocateChargeButton) so it keeps working across bot
+    restarts - only the order_id is encoded in its custom_id, everything
+    else about the order (items, price, date) is re-fetched fresh from
+    eBay on click (see ebay_api.get_order) rather than trusted from
+    whatever the card last showed.
+    """
+
+    def __init__(self, order_id: str):
+        super().__init__(discord.ui.Button(
+            label="Confirm & log sale", style=discord.ButtonStyle.success, emoji="✅",
+            custom_id=f"ebay_order_confirm:{order_id}",
+        ))
+        self.order_id = order_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: dict):
+        return cls(match["order_id"])
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await _require_finance_role(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            order = await ebay_api.get_order(self.order_id)
+        except ebay_api.EbayAPIError as e:
+            await interaction.followup.send(f"Couldn't re-fetch this order from eBay: {e}", ephemeral=True)
+            return
+
+        matched_items = _match_order_line_items(order)
+        if not matched_items:
+            await interaction.followup.send(
+                "None of this order's items match a tracked item anymore - nothing was submitted.",
+                ephemeral=True,
+            )
+            return
+
+        # Re-checked here, not just when the poll loop first matched this
+        # order - the card can sit for a while, and another sale could
+        # have claimed one of these items in the meantime, same reasoning
+        # as /finance log-sale's own confirmation step.
+        already_sold = [item for item in matched_items if db.get_item_sale(item["id"])]
+        if already_sold:
+            names = ", ".join(f"#{item['item_number']}" for item in already_sold)
+            await interaction.followup.send(
+                f"Item(s) {names} were already logged in another sale - nothing was submitted.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await interaction.message.edit(view=None)
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+            pass
+
+        n = len(matched_items)
+        allocated_shares = finance_utils.split_evenly(order["total_price"], n)
+        sale_id = db.create_sale("eBay", order["sale_date"], order["total_price"], False, created_by=interaction.user.id)
+
+        affected_pallets = set()
+        for i, item in enumerate(matched_items):
+            db.add_sale_item(sale_id, item["id"], allocated_shares[i])
+            db.record_item_sale(item["id"], allocated_shares[i], "eBay", actor_id=interaction.user.id)
+            affected_pallets.add(item["pallet_id"])
+
+        for pallet_id in affected_pallets:
+            await finance_utils.refresh_finance_message(interaction.client, pallet_id)
+
+        result = await finance_utils.post_sale_to_quickbooks(
+            sale_id, "eBay", order["total_price"], False, order["sale_date"],
+        )
+        item_list = ", ".join(
+            f"{db.get_pallet(item['pallet_id'])['name']}#{item['item_number']}" for item in matched_items
+        )
+
+        if result["ok"]:
+            message = (
+                f"✅ Logged sale #{sale_id} ({item_list}) via **eBay** (order `{self.order_id}`).\n"
+                f"Sales Receipt: `{result['sales_receipt_doc']}`"
+            )
+            await finance_utils.post_to_finance_audit_log(
+                interaction.client,
+                f"💰 **Sale #{sale_id}** ({item_list}) via **eBay** - ${order['total_price']:.2f} "
+                f"(Sales Receipt `{result['sales_receipt_doc']}`) - via eBay order auto-sync",
+            )
+        else:
+            message = (
+                f"⚠️ Sale #{sale_id} saved, but QuickBooks failed: {result['error']}\n"
+                f"Run `/finance retry-sale sale_id:{sale_id}` once it's fixed - nothing was lost."
+            )
+        await interaction.followup.send(message, ephemeral=True)
+
+
+def _match_order_line_items(order: dict) -> list:
+    """
+    Resolves an eBay order's line items back to tracked items by SKU
+    (ebay_csv.parse_custom_label) - a line item with an unparseable SKU
+    (not this bot's format) or no matching item (deleted, or from before
+    this bot tracked it) is silently skipped, not an error: an order can
+    still be worth confirming for whichever of its items DO match. Used by
+    both the poll loop (to decide whether to post a card at all) and
+    EbayOrderConfirmButton (to re-resolve fresh on click).
+    """
+    matched = []
+    for line_item in order["line_items"]:
+        parsed = ebay_csv.parse_custom_label(line_item["sku"])
+        if not parsed:
+            continue
+        item = db.get_item_by_pallet_and_number(*parsed)
+        if item:
+            matched.append(item)
+    return matched
+
+
+async def _post_ebay_order_match(bot: discord.Client, order: dict, matched_items: list):
+    """Posts one newly-seen eBay order to #ebay-orders with its Confirm &
+    log sale button - see order_poll_loop that calls this."""
+    channel_id = db.get_shared_channel_id("ebay-orders")
+    if not channel_id:
+        log.warning("eBay order %s seen but #ebay-orders isn't set up - run /setup shared-channels.", order["order_id"])
+        return
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        log.warning("Configured #ebay-orders channel %s not found.", channel_id)
+        return
+
+    n = len(matched_items)
+    allocated_shares = finance_utils.split_evenly(order["total_price"], n)
+    lines = []
+    for i, item in enumerate(matched_items):
+        pallet = db.get_pallet(item["pallet_id"])
+        lines.append(f"**{pallet['name']}#{item['item_number']}** - ${allocated_shares[i]:.2f}")
+
+    embed = discord.Embed(
+        title="📦 New eBay order",
+        description=f"Order `{order['order_id']}` on {order['sale_date']}",
+        color=discord.Color.blue(),
+    )
+    embed.add_field(name=f"{n} item(s)", value="\n".join(lines), inline=False)
+    embed.add_field(name="Total", value=f"${order['total_price']:.2f}", inline=True)
+    embed.set_footer(text="Nothing is sent to QuickBooks until you confirm.")
+    view = discord.ui.View(timeout=None)
+    view.add_item(EbayOrderConfirmButton(order["order_id"]))
+    await channel.send(embed=embed, view=view)
+
+
 class Ebay(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        if not config.PRESERVE_DISCORD_HISTORY:
+            self.order_poll_loop.start()
+
+    async def cog_load(self):
+        # Registers the (order_id -> button) template once so every
+        # #ebay-orders card's Confirm button keeps working across bot
+        # restarts, not just the ones posted during this process's
+        # lifetime - see EbayOrderConfirmButton.
+        if not config.PRESERVE_DISCORD_HISTORY:
+            self.bot.add_dynamic_items(EbayOrderConfirmButton)
+
+    def cog_unload(self):
+        self.order_poll_loop.cancel()
+
+    @tasks.loop(minutes=config.EBAY_ORDER_POLL_MINUTES)
+    async def order_poll_loop(self):
+        """
+        Checks eBay for new orders every EBAY_ORDER_POLL_MINUTES and posts
+        a confirm card (to #ebay-orders) for any not already seen
+        (database.ebay_seen_orders is the dedup ledger, same reasoning as
+        cogs/finance.py's credit_card_poll_loop and
+        quickbooks_seen_charges - a backdated/edited order shouldn't slip
+        past a narrow date filter). No-ops entirely until EBAY_ENABLED -
+        and needs EBAY_REFRESH_TOKEN to actually carry the sell.fulfillment
+        scope (a wider re-consent than listing creation needs), which
+        get_orders() surfaces as an EbayAPIError if it doesn't, same as any
+        other live eBay failure here: caught, logged, retried next poll.
+
+        An order with no SKU-matching line items at all is marked seen
+        without posting a card - there's nothing to confirm, and no point
+        re-checking the same unmatched order on every future poll either.
+        """
+        if config.PRESERVE_DISCORD_HISTORY:
+            return
+        if not config.EBAY_ENABLED:
+            return
+        try:
+            since = datetime.now(timezone.utc) - timedelta(days=3)
+            orders = await ebay_api.get_orders(since)
+        except ebay_api.EbayAPIError:
+            log.exception("eBay order poll failed")
+            return
+
+        for order in orders:
+            if db.has_seen_ebay_order(order["order_id"]):
+                continue
+            matched_items = _match_order_line_items(order)
+            if not matched_items:
+                db.mark_ebay_order_seen(order["order_id"])
+                continue
+            try:
+                await _post_ebay_order_match(self.bot, order, matched_items)
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                log.exception("Failed to post eBay order %s - will retry next poll", order["order_id"])
+                continue
+            db.mark_ebay_order_seen(order["order_id"])
+
+    @order_poll_loop.before_loop
+    async def _before_order_poll_loop(self):
+        await self.bot.wait_until_ready()
 
     ebay_group = app_commands.Group(name="ebay", description="Admin eBay CSV batch management")
 

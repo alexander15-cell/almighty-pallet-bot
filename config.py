@@ -194,6 +194,7 @@ FINANCE_SHARED_CHANNELS = [
     "accounting",
     "finance-audit-log",
     "finance-dashboard",
+    "ebay-orders",
 ]
 FINANCE_CATEGORY_NAME = "Finance"
 
@@ -249,6 +250,7 @@ CHANNEL_ROLE_PERMISSIONS = {
     "awaiting-pallet-charges": [ROLE_FINANCE_MGMT, ROLE_PURCHASE_MGMT],
     "submit-invoices": [ROLE_FINANCE_MGMT, ROLE_PURCHASE_MGMT],
     "accounting": [ROLE_FINANCE_MGMT],
+    "ebay-orders": [ROLE_FINANCE_MGMT],
 }
 
 # ---- Onboarding text ----
@@ -374,6 +376,13 @@ CHANNEL_INFO = {
         "balances, month-to-date revenue/spend, and pallets in progress vs. sold out. "
         "Visible to everyone; refreshes itself whenever a sale, expense, or cost changes."
     ),
+    "ebay-orders": (
+        "New eBay orders show up here automatically (needs the direct eBay API set up - "
+        "see README's eBay API section - with the sell.fulfillment scope added) once they're "
+        "matched to a tracked item by SKU, with a **Confirm & log sale** button. Nothing is "
+        "sent to QuickBooks until you click it - same as /finance log-sale, just pre-filled "
+        "from the real eBay order instead of typed in by hand."
+    ),
 }
 
 # ---- Business logic ----
@@ -498,6 +507,14 @@ EBAY_RETURN_POLICY_ID = os.getenv("EBAY_RETURN_POLICY_ID", "").strip()
 # message rather than silently hiding the button the same way as a missing
 # OAuth credential would.
 EBAY_ENABLED = bool(EBAY_APP_ID and EBAY_CERT_ID and EBAY_REFRESH_TOKEN)
+
+# How often (minutes) the eBay order auto-sync poller checks for new
+# orders via the Fulfillment API (cogs/ebay.py's order_poll_loop). Needs
+# EBAY_ENABLED AND EBAY_REFRESH_TOKEN to carry the sell.fulfillment scope
+# (a wider re-consent than the sell.inventory scope listing creation
+# needs - see README's eBay API section) - the loop no-ops entirely
+# without it, same as the credit-card poller without a configured account.
+EBAY_ORDER_POLL_MINUTES = int(os.getenv("EBAY_ORDER_POLL_MINUTES") or "20")
 
 # eBay's Condition ID values (https://developer.ebay.com - ConditionEnum),
 # narrowed to the ones that actually come up in liquidation/overstock resale.

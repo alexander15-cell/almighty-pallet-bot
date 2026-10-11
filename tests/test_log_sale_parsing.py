@@ -1,7 +1,8 @@
 """
-Pure parsing/splitting helpers behind /finance log-sale (cogs/finance.py):
+Pure parsing/splitting helpers behind /finance log-sale: cogs/finance.py's
 _parse_item_references (the "PalletName#3, OtherPallet#7" bundle syntax) and
-_split_evenly (rounding a total into per-item shares that sum exactly).
+finance_utils.split_evenly (rounding a total into per-item shares that sum
+exactly - shared with the eBay order auto-sync poll loop in cogs/ebay.py).
 """
 import os
 
@@ -9,7 +10,8 @@ os.environ.setdefault("DISCORD_BOT_TOKEN", "test-token")
 
 import pytest
 
-from cogs.finance import _parse_item_references, _split_evenly
+import finance_utils
+from cogs.finance import _parse_item_references
 
 
 # --------------------------------------------------------- _parse_item_references
@@ -73,18 +75,18 @@ def test_blank_segments_are_skipped_not_errors(fresh_db):
     assert len(resolved) == 1
 
 
-# --------------------------------------------------------------- _split_evenly
+# --------------------------------------------------------------- finance_utils.split_evenly
 
 
 def test_split_evenly_divides_cleanly():
-    assert _split_evenly(30.0, 3) == [10.0, 10.0, 10.0]
+    assert finance_utils.split_evenly(30.0, 3) == [10.0, 10.0, 10.0]
 
 
 def test_split_evenly_sums_exactly_despite_rounding():
-    shares = _split_evenly(10.0, 3)
+    shares = finance_utils.split_evenly(10.0, 3)
     assert round(sum(shares), 2) == 10.0
     assert shares == [3.33, 3.33, 3.34]
 
 
 def test_split_evenly_single_item_returns_the_whole_amount():
-    assert _split_evenly(19.99, 1) == [19.99]
+    assert finance_utils.split_evenly(19.99, 1) == [19.99]

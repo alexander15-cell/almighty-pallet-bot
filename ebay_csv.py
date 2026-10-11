@@ -80,12 +80,15 @@ same logic.
 """
 import csv
 import json
+import re
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import config
 import ebay_taxonomy
+
+_CUSTOM_LABEL_RE = re.compile(r"^pallet-(\d+)-item-(\d+)$")
 
 BATCH_CSV_PATH = Path(config.EBAY_BATCH_CSV_PATH)
 ARCHIVE_DIR = Path(config.EBAY_BATCH_ARCHIVE_DIR)
@@ -193,6 +196,24 @@ def custom_label(item: dict) -> str:
     here) back to an item.
     """
     return f"pallet-{item['pallet_id']}-item-{item['item_number']}"
+
+
+def parse_custom_label(sku: str):
+    """
+    Reverses custom_label() - the (pallet_id, item_number) pair a SKU
+    encodes, as a tuple of ints, or None if `sku` doesn't match this bot's
+    own format at all (a listing created some other way, or a stale/
+    malformed SKU on an eBay order). Used by cogs/ebay.py's order
+    auto-sync to match an incoming eBay order's SKU back to a tracked item
+    without needing to already have a candidate item set in hand (unlike
+    custom_label() itself, which only ever goes item -> SKU).
+    """
+    if not sku:
+        return None
+    match = _CUSTOM_LABEL_RE.match(sku.strip())
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def _read_existing_rows() -> tuple[list, list]:
