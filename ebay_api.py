@@ -2,28 +2,284 @@
 Direct eBay API listing path - the "List on eBay (API)" button on Awaiting
 Listing cards, gated behind config.EBAY_ENABLED (see item_flow.list_on_ebay_api).
 
-This is intentionally a stub. The developer API application isn't approved
-yet, so there's nothing to call - config.EBAY_ENABLED stays False (no
-EBAY_APP_ID/EBAY_CERT_ID/EBAY_DEV_ID/EBAY_USER_TOKEN set) and the button
-doesn't even show up. The eBay CSV batch path (ebay_csv.py, /ebay
-export-batch) is the working fallback in the meantime.
+Talks to eBay's modern Sell Inventory API (REST/JSON), not the older XML
+Trading API - OAuth2 user access, refreshed on demand from a long-lived
+refresh token (config.EBAY_REFRESH_TOKEN) obtained once, by hand, through
+eBay's own OAuth consent flow. Unlike quickbooks.py there's no in-Discord
+"connect" command: the refresh token doesn't rotate on use (confirmed
+against eBay's own sample token-refresh response, which omits refresh_token
+entirely - unlike QuickBooks, which rotates its refresh token on every
+single use and so must persist the new one every time), so it's just read
+from config and never written back anywhere. Only the short-lived (~2 hour)
+access token is cached, in memory, module-level - cheap enough to re-mint
+after a bot restart that persisting it isn't worth a database table.
 
-This module is kept as the one place a real Sell/Inventory API integration
-gets wired in later - once that happens, create_listing() below should
-actually create the listing and return its eBay item ID, instead of raising.
+One real listing is three sequential calls, per eBay's documented flow:
+  1. createOrReplaceInventoryItem (PUT  /inventory_item/{sku})
+  2. createOffer                  (POST /offer)                -> offerId
+  3. publishOffer                 (POST /offer/{offerId}/publish) -> listingId
+
+Reuses ebay_csv.py's hard-won field-level business rules (condition-ID
+fallback, Brand/MPN/Type "Does Not Apply" placeholders, category-keyword
+weight estimate) rather than re-deriving them - those were tuned against
+real eBay error codes from the CSV batch path, and the same category-level
+requirements apply regardless of which API submits the listing.
+
+Condition IDs are eBay's classic numeric codes (1000/1500/1750/3000/7000 -
+see config.EBAY_CONDITIONS); the Inventory API wants its own ConditionEnum
+strings instead (NEW/NEW_OTHER/etc. - see _CONDITION_ID_TO_ENUM below),
+confirmed against eBay's own condition-id-values reference page.
 """
+import json
+from datetime import datetime, timedelta, timezone
+
+import aiohttp
+
 import config
+import ebay_csv
+import ebay_taxonomy
+
+# Proactively refresh this long before the access token would actually
+# expire (eBay's own tokens last ~7200s/2h), so an in-flight request never
+# races a refresh - same safety-margin pattern as quickbooks.py.
+_REFRESH_SAFETY_MARGIN = timedelta(minutes=5)
+
+# In-memory only - see this module's docstring for why no DB persistence is
+# needed here, unlike quickbooks_connection.
+_cached_access_token: str = None
+_cached_expires_at: datetime = None
+
+# eBay's classic numeric condition IDs (config.EBAY_CONDITIONS) mapped to
+# the Inventory API's own ConditionEnum string values - confirmed against
+# eBay's condition-id-values reference page (1000/1500/1750/3000) and
+# general knowledge for 7000, a long-stable, unchanged enum value.
+_CONDITION_ID_TO_ENUM = {
+    "1000": "NEW",
+    "1500": "NEW_OTHER",
+    "1750": "NEW_WITH_DEFECTS",
+    "3000": "USED_EXCELLENT",
+    "7000": "FOR_PARTS_OR_NOT_WORKING",
+}
+
+# ebay_listing_data.auction_duration stores File Exchange-style values
+# ("Days_7" - see config.EBAY_AUCTION_DURATIONS); the Inventory API's
+# ListingDurationEnum uses its own uppercase form instead.
+_AUCTION_DURATION_TO_ENUM = {
+    "Days_3": "DAYS_3",
+    "Days_5": "DAYS_5",
+    "Days_7": "DAYS_7",
+    "Days_10": "DAYS_10",
+}
+
+
+class EbayAPIError(Exception):
+    """Raised for any eBay API/auth failure - callers should catch this
+    rather than aiohttp's own exceptions, which this module doesn't let
+    escape."""
+
+
+def _identity_base_url() -> str:
+    if config.EBAY_ENVIRONMENT == "sandbox":
+        return "https://api.sandbox.ebay.com"
+    return "https://api.ebay.com"
+
+
+def _api_base_url() -> str:
+    if config.EBAY_ENVIRONMENT == "sandbox":
+        return "https://api.sandbox.ebay.com/sell/inventory/v1"
+    return "https://api.ebay.com/sell/inventory/v1"
+
+
+async def get_access_token() -> str:
+    """
+    Returns a valid access token, transparently refreshing (via
+    config.EBAY_REFRESH_TOKEN) if the cached one is at or past its safety
+    margin. Every API call below goes through this - nothing else in this
+    module reads the cache directly.
+    """
+    global _cached_access_token, _cached_expires_at
+
+    if _cached_access_token and datetime.now(timezone.utc) < _cached_expires_at - _REFRESH_SAFETY_MARGIN:
+        return _cached_access_token
+
+    auth = aiohttp.BasicAuth(config.EBAY_APP_ID, config.EBAY_CERT_ID)
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": config.EBAY_REFRESH_TOKEN,
+        "scope": "https://api.ebay.com/oauth/api_scope/sell.inventory",
+    }
+    url = f"{_identity_base_url()}/identity/v1/oauth2/token"
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            url, data=data, auth=auth, headers={"Content-Type": "application/x-www-form-urlencoded"}
+        ) as resp:
+            body = await resp.json(content_type=None)
+            if resp.status != 200:
+                error_desc = body.get("error_description") or body.get("error") or body
+                raise EbayAPIError(f"eBay token refresh failed ({resp.status}): {error_desc}")
+
+    _cached_access_token = body["access_token"]
+    _cached_expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(body["expires_in"]))
+    return _cached_access_token
+
+
+def _raise_for_ebay_error(resp_status: int, body: dict, context: str):
+    errors = (body or {}).get("errors")
+    detail = errors if errors else body
+    raise EbayAPIError(f"eBay {context} failed ({resp_status}): {detail}")
+
+
+async def _request(method: str, path: str, *, json_body: dict = None, extra_headers: dict = None) -> dict:
+    """Shared authenticated request helper against the Inventory API."""
+    access_token = await get_access_token()
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Content-Language": "en-US",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    url = f"{_api_base_url()}{path}"
+    async with aiohttp.ClientSession() as session:
+        async with session.request(method, url, json=json_body, headers=headers) as resp:
+            if resp.status == 204:  # publishOffer-adjacent calls can return no body
+                return {}
+            body = await resp.json(content_type=None)
+            if resp.status >= 300:
+                _raise_for_ebay_error(resp.status, body, f"{method} {path}")
+            return body
+
+
+def _build_aspects(listing: dict, title: str, item_label: str) -> dict:
+    """
+    Mirrors ebay_csv.append_item_to_batch's Brand/MPN/Type handling exactly -
+    see that function's own comments for why these three always need a real
+    value (confirmed via real-upload error codes, not a style preference).
+    Inventory API aspects are Map<String, List<String>>, so every value gets
+    wrapped in a single-element list.
+    """
+    specifics = dict(listing.get("item_specifics") or {})
+
+    brand_key = next((k for k in specifics if k.strip().lower() == "brand"), None)
+    if not (brand_key and specifics[brand_key]):
+        specifics[brand_key or "Brand"] = "Does Not Apply"
+
+    mpn_key = next((k for k in specifics if k.strip().lower() == "mpn"), None)
+    if not (mpn_key and specifics[mpn_key]):
+        specifics[mpn_key or "MPN"] = "Does Not Apply"
+
+    type_key = next((k for k in specifics if k.strip().lower() == "type"), None)
+    if not (type_key and specifics[type_key]):
+        inferred_type = ebay_csv.infer_type(title)
+        specifics[type_key or "Type"] = inferred_type or "Does Not Apply"
+        if not inferred_type:
+            print(f"[ebay_api] {item_label}: couldn't infer a Type from the title {title!r} - using 'Does Not Apply'.")
+
+    return {key: [str(value)] for key, value in specifics.items()}
+
+
+def _build_inventory_item(item: dict, listing: dict, label: str) -> dict:
+    title = listing.get("ebay_title") or ""
+    condition_id = ebay_csv.resolved_condition_id(listing.get("condition_id") or config.EBAY_DEFAULT_CONDITION_ID, label)
+    condition_enum = _CONDITION_ID_TO_ENUM.get(condition_id, "USED_EXCELLENT")
+
+    weight_lb = listing.get("weight_lb")
+    if weight_lb is None:
+        category_path = ebay_taxonomy.get_path(listing.get("category_id")) or ""
+        weight_lb = ebay_csv.estimated_weight_lb(category_path or title)
+        print(f"[ebay_api] {label}: no captured weight - estimating {weight_lb:g} lb.")
+
+    package = {"weight": {"value": weight_lb, "unit": "POUND"}}
+    if listing.get("length_in") is not None and listing.get("width_in") is not None and listing.get("height_in") is not None:
+        package["dimensions"] = {
+            "length": listing["length_in"], "width": listing["width_in"], "height": listing["height_in"],
+            "unit": "INCH",
+        }
+
+    public_urls = [u for u in json.loads(item.get("photo_public_urls") or "[]") if u]
+
+    return {
+        "condition": condition_enum,
+        "product": {
+            "title": title,
+            "description": item.get("ai_description") or item.get("raw_description") or "",
+            "imageUrls": public_urls,
+            "aspects": _build_aspects(listing, title, label),
+        },
+        "packageWeightAndSize": package,
+        "availability": {"shipToLocationAvailability": {"quantity": 1}},
+    }
+
+
+def _build_offer(item: dict, listing: dict, sku: str) -> dict:
+    is_auction = (listing.get("listing_format") or "FixedPrice") == "Auction"
+    offer = {
+        "sku": sku,
+        "marketplaceId": config.EBAY_MARKETPLACE_ID,
+        "format": "AUCTION" if is_auction else "FIXED_PRICE",
+        "availableQuantity": 1,
+        "categoryId": listing.get("category_id") or "",
+        "listingDescription": item.get("ai_description") or item.get("raw_description") or "",
+        "listingPolicies": {
+            "fulfillmentPolicyId": config.EBAY_FULFILLMENT_POLICY_ID,
+            "paymentPolicyId": config.EBAY_PAYMENT_POLICY_ID,
+            "returnPolicyId": config.EBAY_RETURN_POLICY_ID,
+        },
+        "merchantLocationKey": config.EBAY_MERCHANT_LOCATION_KEY,
+    }
+    price = {"value": f"{listing['price']:.2f}", "currency": "USD"}
+    if is_auction:
+        offer["pricingSummary"] = {"auctionStartPrice": price}
+        offer["listingDuration"] = _AUCTION_DURATION_TO_ENUM.get(listing.get("auction_duration"), "DAYS_7")
+    else:
+        offer["pricingSummary"] = {"price": price}
+        offer["listingDuration"] = "GTC"
+    return offer
+
+
+def _require_publish_config():
+    missing = [
+        name for name, value in (
+            ("EBAY_MERCHANT_LOCATION_KEY", config.EBAY_MERCHANT_LOCATION_KEY),
+            ("EBAY_FULFILLMENT_POLICY_ID", config.EBAY_FULFILLMENT_POLICY_ID),
+            ("EBAY_PAYMENT_POLICY_ID", config.EBAY_PAYMENT_POLICY_ID),
+            ("EBAY_RETURN_POLICY_ID", config.EBAY_RETURN_POLICY_ID),
+        ) if not value
+    ]
+    if missing:
+        raise EbayAPIError(
+            f"Can't publish to eBay - missing from .env: {', '.join(missing)}. See README's eBay API section "
+            f"for where to find each of these on your eBay seller account."
+        )
 
 
 async def create_listing(item: dict, listing: dict) -> dict:
     """
-    Would create a live eBay listing from `item` (items table dict) and
-    `listing` (ebay_listing_data dict) via eBay's API, returning at least
-    {"ebay_item_id": ...} on success. Not implemented yet - always raises.
+    Creates a live eBay listing from `item` (items table dict) and `listing`
+    (ebay_listing_data dict, from database.get_ebay_listing_data) via eBay's
+    Sell Inventory API. Returns {'ebay_item_id': <eBay listing ID>} on
+    success. Raises EbayAPIError with eBay's own error detail on failure -
+    never raises a bare aiohttp exception.
     """
     if not config.EBAY_ENABLED:
         raise NotImplementedError("Direct eBay API listing is disabled (config.EBAY_ENABLED is False).")
-    raise NotImplementedError(
-        "Direct eBay API listing isn't implemented yet - use the eBay CSV batch path "
-        "(Add to eBay Batch) instead until this is built out."
-    )
+    _require_publish_config()
+
+    sku = ebay_csv.custom_label(item)
+    label = sku
+
+    inventory_item = _build_inventory_item(item, listing, label)
+    await _request("PUT", f"/inventory_item/{sku}", json_body=inventory_item)
+
+    offer = _build_offer(item, listing, sku)
+    offer_result = await _request("POST", "/offer", json_body=offer)
+    offer_id = offer_result.get("offerId")
+    if not offer_id:
+        raise EbayAPIError(f"eBay createOffer succeeded but returned no offerId: {offer_result}")
+
+    publish_result = await _request("POST", f"/offer/{offer_id}/publish")
+    listing_id = publish_result.get("listingId")
+    if not listing_id:
+        raise EbayAPIError(f"eBay publishOffer succeeded but returned no listingId: {publish_result}")
+
+    return {"ebay_item_id": listing_id}

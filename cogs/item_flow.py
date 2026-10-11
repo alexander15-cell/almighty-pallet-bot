@@ -1762,8 +1762,7 @@ class ItemFlow(commands.Cog):
     async def list_on_ebay_api(self, interaction: discord.Interaction, item_id: int):
         """'List on eBay (API)' - the direct-API path, only reachable at all
         once config.EBAY_ENABLED is True (the button is removed from the view
-        otherwise). See ebay_api.py - it's currently a stub pending eBay
-        developer API approval."""
+        otherwise). See ebay_api.py."""
         if not config.EBAY_ENABLED:
             await interaction.response.send_message("Direct eBay API listing isn't enabled.", ephemeral=True)
             return
@@ -1793,6 +1792,9 @@ class ItemFlow(commands.Cog):
         except Exception as e:
             await interaction.followup.send(f"eBay API listing failed: {e}", ephemeral=True)
             return
+
+        if result.get("ebay_item_id"):
+            db.set_ebay_item_id(item_id, result["ebay_item_id"])
 
         pallet_id = item["pallet_id"]
         channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))

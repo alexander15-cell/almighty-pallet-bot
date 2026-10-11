@@ -40,7 +40,7 @@ are blank (error 21919303, "item specific ... is missing") for at least
 some categories - not a weaker listing, a hard failure. C:Type still
 tries a small keyword table first (config.EBAY_TYPE_KEYWORDS, since it's
 a real search/browse attribute where a good guess beats a placeholder) -
-see _infer_type, which logs when nothing matches before falling back to
+see infer_type, which logs when nothing matches before falling back to
 the same placeholder as Brand/MPN.
 
 *ConditionID is checked against config.EBAY_BROADLY_ACCEPTED_CONDITION_IDS
@@ -137,7 +137,7 @@ def _split_weight_lb(weight_lb) -> tuple:
     return str(major), str(minor)
 
 
-def _estimated_weight_lb(category_path: str) -> float:
+def estimated_weight_lb(category_path: str) -> float:
     """
     Fallback used only when an item has no real captured weight_lb (see
     this module's docstring) - a rough estimate, not real per-item data.
@@ -151,7 +151,7 @@ def _estimated_weight_lb(category_path: str) -> float:
     return config.EBAY_DEFAULT_WEIGHT_FALLBACK_LB
 
 
-def _infer_type(title: str) -> str:
+def infer_type(title: str) -> str:
     """
     Best-effort C:Type inference from an item's title when Queue Review
     didn't capture one in item_specifics. Returns "" (not a placeholder)
@@ -168,7 +168,7 @@ def _infer_type(title: str) -> str:
     return ""
 
 
-def _resolved_condition_id(condition_id: str, item_label: str) -> str:
+def resolved_condition_id(condition_id: str, item_label: str) -> str:
     """
     Falls back to config.EBAY_CONDITION_FALLBACK_ID when `condition_id`
     isn't in config.EBAY_BROADLY_ACCEPTED_CONDITION_IDS - see this module's
@@ -252,7 +252,7 @@ def append_item_to_batch(item: dict, listing: dict) -> None:
     # list beats guessing wrong, which beats not listing at all.
     type_key = next((k for k in specifics if k.strip().lower() == "type"), None)
     if not (type_key and specifics[type_key]):
-        inferred_type = _infer_type(title)
+        inferred_type = infer_type(title)
         specifics[type_key or "Type"] = inferred_type or "Does Not Apply"
         if not inferred_type:
             print(f"[ebay_csv] {label}: couldn't infer a C:Type from the title {title!r} - using 'Does Not Apply'.")
@@ -275,11 +275,11 @@ def append_item_to_batch(item: dict, listing: dict) -> None:
     weight_lb = listing.get("weight_lb")
     if weight_lb is None:
         category_path = ebay_taxonomy.get_path(category_id) or ""
-        weight_lb = _estimated_weight_lb(category_path or title)
+        weight_lb = estimated_weight_lb(category_path or title)
         print(f"[ebay_csv] {label}: no captured weight - estimating {weight_lb:g} lb.")
     weight_major, weight_minor = _split_weight_lb(weight_lb)
 
-    condition_id = _resolved_condition_id(listing.get("condition_id") or config.EBAY_DEFAULT_CONDITION_ID, label)
+    condition_id = resolved_condition_id(listing.get("condition_id") or config.EBAY_DEFAULT_CONDITION_ID, label)
 
     row = {field: "" for field in fieldnames}
     row.update({

@@ -588,13 +588,55 @@ needed either way.
 
 ### Running without the eBay API
 
-Leave `EBAY_APP_ID`, `EBAY_CERT_ID`, `EBAY_DEV_ID`, and `EBAY_USER_TOKEN`
-blank in `.env` (the default). **List on eBay (API)** simply won't appear on
-Awaiting Listing cards - use **Add to eBay Batch** instead, which needs no
-API access at all. Once eBay's developer API application is approved and all
-four values are set, restart the bot and the API button reappears - though
-`ebay_api.py` itself still needs a real integration written before it does
-anything.
+Leave `EBAY_APP_ID`, `EBAY_CERT_ID`, and `EBAY_REFRESH_TOKEN` blank in `.env`
+(the default). **List on eBay (API)** simply won't appear on Awaiting Listing
+cards - use **Add to eBay Batch** instead, which needs no API access at all.
+
+### Running with the eBay API
+
+Once your eBay developer application is approved, `ebay_api.py` is a real
+integration against eBay's modern Sell Inventory API (not the older XML
+Trading API) - creating a listing is three calls under the hood
+(`createOrReplaceInventoryItem` -> `createOffer` -> `publishOffer`), all
+handled for you by `create_listing()`.
+
+1. From developer.ebay.com, get your application's **App ID** and **Cert
+   ID**, then complete the OAuth consent flow once by hand ("Sign in with
+   eBay" / "Get a Token" on your app's page) to get a **refresh token** -
+   unlike QuickBooks, there's no in-Discord connect command for this, since
+   the token is long-lived (~18 months, not rotated on use) and just gets
+   pasted into `.env` once:
+   ```
+   EBAY_APP_ID=...
+   EBAY_CERT_ID=...
+   EBAY_REFRESH_TOKEN=...
+   ```
+   Once all three are set, `config.EBAY_ENABLED` turns on and **List on eBay
+   (API)** appears on Awaiting Listing cards.
+2. Publishing a listing also needs four more values that only exist on your
+   eBay seller account - `create_listing()` checks these and fails with a
+   clear message naming whichever is missing, rather than a confusing eBay
+   API error:
+   - `EBAY_MERCHANT_LOCATION_KEY` - an inventory location you've already
+     created in Seller Hub (Shipping preferences) or via eBay's Account API.
+     This bot doesn't create one for you.
+   - `EBAY_FULFILLMENT_POLICY_ID`, `EBAY_PAYMENT_POLICY_ID`,
+     `EBAY_RETURN_POLICY_ID` - your Business Policy **IDs** (Seller Hub >
+     Business Policies shows each policy's ID next to its name, or fetch
+     them via `GET /sell/account/v1/fulfillment_policy` etc.). These are a
+     different mechanism from `EBAY_SHIPPING_PROFILE_NAME`/
+     `EBAY_RETURN_PROFILE_NAME`/`EBAY_PAYMENT_PROFILE_NAME` below, which the
+     CSV batch path matches by policy *name* instead.
+3. `EBAY_ENVIRONMENT` defaults to `production`; set it to `sandbox` (with
+   sandbox credentials from developer.ebay.com's Sandbox tab) to test
+   without creating real listings.
+
+Condition IDs (`EBAY_CONDITIONS`) are translated to the Inventory API's own
+condition strings (`NEW`, `NEW_OTHER`, `USED_EXCELLENT`, etc.) internally -
+nothing to configure there. The same condition-ID fallback, Brand/MPN/Type
+placeholder, and weight-estimate rules the CSV batch path already uses
+(tuned against real eBay error codes) apply here too, since they're
+genuinely shared, category-level requirements, not CSV-specific quirks.
 
 ### eBay CSV format
 

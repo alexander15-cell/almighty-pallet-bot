@@ -447,17 +447,57 @@ STAGE_ORDER_FOR_STATUS = [
 ]
 
 # ---- eBay (optional direct API path - see ebay_api.py) ----
+# App ID (client_id) and Cert ID (client_secret) from developer.ebay.com ->
+# your application's keys. EBAY_REFRESH_TOKEN comes from the OAuth consent
+# flow you complete once by hand (eBay's "Sign in with eBay" / Get a Token
+# page) - it's long-lived (~18 months, not rotated on use), and is what
+# ebay_api.py's get_access_token() exchanges for a short-lived (~2 hour)
+# access token on demand. There's no in-Discord "connect" command for this
+# (unlike /finance connect-quickbooks) since the refresh token is obtained
+# once, outside the bot, and just pasted into .env.
 EBAY_APP_ID = os.getenv("EBAY_APP_ID")
 EBAY_CERT_ID = os.getenv("EBAY_CERT_ID")
-EBAY_DEV_ID = os.getenv("EBAY_DEV_ID")
-EBAY_USER_TOKEN = os.getenv("EBAY_USER_TOKEN")
+EBAY_REFRESH_TOKEN = os.getenv("EBAY_REFRESH_TOKEN")
+
+# "production" (default) or "sandbox" - selects which eBay API/identity
+# hostnames ebay_api.py talks to. Use "sandbox" with sandbox credentials
+# (a separate keyset/token from developer.ebay.com's Sandbox tab) to test
+# without creating real listings.
+EBAY_ENVIRONMENT = os.getenv("EBAY_ENVIRONMENT", "production").strip().lower()
+
+# eBay's Sell API marketplace identifier - "EBAY_US" for the US site, the
+# only one this bot's categories/taxonomy (ebay_taxonomy.py) are built for.
+EBAY_MARKETPLACE_ID = os.getenv("EBAY_MARKETPLACE_ID", "EBAY_US")
+
+# The Inventory API needs a merchantLocationKey identifying a real inventory
+# location already created on this seller account (Seller Hub, or eBay's
+# Account API createInventoryLocation - one-time setup, not something this
+# bot does for you) - distinct from EBAY_ITEM_LOCATION below, which is just
+# free text for the older CSV batch path. Required to publish an offer;
+# create_listing() raises a clear error naming this if it's blank.
+EBAY_MERCHANT_LOCATION_KEY = os.getenv("EBAY_MERCHANT_LOCATION_KEY", "").strip()
+
+# Business Policy IDs (not names - the CSV path's EBAY_SHIPPING_PROFILE_NAME/
+# EBAY_RETURN_PROFILE_NAME/EBAY_PAYMENT_PROFILE_NAME below are a different,
+# name-based mechanism used only by ebay_csv.py). Find these via eBay's
+# Account API (GET /sell/account/v1/fulfillment_policy, .../payment_policy,
+# .../return_policy) or Seller Hub > Business Policies - each policy's ID is
+# shown alongside its name. Required to publish an offer; create_listing()
+# raises a clear error naming whichever of these is blank.
+EBAY_FULFILLMENT_POLICY_ID = os.getenv("EBAY_FULFILLMENT_POLICY_ID", "").strip()
+EBAY_PAYMENT_POLICY_ID = os.getenv("EBAY_PAYMENT_POLICY_ID", "").strip()
+EBAY_RETURN_POLICY_ID = os.getenv("EBAY_RETURN_POLICY_ID", "").strip()
 
 # Whether the direct eBay API listing path ("List on eBay (API)" on Awaiting
-# Listing cards) is usable. False - the normal case, since eBay developer API
-# approval is pending - until all four eBay credentials above are set; until
-# then that button doesn't even show up, and the only way to get an item onto
-# eBay is the CSV batch path (see ebay_csv.py and /ebay export-batch).
-EBAY_ENABLED = bool(EBAY_APP_ID and EBAY_CERT_ID and EBAY_DEV_ID and EBAY_USER_TOKEN)
+# Listing cards) is usable at all. False until EBAY_APP_ID/EBAY_CERT_ID/
+# EBAY_REFRESH_TOKEN are all set; until then that button doesn't even show
+# up, and the only way to get an item onto eBay is the CSV batch path (see
+# ebay_csv.py and /ebay export-batch). EBAY_MERCHANT_LOCATION_KEY and the
+# three policy IDs above are checked separately, at call time (not here),
+# since a missing one should fail with a specific "which value is missing"
+# message rather than silently hiding the button the same way as a missing
+# OAuth credential would.
+EBAY_ENABLED = bool(EBAY_APP_ID and EBAY_CERT_ID and EBAY_REFRESH_TOKEN)
 
 # eBay's Condition ID values (https://developer.ebay.com - ConditionEnum),
 # narrowed to the ones that actually come up in liquidation/overstock resale.
