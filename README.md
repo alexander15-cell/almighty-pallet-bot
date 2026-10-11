@@ -633,10 +633,22 @@ handled for you by `create_listing()`.
 
 Condition IDs (`EBAY_CONDITIONS`) are translated to the Inventory API's own
 condition strings (`NEW`, `NEW_OTHER`, `USED_EXCELLENT`, etc.) internally -
-nothing to configure there. The same condition-ID fallback, Brand/MPN/Type
-placeholder, and weight-estimate rules the CSV batch path already uses
-(tuned against real eBay error codes) apply here too, since they're
-genuinely shared, category-level requirements, not CSV-specific quirks.
+nothing to configure there. The same Brand/MPN/Type placeholder and
+weight-estimate rules the CSV batch path already uses (tuned against real
+eBay error codes) apply here too, since they're genuinely shared,
+category-level requirements, not CSV-specific quirks.
+
+Unlike the CSV batch path, this direct API path checks each listing's
+condition ID against eBay's **real per-category condition policy**
+(`getItemConditionPolicies`, eBay's Metadata API) before publishing,
+instead of only the coarse global `EBAY_BROADLY_ACCEPTED_CONDITION_IDS`
+safe-set. This uses a separate **application token** (client_credentials
+grant - just `EBAY_APP_ID`/`EBAY_CERT_ID`, no extra scope or user consent
+needed), so it works immediately with the same credentials already set up
+above. If that live lookup fails or times out for any reason (eBay
+downtime, an unrecognized category), it falls back to the exact same
+static safe-set check the CSV path uses - a listing never gets blocked on
+a flaky metadata call.
 
 ### eBay CSV format
 
@@ -1209,13 +1221,17 @@ this scale.
   blank in the exported CSV - add photos yourself before or after
   uploading. With R2 configured, it's filled in automatically (every
   photo, pipe-separated, up to eBay's 24-photo cap).
-- **Weight/Type/Condition fallbacks are best-effort, not authoritative.**
+- **Weight/Type fallbacks are best-effort, not authoritative.**
   `EBAY_DEFAULT_WEIGHT_BY_CATEGORY_LB` and `EBAY_TYPE_KEYWORDS` are rough
   estimates for when Queue Review didn't capture real data - update them
-  (or start weighing items at intake) for better accuracy. Condition
-  validation (`EBAY_BROADLY_ACCEPTED_CONDITION_IDS`) is a coarse global
-  check, not real per-category eBay data (that needs live eBay dev API
-  access - see `ebay_api.py`).
+  (or start weighing items at intake) for better accuracy.
+- **Condition validation is real per-category eBay data on the direct API
+  path, but still a coarse global check on the CSV batch path.** The
+  direct API path (`ebay_api.py`'s `create_listing()`) checks eBay's actual
+  `getItemConditionPolicies` for each listing's category before publishing.
+  The CSV batch path (`ebay_csv.py`) has no live API call in its export
+  step, so it still only checks the coarse global
+  `EBAY_BROADLY_ACCEPTED_CONDITION_IDS` safe-set.
 - **`/ebay confirm-listed` is a manual step.** There's no live eBay API to
   automatically detect that an uploaded CSV batch was actually processed, so
   someone has to check Seller Hub and confirm it by hand.

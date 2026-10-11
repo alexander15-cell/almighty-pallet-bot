@@ -29,7 +29,19 @@ Condition IDs are eBay's classic numeric codes (1000/1500/1750/3000/7000 -
 see config.EBAY_CONDITIONS); the Inventory API wants its own ConditionEnum
 strings instead (NEW/NEW_OTHER/etc. - see _CONDITION_ID_TO_ENUM below),
 confirmed against eBay's own condition-id-values reference page.
+
+Condition validity is also checked against eBay's real per-category data
+(getItemConditionPolicies, the Metadata API) before falling back to
+ebay_csv.py's coarser static safe-set check - see
+resolve_condition_id_with_live_check. That lookup uses a second, separate
+OAuth grant from the listing calls above: an *application* token
+(client_credentials, scope api_scope - just EBAY_APP_ID/EBAY_CERT_ID, no
+user consent/refresh token involved), since Metadata API's standard-
+condition data is public and doesn't need this seller's own consent. Its
+own cache (_cached_app_token) is kept separate from the user token's
+cache above for exactly that reason.
 """
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -48,6 +60,19 @@ _REFRESH_SAFETY_MARGIN = timedelta(minutes=5)
 # needed here, unlike quickbooks_connection.
 _cached_access_token: str = None
 _cached_expires_at: datetime = None
+
+# Separate cache for the application (client_credentials) token used by
+# get_condition_policies() below - a different grant type/scope than the
+# user token above, so it's kept as its own module-level pair rather than
+# reusing _cached_access_token.
+_cached_app_token: str = None
+_cached_app_token_expires_at: datetime = None
+
+# How long to wait for the Metadata API condition-policy lookup before
+# giving up and falling back to the static safe-set in ebay_csv.py - this
+# is a nice-to-have accuracy improvement, never worth blocking a listing
+# over a slow/unreachable eBay endpoint.
+_CONDITION_POLICY_TIMEOUT_SECONDS = 10
 
 # eBay's classic numeric condition IDs (config.EBAY_CONDITIONS) mapped to
 # the Inventory API's own ConditionEnum string values - confirmed against
@@ -90,6 +115,12 @@ def _api_base_url() -> str:
     return "https://api.ebay.com/sell/inventory/v1"
 
 
+def _metadata_base_url() -> str:
+    if config.EBAY_ENVIRONMENT == "sandbox":
+        return "https://api.sandbox.ebay.com/sell/metadata/v1"
+    return "https://api.ebay.com/sell/metadata/v1"
+
+
 async def get_access_token() -> str:
     """
     Returns a valid access token, transparently refreshing (via
@@ -121,6 +152,123 @@ async def get_access_token() -> str:
     _cached_access_token = body["access_token"]
     _cached_expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(body["expires_in"]))
     return _cached_access_token
+
+
+async def get_app_access_token() -> str:
+    """
+    Returns a valid *application* access token - a client_credentials grant
+    (App ID + Cert ID only, no user consent/refresh token involved) good for
+    public-data endpoints like the Metadata API's getItemConditionPolicies
+    below. Deliberately a separate cache from get_access_token()'s user
+    token above: different grant type, different scope, and this one needs
+    no EBAY_REFRESH_TOKEN at all, so it stays usable even for an app that
+    only ever calls public endpoints.
+    """
+    global _cached_app_token, _cached_app_token_expires_at
+
+    if _cached_app_token and datetime.now(timezone.utc) < _cached_app_token_expires_at - _REFRESH_SAFETY_MARGIN:
+        return _cached_app_token
+
+    auth = aiohttp.BasicAuth(config.EBAY_APP_ID, config.EBAY_CERT_ID)
+    data = {
+        "grant_type": "client_credentials",
+        "scope": "https://api.ebay.com/oauth/api_scope",
+    }
+    url = f"{_identity_base_url()}/identity/v1/oauth2/token"
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            url, data=data, auth=auth, headers={"Content-Type": "application/x-www-form-urlencoded"}
+        ) as resp:
+            body = await resp.json(content_type=None)
+            if resp.status != 200:
+                error_desc = body.get("error_description") or body.get("error") or body
+                raise EbayAPIError(f"eBay application token request failed ({resp.status}): {error_desc}")
+
+    _cached_app_token = body["access_token"]
+    _cached_app_token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(body["expires_in"]))
+    return _cached_app_token
+
+
+async def get_condition_policies(category_id: str) -> set:
+    """
+    Returns the set of condition-ID strings eBay's Metadata API says are
+    actually valid for `category_id`, via getItemConditionPolicies. Raises
+    EbayAPIError/TimeoutError/aiohttp errors on any failure - callers that
+    want the existing static-safe-set fallback behavior should catch those
+    themselves (see resolve_condition_id_with_live_check below), since a
+    bare lookup failure here shouldn't by itself decide what the fallback
+    is.
+    """
+    access_token = await get_app_access_token()
+    url = (
+        f"{_metadata_base_url()}/marketplace/{config.EBAY_MARKETPLACE_ID}/item_condition_policies"
+        f"?filter=categoryIds:{{{category_id}}}"
+    )
+    headers = {"Authorization": f"Bearer {access_token}"}
+    async with aiohttp.ClientSession() as session:
+        async with session.request("GET", url, headers=headers) as resp:
+            body = await resp.json(content_type=None)
+            if resp.status >= 300:
+                _raise_for_ebay_error(resp.status, body, "getItemConditionPolicies")
+
+    policies = body.get("itemConditionPolicies") or []
+    match = next((p for p in policies if str(p.get("categoryId")) == str(category_id)), None)
+    if match is None and policies:
+        match = policies[0]
+    if match is None:
+        raise EbayAPIError(f"eBay returned no item condition policy for category {category_id!r}: {body}")
+
+    return {str(c["conditionId"]) for c in (match.get("itemConditions") or []) if c.get("conditionId")}
+
+
+async def resolve_condition_id_with_live_check(category_id: str, condition_id: str, item_label: str) -> str:
+    """
+    Like ebay_csv.resolved_condition_id, but tries a real per-category
+    lookup via get_condition_policies() first instead of only checking the
+    hardcoded config.EBAY_BROADLY_ACCEPTED_CONDITION_IDS safe-set. Falls
+    back to that exact static check - never hard-fails a listing - if the
+    live lookup errors, times out, or (shouldn't happen, but) comes back
+    with no usable condition list, consistent with this bot's existing
+    "never hard-block on a flaky external dependency" approach (AI review's
+    own timeout+fallback, QuickBooks allocation's graceful failure).
+    """
+    try:
+        allowed = await asyncio.wait_for(
+            get_condition_policies(category_id), timeout=_CONDITION_POLICY_TIMEOUT_SECONDS
+        )
+    except Exception as exc:
+        print(
+            f"[ebay_api] {item_label}: live condition-policy lookup for category {category_id!r} "
+            f"failed ({exc!r}) - falling back to the static safe-set check."
+        )
+        return ebay_csv.resolved_condition_id(condition_id, item_label)
+
+    if not allowed:
+        print(
+            f"[ebay_api] {item_label}: live condition-policy lookup for category {category_id!r} "
+            f"returned no conditions - falling back to the static safe-set check."
+        )
+        return ebay_csv.resolved_condition_id(condition_id, item_label)
+
+    if condition_id in allowed:
+        return condition_id
+
+    fallback = config.EBAY_CONDITION_FALLBACK_ID if config.EBAY_CONDITION_FALLBACK_ID in allowed else next(
+        (cid for cid, _ in config.EBAY_CONDITIONS if cid in allowed), None
+    )
+    if fallback is None:
+        print(
+            f"[ebay_api] {item_label}: condition ID {condition_id!r} isn't eBay-valid for category "
+            f"{category_id!r} per the live lookup (allowed: {sorted(allowed)}), and none of this bot's "
+            f"known condition IDs are either - submitting {condition_id!r} unchanged and letting eBay reject it."
+        )
+        return condition_id
+
+    print(
+        f"[ebay_api] {item_label}: condition ID {condition_id!r} isn't eBay-valid for category "
+        f"{category_id!r} per the live lookup (allowed: {sorted(allowed)}) - falling back to {fallback!r}."
+    )
+    return fallback
 
 
 def _raise_for_ebay_error(resp_status: int, body: dict, context: str):
@@ -178,9 +326,11 @@ def _build_aspects(listing: dict, title: str, item_label: str) -> dict:
     return {key: [str(value)] for key, value in specifics.items()}
 
 
-def _build_inventory_item(item: dict, listing: dict, label: str) -> dict:
+async def _build_inventory_item(item: dict, listing: dict, label: str) -> dict:
     title = listing.get("ebay_title") or ""
-    condition_id = ebay_csv.resolved_condition_id(listing.get("condition_id") or config.EBAY_DEFAULT_CONDITION_ID, label)
+    condition_id = await resolve_condition_id_with_live_check(
+        listing.get("category_id") or "", listing.get("condition_id") or config.EBAY_DEFAULT_CONDITION_ID, label
+    )
     condition_enum = _CONDITION_ID_TO_ENUM.get(condition_id, "USED_EXCELLENT")
 
     weight_lb = listing.get("weight_lb")
@@ -268,7 +418,7 @@ async def create_listing(item: dict, listing: dict) -> dict:
     sku = ebay_csv.custom_label(item)
     label = sku
 
-    inventory_item = _build_inventory_item(item, listing, label)
+    inventory_item = await _build_inventory_item(item, listing, label)
     await _request("PUT", f"/inventory_item/{sku}", json_body=inventory_item)
 
     offer = _build_offer(item, listing, sku)

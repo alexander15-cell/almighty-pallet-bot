@@ -70,13 +70,18 @@ def _install_fake_session(monkeypatch, responder):
 
 @pytest.fixture(autouse=True)
 def _clear_token_cache():
-    """The access token cache is module-level state - reset it before and
-    after every test so one test's cached token can't leak into another's."""
+    """The access token caches are module-level state - reset them before
+    and after every test so one test's cached token(s) can't leak into
+    another's."""
     ebay_api._cached_access_token = None
     ebay_api._cached_expires_at = None
+    ebay_api._cached_app_token = None
+    ebay_api._cached_app_token_expires_at = None
     yield
     ebay_api._cached_access_token = None
     ebay_api._cached_expires_at = None
+    ebay_api._cached_app_token = None
+    ebay_api._cached_app_token_expires_at = None
 
 
 def _item(pallet_id=1, item_number=1, photo_urls=None):
@@ -144,6 +149,130 @@ def test_get_access_token_raises_on_error_response(monkeypatch):
         asyncio.run(ebay_api.get_access_token())
 
 
+# --------------------------------------------------------------- get_app_access_token
+
+
+def test_get_app_access_token_uses_client_credentials_grant(monkeypatch):
+    calls = _install_fake_session(monkeypatch, lambda m, u, d: (200, {"access_token": "app-tok-1", "expires_in": 7200}))
+    token = asyncio.run(ebay_api.get_app_access_token())
+    assert token == "app-tok-1"
+    assert len(calls) == 1
+    assert calls[0]["data"]["grant_type"] == "client_credentials"
+    assert calls[0]["data"]["scope"] == "https://api.ebay.com/oauth/api_scope"
+    assert "refresh_token" not in calls[0]["data"]
+
+
+def test_get_app_access_token_reuses_a_still_valid_cached_token(monkeypatch):
+    calls = _install_fake_session(monkeypatch, lambda m, u, d: (200, {"access_token": "app-tok-1", "expires_in": 7200}))
+    asyncio.run(ebay_api.get_app_access_token())
+    asyncio.run(ebay_api.get_app_access_token())
+    assert len(calls) == 1
+
+
+def test_app_token_cache_is_independent_of_user_token_cache(monkeypatch):
+    """Fetching the application token shouldn't populate (or be satisfied
+    by) the separate user-token cache get_access_token() uses, since
+    they're different grants with different scopes."""
+    calls = _install_fake_session(monkeypatch, lambda m, u, d: (200, {"access_token": "app-tok-1", "expires_in": 7200}))
+    asyncio.run(ebay_api.get_app_access_token())
+    assert ebay_api._cached_access_token is None
+    asyncio.run(ebay_api.get_access_token())
+    assert len(calls) == 2  # each grant type fetched its own token
+
+
+def test_get_app_access_token_raises_on_error_response(monkeypatch):
+    _install_fake_session(monkeypatch, lambda m, u, d: (400, {"error": "invalid_client", "error_description": "bad keys"}))
+    with pytest.raises(ebay_api.EbayAPIError, match="bad keys"):
+        asyncio.run(ebay_api.get_app_access_token())
+
+
+# --------------------------------------------------------------- get_condition_policies / resolve_condition_id_with_live_check
+
+
+def _condition_policy_responder(conditions):
+    def responder(method, url, body):
+        if "oauth2/token" in url:
+            return 200, {"access_token": "app-tok-1", "expires_in": 7200}
+        if method == "GET" and "/item_condition_policies" in url:
+            return 200, {
+                "itemConditionPolicies": [
+                    {"categoryId": "12345", "itemConditions": [{"conditionId": c} for c in conditions]},
+                ],
+            }
+        raise AssertionError(f"unexpected call: {method} {url}")
+
+    return responder
+
+
+def test_get_condition_policies_returns_the_live_allowed_set(monkeypatch):
+    _install_fake_session(monkeypatch, _condition_policy_responder(["1000", "1500"]))
+    allowed = asyncio.run(ebay_api.get_condition_policies("12345"))
+    assert allowed == {"1000", "1500"}
+
+
+def test_get_condition_policies_raises_when_category_has_no_match(monkeypatch):
+    def responder(method, url, body):
+        if "oauth2/token" in url:
+            return 200, {"access_token": "app-tok-1", "expires_in": 7200}
+        return 200, {"itemConditionPolicies": []}
+
+    _install_fake_session(monkeypatch, responder)
+    with pytest.raises(ebay_api.EbayAPIError, match="no item condition policy"):
+        asyncio.run(ebay_api.get_condition_policies("12345"))
+
+
+def test_resolve_condition_id_with_live_check_accepts_a_live_allowed_condition(monkeypatch):
+    """1500 isn't in the static EBAY_BROADLY_ACCEPTED_CONDITION_IDS safe-set,
+    but the live lookup here says it IS valid for this category - the live
+    check should win over the static fallback."""
+    _install_fake_session(monkeypatch, _condition_policy_responder(["1000", "1500"]))
+    resolved = asyncio.run(ebay_api.resolve_condition_id_with_live_check("12345", "1500", "test-item"))
+    assert resolved == "1500"
+
+
+def test_resolve_condition_id_with_live_check_falls_back_within_the_live_allowed_set(monkeypatch):
+    """1750 isn't allowed per the live lookup for this category, but 3000
+    (the usual static fallback) is - should fall back to 3000."""
+    _install_fake_session(monkeypatch, _condition_policy_responder(["3000", "7000"]))
+    resolved = asyncio.run(ebay_api.resolve_condition_id_with_live_check("12345", "1750", "test-item"))
+    assert resolved == "3000"
+
+
+def test_resolve_condition_id_with_live_check_falls_back_to_a_different_allowed_id_when_the_usual_fallback_isnt_live_allowed(monkeypatch):
+    """Neither the requested condition (1750) nor the usual static fallback
+    (3000) is in the live-allowed set for this category - should still pick
+    something this bot knows about (1000) rather than giving up."""
+    _install_fake_session(monkeypatch, _condition_policy_responder(["1000", "7000"]))
+    resolved = asyncio.run(ebay_api.resolve_condition_id_with_live_check("12345", "1750", "test-item"))
+    assert resolved == "1000"
+
+
+def test_resolve_condition_id_with_live_check_falls_back_to_static_check_on_lookup_failure(monkeypatch):
+    """The live lookup errors entirely (e.g. eBay 500s) - should fall back
+    to exactly ebay_csv.resolved_condition_id's static behavior rather than
+    raising or hard-failing the listing."""
+    def responder(method, url, body):
+        if "oauth2/token" in url:
+            return 200, {"access_token": "app-tok-1", "expires_in": 7200}
+        return 500, {"errors": [{"message": "Internal error"}]}
+
+    _install_fake_session(monkeypatch, responder)
+    resolved = asyncio.run(ebay_api.resolve_condition_id_with_live_check("12345", "1750", "test-item"))
+    assert resolved == "3000"
+
+
+def test_resolve_condition_id_with_live_check_falls_back_to_static_check_when_no_conditions_returned(monkeypatch):
+    _install_fake_session(monkeypatch, _condition_policy_responder([]))
+    resolved = asyncio.run(ebay_api.resolve_condition_id_with_live_check("12345", "1750", "test-item"))
+    assert resolved == "3000"
+
+
+def test_resolve_condition_id_with_live_check_accepts_a_statically_safe_condition_as_is(monkeypatch):
+    _install_fake_session(monkeypatch, _condition_policy_responder(["1000", "3000"]))
+    resolved = asyncio.run(ebay_api.resolve_condition_id_with_live_check("12345", "1000", "test-item"))
+    assert resolved == "1000"
+
+
 # --------------------------------------------------------------- create_listing
 
 
@@ -163,6 +292,11 @@ def test_create_listing_requires_publish_config(monkeypatch):
 def _happy_path_responder(method, url, body):
     if "oauth2/token" in url:
         return 200, {"access_token": "tok-1", "expires_in": 7200}
+    if method == "GET" and "/item_condition_policies" in url:
+        # No live condition data for these fake test category IDs - this
+        # exercises resolve_condition_id_with_live_check's fallback to the
+        # same static check the pre-existing tests below assume.
+        return 200, {"itemConditionPolicies": []}
     if method == "PUT" and "/inventory_item/" in url:
         return 200, {}
     if method == "POST" and url.endswith("/offer"):
@@ -178,7 +312,10 @@ def test_create_listing_happy_path_returns_the_real_ebay_item_id(monkeypatch):
     result = asyncio.run(ebay_api.create_listing(_item(), _listing()))
 
     assert result == {"ebay_item_id": "ebay-item-999"}
-    methods_and_urls = [(c["method"], c["url"]) for c in calls if "oauth2/token" not in c["url"]]
+    methods_and_urls = [
+        (c["method"], c["url"]) for c in calls
+        if "oauth2/token" not in c["url"] and "item_condition_policies" not in c["url"]
+    ]
     assert methods_and_urls == [
         ("PUT", f"{ebay_api._api_base_url()}/inventory_item/pallet-1-item-1"),
         ("POST", f"{ebay_api._api_base_url()}/offer"),
@@ -273,6 +410,8 @@ def test_create_listing_raises_if_offer_has_no_offer_id(monkeypatch):
     def responder(method, url, body):
         if "oauth2/token" in url:
             return 200, {"access_token": "tok-1", "expires_in": 7200}
+        if method == "GET" and "/item_condition_policies" in url:
+            return 200, {"itemConditionPolicies": []}
         if method == "PUT":
             return 200, {}
         if method == "POST" and url.endswith("/offer"):
