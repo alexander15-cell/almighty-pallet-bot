@@ -375,7 +375,14 @@ async def get_orders(since: datetime, limit: int = 50) -> list:
     the sell.fulfillment scope on EBAY_REFRESH_TOKEN, a different scope
     than the sell.inventory one listing creation uses, so this only works
     once that token's been re-consented with the wider scope list (see
-    README's eBay API section). Unlike search_categories/
+    README's eBay API section). Also sends X-EBAY-C-MARKETPLACE-ID
+    (config.EBAY_MARKETPLACE_ID) - unlike the Inventory/Metadata/Taxonomy
+    calls elsewhere in this file, the Fulfillment API rejects a request
+    missing this header with a permission-shaped 403 (errorId 1100,
+    "Insufficient permissions to fulfill the request") even with a token
+    that genuinely carries the right scope - confirmed against a real
+    account during this feature's rollout, not just eBay's docs. Unlike
+    search_categories/
     resolve_condition_id_with_live_check above, there's no local fallback
     for live order data - a failure here is raised as EbayAPIError, not
     swallowed, since the order-sync poll loop (cogs/ebay.py) is what
@@ -393,7 +400,7 @@ async def get_orders(since: datetime, limit: int = 50) -> list:
     since_iso = since.strftime("%Y-%m-%dT%H:%M:%S.000Z")
     filter_value = f"creationdate:[{since_iso}..]"
     url = f"{_fulfillment_base_url()}/order?filter={urllib.parse.quote(filter_value)}&limit={limit}"
-    headers = {"Authorization": f"Bearer {access_token}"}
+    headers = {"Authorization": f"Bearer {access_token}", "X-EBAY-C-MARKETPLACE-ID": config.EBAY_MARKETPLACE_ID}
     async with aiohttp.ClientSession() as session:
         async with session.request("GET", url, headers=headers) as resp:
             body = await resp.json(content_type=None)
@@ -424,7 +431,7 @@ async def get_order(order_id: str) -> dict:
     """
     access_token = await get_access_token()
     url = f"{_fulfillment_base_url()}/order/{urllib.parse.quote(order_id, safe='')}"
-    headers = {"Authorization": f"Bearer {access_token}"}
+    headers = {"Authorization": f"Bearer {access_token}", "X-EBAY-C-MARKETPLACE-ID": config.EBAY_MARKETPLACE_ID}
     async with aiohttp.ClientSession() as session:
         async with session.request("GET", url, headers=headers) as resp:
             body = await resp.json(content_type=None)

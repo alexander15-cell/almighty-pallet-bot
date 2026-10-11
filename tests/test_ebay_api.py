@@ -402,6 +402,16 @@ def test_get_orders_sends_the_refresh_token_grant_not_the_app_token(monkeypatch)
     assert token_call["data"]["grant_type"] == "refresh_token"
 
 
+def test_get_orders_sends_the_marketplace_id_header(monkeypatch):
+    """Fulfillment API rejects a request missing this header with a
+    permission-shaped 403 even with a correctly-scoped token - confirmed
+    against a real account, not just eBay's docs."""
+    calls = _install_fake_session(monkeypatch, _orders_responder([]))
+    asyncio.run(ebay_api.get_orders(_since()))
+    order_call = next(c for c in calls if "oauth2/token" not in c["url"])
+    assert order_call["headers"]["X-EBAY-C-MARKETPLACE-ID"] == config.EBAY_MARKETPLACE_ID
+
+
 def test_get_orders_skips_an_order_with_no_total(monkeypatch):
     raw_orders = [
         {"orderId": "1", "creationDate": "2026-02-03T15:22:10.000Z",
@@ -501,6 +511,17 @@ def test_get_order_includes_the_order_id_in_the_url(monkeypatch):
     asyncio.run(ebay_api.get_order("12-34567-89012"))
     order_call = next(c for c in calls if "oauth2/token" not in c["url"])
     assert "12-34567-89012" in order_call["url"]
+
+
+def test_get_order_sends_the_marketplace_id_header(monkeypatch):
+    raw_order = {
+        "orderId": "1", "creationDate": "2026-02-03T15:22:10.000Z",
+        "pricingSummary": {"total": {"value": "10.00"}}, "lineItems": [{"sku": "pallet-1-item-1"}],
+    }
+    calls = _install_fake_session(monkeypatch, _single_order_responder(raw_order))
+    asyncio.run(ebay_api.get_order("1"))
+    order_call = next(c for c in calls if "oauth2/token" not in c["url"])
+    assert order_call["headers"]["X-EBAY-C-MARKETPLACE-ID"] == config.EBAY_MARKETPLACE_ID
 
 
 def test_get_order_raises_when_order_has_no_usable_data(monkeypatch):
