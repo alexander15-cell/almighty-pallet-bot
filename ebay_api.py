@@ -19,7 +19,7 @@ One real listing is three sequential calls, per eBay's documented flow:
   2. createOffer                  (POST /offer)                -> offerId
   3. publishOffer                 (POST /offer/{offerId}/publish) -> listingId
 
-Reuses ebay_csv.py's hard-won field-level business rules (condition-ID
+Reuses ebay_listing_rules.py's hard-won field-level business rules (condition-ID
 fallback, Brand/MPN/Type "Does Not Apply" placeholders, category-keyword
 weight estimate) rather than re-deriving them - those were tuned against
 real eBay error codes from the CSV batch path, and the same category-level
@@ -32,7 +32,7 @@ confirmed against eBay's own condition-id-values reference page.
 
 Condition validity is also checked against eBay's real per-category data
 (getItemConditionPolicies, the Metadata API) before falling back to
-ebay_csv.py's coarser static safe-set check - see
+ebay_listing_rules.py's coarser static safe-set check - see
 resolve_condition_id_with_live_check. That lookup uses a second, separate
 OAuth grant from the listing calls above: an *application* token
 (client_credentials, scope api_scope - just EBAY_APP_ID/EBAY_CERT_ID, no
@@ -64,7 +64,7 @@ from datetime import datetime, timedelta, timezone
 import aiohttp
 
 import config
-import ebay_csv
+import ebay_listing_rules
 import ebay_taxonomy
 
 # Proactively refresh this long before the access token would actually
@@ -85,7 +85,7 @@ _cached_app_token: str = None
 _cached_app_token_expires_at: datetime = None
 
 # How long to wait for the Metadata API condition-policy lookup before
-# giving up and falling back to the static safe-set in ebay_csv.py - this
+# giving up and falling back to the static safe-set in ebay_listing_rules.py - this
 # is a nice-to-have accuracy improvement, never worth blocking a listing
 # over a slow/unreachable eBay endpoint.
 _CONDITION_POLICY_TIMEOUT_SECONDS = 10
@@ -280,7 +280,7 @@ async def get_condition_policies(category_id: str) -> set:
 
 async def resolve_condition_id_with_live_check(category_id: str, condition_id: str, item_label: str) -> str:
     """
-    Like ebay_csv.resolved_condition_id, but tries a real per-category
+    Like ebay_listing_rules.resolved_condition_id, but tries a real per-category
     lookup via get_condition_policies() first instead of only checking the
     hardcoded config.EBAY_BROADLY_ACCEPTED_CONDITION_IDS safe-set. Falls
     back to that exact static check - never hard-fails a listing - if the
@@ -298,14 +298,14 @@ async def resolve_condition_id_with_live_check(category_id: str, condition_id: s
             f"[ebay_api] {item_label}: live condition-policy lookup for category {category_id!r} "
             f"failed ({exc!r}) - falling back to the static safe-set check."
         )
-        return ebay_csv.resolved_condition_id(condition_id, item_label)
+        return ebay_listing_rules.resolved_condition_id(condition_id, item_label)
 
     if not allowed:
         print(
             f"[ebay_api] {item_label}: live condition-policy lookup for category {category_id!r} "
             f"returned no conditions - falling back to the static safe-set check."
         )
-        return ebay_csv.resolved_condition_id(condition_id, item_label)
+        return ebay_listing_rules.resolved_condition_id(condition_id, item_label)
 
     if condition_id in allowed:
         return condition_id
@@ -574,7 +574,7 @@ async def _request(method: str, path: str, *, json_body: dict = None, extra_head
 
 def _build_aspects(listing: dict, title: str, item_label: str) -> dict:
     """
-    Mirrors ebay_csv.append_item_to_batch's Brand/MPN/Type handling exactly -
+    The same Brand/MPN/Type handling the removed CSV batch path used -
     see that function's own comments for why these three always need a real
     value (confirmed via real-upload error codes, not a style preference).
     Inventory API aspects are Map<String, List<String>>, so every value gets
@@ -592,7 +592,7 @@ def _build_aspects(listing: dict, title: str, item_label: str) -> dict:
 
     type_key = next((k for k in specifics if k.strip().lower() == "type"), None)
     if not (type_key and specifics[type_key]):
-        inferred_type = ebay_csv.infer_type(title)
+        inferred_type = ebay_listing_rules.infer_type(title)
         specifics[type_key or "Type"] = inferred_type or "Does Not Apply"
         if not inferred_type:
             print(f"[ebay_api] {item_label}: couldn't infer a Type from the title {title!r} - using 'Does Not Apply'.")
@@ -610,7 +610,7 @@ async def _build_inventory_item(item: dict, listing: dict, label: str) -> dict:
     weight_lb = listing.get("weight_lb")
     if weight_lb is None:
         category_path = ebay_taxonomy.get_path(listing.get("category_id")) or ""
-        weight_lb = ebay_csv.estimated_weight_lb(category_path or title)
+        weight_lb = ebay_listing_rules.estimated_weight_lb(category_path or title)
         print(f"[ebay_api] {label}: no captured weight - estimating {weight_lb:g} lb.")
 
     package = {"weight": {"value": weight_lb, "unit": "POUND"}}
@@ -689,7 +689,7 @@ async def create_listing(item: dict, listing: dict) -> dict:
         raise NotImplementedError("Direct eBay API listing is disabled (config.EBAY_ENABLED is False).")
     _require_publish_config()
 
-    sku = ebay_csv.custom_label(item)
+    sku = ebay_listing_rules.custom_label(item)
     label = sku
 
     inventory_item = await _build_inventory_item(item, listing, label)

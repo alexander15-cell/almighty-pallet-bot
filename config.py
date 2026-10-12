@@ -166,8 +166,6 @@ SHARED_STAGE_CHANNELS = [
     "automated-review",
     "queue-review",
     "awaiting-listing",
-    "pending-ebay-upload",
-    "pending-fb-marketplace-upload",
     "listed",
     "sold",
     "hold",
@@ -240,8 +238,6 @@ CHANNEL_ROLE_PERMISSIONS = {
     "automated-review": [],  # bot-only channel, humans don't need post access
     "queue-review": [ROLE_QUEUE_REVIEW],
     "awaiting-listing": [ROLE_LISTING_MGMT],
-    "pending-ebay-upload": [ROLE_LISTING_MGMT],
-    "pending-fb-marketplace-upload": [ROLE_LISTING_MGMT],
     "listed": [ROLE_LISTING_MGMT],
     "sold": [ROLE_LISTING_MGMT],
     "hold": [ROLE_LISTING_MGMT, ROLE_QUEUE_REVIEW],
@@ -294,25 +290,10 @@ CHANNEL_INFO = {
     ),
     "awaiting-listing": (
         "**Listing Management role** works here. These items were approved in Queue Review "
-        "(with eBay title/category/condition/price already captured). Click **Add to eBay "
-        "Batch** or **Add to FB Marketplace Batch** to append it to that platform's CSV batch "
-        "(or **List on eBay (API)** if the direct API is enabled), or **Mark Listed (Other)** "
-        "once you've listed it manually somewhere else entirely."
-    ),
-    "pending-ebay-upload": (
-        "**Listing Management role** works here. Items land here after **Add to eBay Batch** on "
-        "an Awaiting Listing card, sitting in the CSV batch waiting for someone to run "
-        "`/ebay export-batch` and upload it in eBay Seller Hub. Once eBay actually shows one live, "
-        "tap **Confirm Listed** on its card (or run `/ebay confirm-listed` to confirm a whole "
-        "pallet at once) to move it into #listed - there's no live API to detect that automatically."
-    ),
-    "pending-fb-marketplace-upload": (
-        "**Listing Management role** works here. Items land here after **Add to FB Marketplace "
-        "Batch** on an Awaiting Listing card, sitting in the CSV batch waiting for someone to run "
-        "`/fb-marketplace export-batch` and upload it to Facebook's bulk listing tool. Once it's "
-        "actually live, tap **Confirm Listed** on its card (or run `/fb-marketplace confirm-listed` "
-        "to confirm a whole pallet at once) to move it into #listed - there's no API to detect "
-        "that automatically."
+        "(with eBay title/category/condition/price already captured). Click **List on eBay** "
+        "to put it live on eBay through the API, **Edit Details** to fix the title/price/"
+        "item specifics first, or **Mark Listed (Other)** once you've listed it somewhere "
+        "else entirely."
     ),
     "listed": (
         "**Listing Management role** works here. These items are currently live for "
@@ -451,7 +432,7 @@ ANTHROPIC_MODEL = "claude-sonnet-5"
 # currently have items in them. Must match the STATUS_* constants in database.py.
 STAGE_ORDER_FOR_STATUS = [
     "data_entry", "automated_review", "queue_review", "awaiting_listing",
-    "pending_ebay_upload", "pending_fb_marketplace_upload", "listed", "sold", "shipped",
+    "listed", "sold", "shipped",
     "on_hold", "rejected", "deleted",
 ]
 
@@ -481,14 +462,11 @@ EBAY_MARKETPLACE_ID = os.getenv("EBAY_MARKETPLACE_ID", "EBAY_US")
 # The Inventory API needs a merchantLocationKey identifying a real inventory
 # location already created on this seller account (Seller Hub, or eBay's
 # Account API createInventoryLocation - one-time setup, not something this
-# bot does for you) - distinct from EBAY_ITEM_LOCATION below, which is just
-# free text for the older CSV batch path. Required to publish an offer;
+# bot does for you). Required to publish an offer;
 # create_listing() raises a clear error naming this if it's blank.
 EBAY_MERCHANT_LOCATION_KEY = os.getenv("EBAY_MERCHANT_LOCATION_KEY", "").strip()
 
-# Business Policy IDs (not names - the CSV path's EBAY_SHIPPING_PROFILE_NAME/
-# EBAY_RETURN_PROFILE_NAME/EBAY_PAYMENT_PROFILE_NAME below are a different,
-# name-based mechanism used only by ebay_csv.py). Find these via eBay's
+# Business Policy IDs. Find these via eBay's
 # Account API (GET /sell/account/v1/fulfillment_policy, .../payment_policy,
 # .../return_policy) or Seller Hub > Business Policies - each policy's ID is
 # shown alongside its name. Required to publish an offer; create_listing()
@@ -497,11 +475,10 @@ EBAY_FULFILLMENT_POLICY_ID = os.getenv("EBAY_FULFILLMENT_POLICY_ID", "").strip()
 EBAY_PAYMENT_POLICY_ID = os.getenv("EBAY_PAYMENT_POLICY_ID", "").strip()
 EBAY_RETURN_POLICY_ID = os.getenv("EBAY_RETURN_POLICY_ID", "").strip()
 
-# Whether the direct eBay API listing path ("List on eBay (API)" on Awaiting
-# Listing cards) is usable at all. False until EBAY_APP_ID/EBAY_CERT_ID/
-# EBAY_REFRESH_TOKEN are all set; until then that button doesn't even show
-# up, and the only way to get an item onto eBay is the CSV batch path (see
-# ebay_csv.py and /ebay export-batch). EBAY_MERCHANT_LOCATION_KEY and the
+# Whether the eBay API ("List on eBay" on Awaiting Listing cards, order sync,
+# fees, category search, ...) is usable at all. False until EBAY_APP_ID/
+# EBAY_CERT_ID/EBAY_REFRESH_TOKEN are all set; until then that button doesn't
+# even show up (/ebay status shows what's missing). EBAY_MERCHANT_LOCATION_KEY and the
 # three policy IDs above are checked separately, at call time (not here),
 # since a missing one should fail with a specific "which value is missing"
 # message rather than silently hiding the button the same way as a missing
@@ -544,11 +521,10 @@ EBAY_CONDITIONS = [
 EBAY_CONDITION_LABELS = dict(EBAY_CONDITIONS)
 EBAY_DEFAULT_CONDITION_ID = "1500"  # "New other (see details)" - most liquidation items land here
 
-# Condition IDs eBay broadly accepts across most categories - checked in
-# ebay_csv.py before writing *ConditionID on an outbound row. Real per-
-# category valid-condition lists vary and would need live eBay API access
-# (GetCategoryFeatures - see ebay_api.py, pending dev approval) to check
-# properly - but eBay's own official ConditionEnum reference is explicit
+# Condition IDs eBay broadly accepts across most categories - the fallback
+# check (ebay_listing_rules.resolved_condition_id) used when eBay's live
+# per-category condition lookup (ebay_api.resolve_condition_id_with_live_check)
+# fails. eBay's own official ConditionEnum reference is explicit
 # about which ones are safe regardless: only 1000 (New) and 3000 (Used)
 # carry the "Most categories support this condition" language. Every other
 # ID - including 1500 "New other" (real upload evidence: rejected outright
@@ -570,18 +546,9 @@ EBAY_BROADLY_ACCEPTED_CONDITION_IDS = {"1000", "3000"}
 # IDs eBay's own docs back as broadly accepted.
 EBAY_CONDITION_FALLBACK_ID = "3000"
 
-# How many days out from export every listing in an eBay batch CSV gets
-# scheduled to start (ebay_csv.py's ScheduleTime column, stamped once at
-# export_and_archive() time - not when each item was individually added to
-# the batch, since a batch can sit for a while before it's actually
-# uploaded, and eBay rejects a ScheduleTime that's already passed by the
-# time File Exchange processes it). eBay allows scheduling up to 3 weeks
-# out, so 7 days leaves plenty of room.
-EBAY_LISTING_SCHEDULE_DELAY_DAYS = 7
-
-# eBay File Exchange's *Duration values for an Auction-format listing (fixed-
-# price listings always use "GTC" - Good 'Til Cancelled - handled separately
-# in ebay_csv.py). Shown as a Discord select menu, only when the reviewer
+# Auction durations (fixed-price listings are always Good 'Til Cancelled),
+# stored in eBay's classic "Days_N" form and translated for the Inventory API
+# in ebay_api.py. Shown as a Discord select menu, only when the reviewer
 # picks "Auction" as the format during Queue Review approval.
 EBAY_AUCTION_DURATIONS = [
     ("Days_3", "3 days"),
@@ -601,38 +568,16 @@ EBAY_AUCTION_DURATIONS = [
 # genuine listable leaf category straight from eBay's own data - there's
 # nothing to hand-configure or keep correcting here anymore.
 
-# ---- eBay CSV batch (classic File Exchange "Add" template - see ebay_csv.py) ----
-# Accumulates one row per item added via "Add to eBay Batch" until an admin
-# runs /ebay export-batch, which hands it over as a Discord attachment and
-# archives + clears it so the next batch starts clean. This is eBay's
-# classic File Exchange "Add" template - a single ready-to-upload file built
-# entirely from data Queue Review already captured (title/category/
-# condition/price/weight/dimensions/specifics), not eBay's newer AI-prefill
-# tool's 2-step suggest-then-review round trip (that tool is still available
-# by hand if anyone wants it - see /ebay fill-recommendations - just no
-# longer what this batch is built for).
-EBAY_BATCH_CSV_PATH = os.getenv("EBAY_BATCH_CSV_PATH", "data/ebay_batch.csv")
+# ---- Removed eBay CSV / Facebook Marketplace batch paths ----
+# Every eBay listing goes through the API now. These two folders are only
+# kept so backups (backup.py) still include the CSV files those removed
+# paths archived, if any exist - nothing writes to them anymore.
 EBAY_BATCH_ARCHIVE_DIR = os.getenv("EBAY_BATCH_ARCHIVE_DIR", "data/ebay_batch_archive")
+FB_MARKETPLACE_BATCH_ARCHIVE_DIR = os.getenv("FB_MARKETPLACE_BATCH_ARCHIVE_DIR", "data/fb_marketplace_batch_archive")
 
-# eBay Business Policy names (Seller Hub > Account > Business Policies) -
-# written into every row's ShippingProfileName/ReturnProfileName/
-# PaymentProfileName columns. Without these (or the older manual shipping
-# fields this replaces), eBay rejects an "Add" row outright once a
-# Calculated-shipping policy is attached to the account. If any of these
-# policies are ever renamed in Seller Hub, update the matching value here to
-# match - eBay matches by exact name, not by an internal ID.
-EBAY_SHIPPING_PROFILE_NAME = os.getenv("EBAY_SHIPPING_PROFILE_NAME", "Shipping")
-EBAY_RETURN_PROFILE_NAME = os.getenv("EBAY_RETURN_PROFILE_NAME", "Returns")
-EBAY_PAYMENT_PROFILE_NAME = os.getenv("EBAY_PAYMENT_PROFILE_NAME", "Payment")
-
-# Ship-from ZIP code, written into every row's PostalCode column. Required
-# once a Calculated-shipping policy is attached (error 216007, "valid postal
-# code") - the *Location column alone isn't enough once policies are in use.
-EBAY_SHIP_FROM_POSTAL_CODE = os.getenv("EBAY_SHIP_FROM_POSTAL_CODE", "47380")  # Ridgeville, IN
-
-# Fallback weight (WeightMajor/WeightMinor), only used when an item has no
-# real captured weight_lb (Queue Review's weight field is optional - see
-# EbayListingModal, item_flow.py). Required once a Calculated-shipping
+# Fallback weight (ebay_listing_rules.estimated_weight_lb), only used when an
+# item has no real captured weight_lb (older items approved before weight
+# was required). Required once a Calculated-shipping
 # policy is attached (error 216121 otherwise). Keyed by a lowercase keyword
 # matched against the item's resolved eBay category path (ebay_taxonomy.
 # get_path) - first match wins. These are rough ESTIMATES, not real
@@ -649,13 +594,11 @@ EBAY_DEFAULT_WEIGHT_BY_CATEGORY_LB = {
 }
 EBAY_DEFAULT_WEIGHT_FALLBACK_LB = 2.0  # used when no category keyword above matches at all
 
-# Keyword -> eBay Aspect "Type" value, used to fill C:Type when an item has
+# Keyword -> eBay Aspect "Type" value, used to fill Type when an item has
 # no Type in its own item_specifics. Matched against the item's title
-# (lowercased) - first match wins. Unlike C:Brand, there's no safe generic
-# placeholder for Type (it's a real search/browse attribute, and a wrong
-# guess is worse than a blank one) - see ebay_csv._infer_type, which logs a
-# warning and leaves the column blank rather than guessing when nothing
-# here matches.
+# (lowercased) - first match wins - see ebay_listing_rules.infer_type;
+# ebay_api._build_aspects falls back to "Does Not Apply" when nothing here
+# matches.
 EBAY_TYPE_KEYWORDS = {
     "flush mount": "Flush Mount",
     "pendant": "Pendant",
@@ -669,38 +612,11 @@ EBAY_TYPE_KEYWORDS = {
     "carbon monoxide": "Carbon Monoxide Detector",
 }
 
-# ---- Facebook Marketplace CSV batch (see fb_marketplace_csv.py) ----
-# Same accumulate-then-export shape as the eBay batch above: one row per item
-# added via "Add to FB Marketplace Batch" until an admin runs
-# /fb-marketplace export-batch, which hands it over as a Discord attachment
-# and archives + clears it so the next batch starts clean. Matches Facebook's
-# own bulk-listing CSV template (Title/Price/Description are the columns
-# Facebook's help docs list as required; Photo URL is added here too using
-# the same R2-hosted public photo links the eBay batch uses - a listing with
-# no photo isn't very sellable - but wasn't in Facebook's own required-column
-# list, so double check its header name against Facebook's real downloaded
-# template and rename it here if theirs differs).
-FB_MARKETPLACE_BATCH_CSV_PATH = os.getenv("FB_MARKETPLACE_BATCH_CSV_PATH", "data/fb_marketplace_batch.csv")
-FB_MARKETPLACE_BATCH_ARCHIVE_DIR = os.getenv("FB_MARKETPLACE_BATCH_ARCHIVE_DIR", "data/fb_marketplace_batch_archive")
-
-# EBAY_ITEM_LOCATION is written into every outbound batch row's *Location
-# column (ebay_csv.py) - eBay rejects a row with no location ("No
-# <Item.Location> exists"). Left blank here just means an empty *Location
-# column, not a blocked export - fill it in by hand before uploading if so.
-#
-# EBAY_SHIPPING_SERVICE is unrelated to the outbound batch (that now uses
-# EBAY_SHIPPING_PROFILE_NAME above instead of a raw per-row shipping
-# service) - it's only used by /ebay fill-recommendations (see
-# ebay_recommendations.py) to help fill in eBay's own RETURNED
-# recommendations file from its separate AI-prefill tool.
-EBAY_ITEM_LOCATION = os.getenv("EBAY_ITEM_LOCATION", "").strip()
-EBAY_SHIPPING_SERVICE = os.getenv("EBAY_SHIPPING_SERVICE", "").strip()
-
 # ---- Pirate Ship CSV export (see pirate_ship_csv.py) ----
-# Only for "Other"-platform sales (FB Marketplace, website, etc.) that were
-# sold outside eBay - eBay sales don't need this, since Pirate Ship pulls
-# those directly via its own native eBay integration. Unlike the eBay batch,
-# there's no separate "add to batch" step: /pirate-ship export-batch queries
+# Only for "Other"-platform sales (website, etc.) that were sold outside
+# eBay - eBay sales don't need this, since Pirate Ship pulls those directly
+# via its own native eBay integration. There's no separate "add to batch"
+# step: /pirate-ship export-batch queries
 # the database directly for sold-but-not-yet-exported "Other" items each
 # time it runs, so nothing needs accumulating on disk between exports - only
 # where the resulting CSV gets archived for a paper trail.

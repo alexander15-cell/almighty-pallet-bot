@@ -43,9 +43,7 @@ import ai_review
 import discord_resilience
 import ebay_api
 import ebay_aspects
-import ebay_csv
 import ebay_taxonomy
-import fb_marketplace_csv
 import finance_utils
 import r2_storage
 import runtime_settings
@@ -644,14 +642,12 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
     modal cap.
 
     Weight/dimensions are mandatory (not optional like specifics) because
-    the Pirate Ship CSV export (pirate_ship_csv.py) needs them for accurate
-    shipping labels, and every approved item reaches this same modal
-    regardless of which platform it eventually sells on. eBay's own CSV
-    upload (ebay_csv.py) doesn't carry weight/condition/price/shipping data
-    at all any more - it uses eBay's newer AI-prefill bulk template, which
-    only wants SKU/photos/title/category/aspects; eBay suggests the rest
-    itself once the file's processed. Still worth capturing here: it's
-    useful business data regardless, and feeds Pirate Ship either way.
+    the eBay API listing's Calculated shipping and the Pirate Ship CSV
+    export (pirate_ship_csv.py) both need them, and every approved item
+    reaches this same modal regardless of where it eventually sells.
+
+    EditListingDetailsModal (the Awaiting Listing card's "Edit Details")
+    reuses this exact form and validation - only _submit differs.
 
     If there's no existing eBay listing data yet, price/weight/dimensions
     pre-fill from Automated Review's own rough estimates (items.
@@ -788,7 +784,7 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
         if errors:
             await interaction.response.send_message(
                 "⚠️ Couldn't save eBay listing data:\n" + "\n".join(f"- {e}" for e in errors) +
-                "\n\nClick **Approve** again to retry.",
+                "\n\nOpen the form again (**Approve** / **Edit Details**) to retry.",
                 ephemeral=True,
             )
             return
@@ -802,11 +798,26 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
             if key and value:
                 specifics[key] = value
 
+        await self._submit(interaction, title, price, specifics, weight_lb, length_in, width_in, height_in)
+
+    async def _submit(self, interaction, title, price, specifics, weight_lb, length_in, width_in, height_in):
         cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
         await cog.finalize_ebay_approval(
             interaction, self.item_id, self.condition_id, self.category_id, title, price, specifics,
             self.listing_format, self.auction_duration, weight_lb, length_in, width_in, height_in,
             source_message_id=self.source_message_id,
+        )
+
+
+class EditListingDetailsModal(EbayListingModal, title="Edit Listing Details"):
+    """The Awaiting Listing card's "Edit Details" - the Approve form again,
+    pre-filled with the saved details, saving them in place instead of
+    approving (see ItemFlow.save_listing_detail_edits)."""
+
+    async def _submit(self, interaction, title, price, specifics, weight_lb, length_in, width_in, height_in):
+        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
+        await cog.save_listing_detail_edits(
+            interaction, self.item_id, title, price, specifics, weight_lb, length_in, width_in, height_in,
         )
 
 
@@ -850,131 +861,39 @@ class QueueReviewView(discord.ui.View):
         await cog.reject_to_data_entry(interaction, self.item_id)
 
 
-class ConfirmEbayListedButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pallet_bot:confirm_ebay_listed:(?P<item_id>\d+)"):
-    """
-    Lets Listing Management confirm an item actually went live on eBay
-    directly from its card in the shared #pending-ebay-upload channel - a
-    DynamicItem (discord.py 2.4+, same pattern as cogs/finance.py's
-    AllocateChargeButton) rather than a plain view button so it keeps
-    working across bot restarts, keyed only by item_id in its custom_id.
-
-    Added because /ebay confirm-listed requires running inside that
-    specific pallet's own channel (item numbers aren't unique across
-    pallets, so the command needs that context to know which item #3 you
-    mean) - awkward when standing in a shared channel full of cards from
-    many different pallets at once and just wanting to confirm the one in
-    front of you. The slash command still works too, for bulk (confirm
-    every pending item in one pallet at once) - this button is the
-    one-at-a-time, "I'm already looking at this card" shortcut.
-    """
-
-    def __init__(self, item_id: int):
-        super().__init__(discord.ui.Button(
-            label="Confirm Listed", style=discord.ButtonStyle.green, emoji="✅",
-            custom_id=f"pallet_bot:confirm_ebay_listed:{item_id}",
-        ))
-        self.item_id = item_id
-
-    @classmethod
-    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: dict):
-        return cls(int(match["item_id"]))
-
-    async def callback(self, interaction: discord.Interaction):
-        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
-        if not await cog._require_role(interaction, config.ROLE_LISTING_MGMT):
-            return
-        item = db.get_item(self.item_id)
-        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_PENDING_EBAY_UPLOAD):
-            return
-        if not item or item["status"] != db.STATUS_PENDING_EBAY_UPLOAD:
-            await interaction.response.send_message(
-                "This item isn't waiting on an eBay batch upload anymore.", ephemeral=True
-            )
-            return
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        moved = await cog.confirm_ebay_pending_item(item, actor_id=interaction.user.id)
-        await finance_utils.refresh_finance_message(interaction.client, item["pallet_id"])
-        await interaction.followup.send(
-            "✅ Confirmed live on eBay. Moved to Listed." if moved
-            else "Couldn't confirm (status changed under us) - try again.",
-            ephemeral=True,
-        )
-
-
-class ConfirmFbMarketplaceListedButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pallet_bot:confirm_fb_listed:(?P<item_id>\d+)"):
-    """FB Marketplace counterpart to ConfirmEbayListedButton above - same
-    reasoning, same shape."""
-
-    def __init__(self, item_id: int):
-        super().__init__(discord.ui.Button(
-            label="Confirm Listed", style=discord.ButtonStyle.green, emoji="✅",
-            custom_id=f"pallet_bot:confirm_fb_listed:{item_id}",
-        ))
-        self.item_id = item_id
-
-    @classmethod
-    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: dict):
-        return cls(int(match["item_id"]))
-
-    async def callback(self, interaction: discord.Interaction):
-        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
-        if not await cog._require_role(interaction, config.ROLE_LISTING_MGMT):
-            return
-        item = db.get_item(self.item_id)
-        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD):
-            return
-        if not item or item["status"] != db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD:
-            await interaction.response.send_message(
-                "This item isn't waiting on an FB Marketplace batch upload anymore.", ephemeral=True
-            )
-            return
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        moved = await cog.confirm_fb_marketplace_pending_item(item, actor_id=interaction.user.id)
-        await finance_utils.refresh_finance_message(interaction.client, item["pallet_id"])
-        await interaction.followup.send(
-            "✅ Confirmed live on FB Marketplace. Moved to Listed." if moved
-            else "Couldn't confirm (status changed under us) - try again.",
-            ephemeral=True,
-        )
-
-
 class AwaitingListingView(discord.ui.View):
     """
-    Four ways an approved item actually gets listed:
-      - Add to eBay Batch: appends it to the CSV batch for eBay's Seller Hub
-        bulk-upload tool (no API call) and moves it to pending-ebay-upload.
-      - Add to FB Marketplace Batch: same idea, for Facebook's own CSV bulk
-        listing tool - moves it to pending-fb-marketplace-upload.
-      - List on eBay (API): the live direct-API path, only shown at all once
-        config.EBAY_ENABLED is True (real eBay dev credentials are set).
-      - Mark Listed (Other): manual path for anywhere else entirely (a
-        website, in person, etc.) - moves straight to Listed.
+    How an approved item gets listed:
+      - List on eBay: the direct eBay API listing (ebay_api.create_listing) -
+        live in seconds, listing ID recorded, straight to Listed. Only shown
+        once config.EBAY_ENABLED is True.
+      - Edit Details: reopen the Approve form (title, price, weight,
+        dimensions, item specifics) to fix something before listing - e.g.
+        a specific eBay says is required, or a listing eBay rejected.
+      - Mark Listed (Other): listed somewhere else entirely (a website, in
+        person, etc.) - moves straight to Listed.
+    (The eBay CSV batch and Facebook Marketplace CSV paths were removed -
+    every eBay listing goes through the API now.)
     """
 
     def __init__(self, item_id: int):
         super().__init__(timeout=None)
         self.item_id = item_id
-        self.add_to_batch.custom_id = f"pallet_bot:ebay_batch:{item_id}"
-        self.add_to_fb_batch.custom_id = f"pallet_bot:fb_marketplace_batch:{item_id}"
         self.list_via_api.custom_id = f"pallet_bot:ebay_api_list:{item_id}"
+        self.edit_details.custom_id = f"pallet_bot:edit_listing:{item_id}"
         self.mark_listed_other.custom_id = f"pallet_bot:mark_listed:{item_id}"
         if not config.EBAY_ENABLED:
             self.remove_item(self.list_via_api)
 
-    @discord.ui.button(label="Add to eBay Batch", style=discord.ButtonStyle.blurple, emoji="🛒")
-    async def add_to_batch(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
-        await cog.add_to_ebay_batch(interaction, self.item_id)
-
-    @discord.ui.button(label="Add to FB Marketplace Batch", style=discord.ButtonStyle.blurple, emoji="📘")
-    async def add_to_fb_batch(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
-        await cog.add_to_fb_marketplace_batch(interaction, self.item_id)
-
-    @discord.ui.button(label="List on eBay (API)", style=discord.ButtonStyle.gray, emoji="🔌")
+    @discord.ui.button(label="List on eBay", style=discord.ButtonStyle.blurple, emoji="🛒")
     async def list_via_api(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
         await cog.list_on_ebay_api(interaction, self.item_id)
+
+    @discord.ui.button(label="Edit Details", style=discord.ButtonStyle.gray, emoji="✏️")
+    async def edit_details(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog: "ItemFlow" = interaction.client.get_cog("ItemFlow")
+        await cog.open_edit_listing_details(interaction, self.item_id)
 
     @discord.ui.button(label="Mark Listed (Other)", style=discord.ButtonStyle.green, emoji="🏷️")
     async def mark_listed_other(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1063,7 +982,7 @@ def _channel_and_view_for_status(item_id: int, status: str):
     The channel "stage" key and matching persistent view for reposting an
     item's card at `status` - the exact same channel+view every other
     stage transition already posts a card with (finalize_ebay_approval,
-    add_to_ebay_batch, move_to_listed, etc.), factored out here so
+    list_on_ebay_api, move_to_listed, etc.), factored out here so
     ItemFlow.place_item_on_hold/resolve_item_hold reuse it instead of
     re-deciding it. Returns (None, None) for any status this bot doesn't
     post a live, actionable card for (data_entry, automated_review,
@@ -1074,14 +993,6 @@ def _channel_and_view_for_status(item_id: int, status: str):
         return "queue-review", QueueReviewView(item_id)
     if status == db.STATUS_AWAITING_LISTING:
         return "awaiting-listing", AwaitingListingView(item_id)
-    if status == db.STATUS_PENDING_EBAY_UPLOAD:
-        view = discord.ui.View(timeout=None)
-        view.add_item(ConfirmEbayListedButton(item_id))
-        return "pending-ebay-upload", view
-    if status == db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD:
-        view = discord.ui.View(timeout=None)
-        view.add_item(ConfirmFbMarketplaceListedButton(item_id))
-        return "pending-fb-marketplace-upload", view
     if status == db.STATUS_LISTED:
         return "listed", ListedView(item_id)
     if status == db.STATUS_SOLD:
@@ -1093,8 +1004,8 @@ def _channel_and_view_for_status(item_id: int, status: str):
 # status that has a real "resting" card (or, for Automated Review, a
 # re-run of the AI review) to send the item to. Deliberately excludes Sold
 # (that's Mark as Sold's own dedicated flow, which also needs a sale
-# platform), On Hold (its own /item hold command), and the pending-upload/
-# rejected/deleted statuses (transient or already have a dedicated path).
+# platform), On Hold (its own /item hold command), and the rejected/deleted
+# statuses (already have a dedicated path).
 MOVE_BACK_STAGE_LABELS = [
     (db.STATUS_DATA_ENTRY, "Data Entry"),
     (db.STATUS_AUTOMATED_REVIEW, "Automated Review (re-run AI)"),
@@ -1134,10 +1045,11 @@ class HoldResolvedButton(discord.ui.DynamicItem[discord.ui.Button], template=r"p
     it would normally be sitting at this point in the pipeline - wherever
     it was right before being put on hold (see _channel_and_view_for_status
     and database.resolve_item_hold) - a DynamicItem, same pattern as
-    ConfirmEbayListedButton, so it keeps working across bot restarts.
+    cogs/finance.py's AllocateChargeButton, so it keeps working across bot
+    restarts.
 
     No extra "are you sure?" step - none of this bot's other resolve-type
-    buttons (Confirm Listed, Mark Listed, Mark as Sold) have one either, so
+    buttons (Mark Listed, Mark as Sold) have one either, so
     this matches that existing pattern rather than inventing a new one.
     """
 
@@ -1181,7 +1093,7 @@ class ItemFlow(commands.Cog):
         if not config.PRESERVE_DISCORD_HISTORY:
             self.stale_check_loop.start()
             self.ai_retry_backlog_loop.start()
-        self.bot.add_dynamic_items(ConfirmEbayListedButton, ConfirmFbMarketplaceListedButton, HoldResolvedButton)
+        self.bot.add_dynamic_items(HoldResolvedButton)
 
     def cog_unload(self):
         self.stale_check_loop.cancel()
@@ -1691,8 +1603,8 @@ class ItemFlow(commands.Cog):
         """A warning line naming item specifics eBay REQUIRES for this
         category that are still blank, or "" (including whenever eBay's list
         can't be fetched - this only ever adds information, never blocks).
-        Brand/MPN/Type are left out: the export always fills those itself
-        (a real value or "Does Not Apply", see ebay_csv.py)."""
+        Brand/MPN/Type are left out: the API listing always fills those
+        itself (a real value or "Does Not Apply", see ebay_api._build_aspects)."""
         aspects = await ebay_aspects.get_category_aspects(category_id)
         auto_filled = {"brand", "mpn", "type"}
         missing = [n for n in ebay_aspects.missing_required(aspects, specifics) if n.lower() not in auto_filled]
@@ -1701,117 +1613,15 @@ class ItemFlow(commands.Cog):
         names = ", ".join(missing[:10])
         return (
             f"\n⚠️ eBay **requires** these item specifics for this category, still blank: **{names}**. "
-            f"eBay may reject the listing without them - add them with `/ebay retry-item {item_number} "
-            f"specifics:\"Name=Value, ...\"` once it's in the eBay batch."
+            f"eBay may reject the listing without them - add them with **Edit Details** on item "
+            f"#{item_number}'s Awaiting Listing card before listing."
         )
-
-    async def add_to_ebay_batch(self, interaction: discord.Interaction, item_id: int):
-        """'Add to eBay Batch' - the CSV fallback path. Never calls any eBay
-        API; just appends a row and moves the item to pending-ebay-upload
-        until an admin confirms via /ebay confirm-listed that eBay actually
-        processed the uploaded CSV."""
-        if not await self._require_role(interaction, config.ROLE_LISTING_MGMT):
-            return
-        item = db.get_item(item_id)
-        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_AWAITING_LISTING):
-            return
-        if item["status"] != db.STATUS_AWAITING_LISTING:
-            await interaction.response.send_message(
-                f"This item was already moved on (current status: {item['status']}).", ephemeral=True
-            )
-            return
-        listing = db.get_ebay_listing_data(item_id)
-        if not listing:
-            await interaction.response.send_message(
-                "No eBay listing data was captured for this item during Queue Review "
-                "(it may predate this feature). Use **Mark Listed (Other)** instead, or "
-                "have Queue Review re-approve it with the eBay details filled in.",
-                ephemeral=True,
-            )
-            return
-
-        # From here on: CSV file I/O plus posting a new card (photo uploads)
-        # and clearing the old one - real work that can exceed the 3-second
-        # window for the interaction's FIRST response. Defer now, before any
-        # of it, and use a followup for the final confirmation instead.
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
-        ebay_csv.append_item_to_batch(item, listing)
-
-        pallet_id = item["pallet_id"]
-        channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "pending-ebay-upload"))
-        pending_view = discord.ui.View(timeout=None)
-        pending_view.add_item(ConfirmEbayListedButton(item_id))
-        msg = await send_item_card(
-            channel, item, view=pending_view,
-            extra_text="🛒 Added to the eBay CSV batch - waiting for someone to run "
-                       "/ebay export-batch, upload it in Seller Hub, then tap **Confirm Listed** "
-                       "below once it's live.",
-        )
-        db.update_status(item_id, db.STATUS_PENDING_EBAY_UPLOAD, actor_id=interaction.user.id, new_message_id=msg.id)
-        await self._clear_old_card(interaction.message, item_id, "add to eBay batch")
-        await interaction.followup.send(
-            f"Added to the eBay batch CSV. Moved to <#{channel.id}> pending upload confirmation.",
-            ephemeral=True,
-        )
-        await finance_utils.refresh_finance_message(self.bot, pallet_id)
-
-    async def add_to_fb_marketplace_batch(self, interaction: discord.Interaction, item_id: int):
-        """'Add to FB Marketplace Batch' - the CSV path for Facebook's bulk
-        listing tool, mirroring add_to_ebay_batch above. Reuses the same
-        title/price captured for every approved item during Queue Review
-        (see database.save_ebay_listing_data's docstring - that data isn't
-        eBay-specific despite the table name)."""
-        if not await self._require_role(interaction, config.ROLE_LISTING_MGMT):
-            return
-        item = db.get_item(item_id)
-        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_AWAITING_LISTING):
-            return
-        if item["status"] != db.STATUS_AWAITING_LISTING:
-            await interaction.response.send_message(
-                f"This item was already moved on (current status: {item['status']}).", ephemeral=True
-            )
-            return
-        listing = db.get_ebay_listing_data(item_id)
-        if not listing:
-            await interaction.response.send_message(
-                "No listing data was captured for this item during Queue Review "
-                "(it may predate this feature). Use **Mark Listed (Other)** instead, or "
-                "have Queue Review re-approve it with the listing details filled in.",
-                ephemeral=True,
-            )
-            return
-
-        # See add_to_ebay_batch's identical comment above - defer before the
-        # CSV write and card posting, not after.
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
-        fb_marketplace_csv.append_item_to_batch(item, listing)
-
-        pallet_id = item["pallet_id"]
-        channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "pending-fb-marketplace-upload"))
-        pending_view = discord.ui.View(timeout=None)
-        pending_view.add_item(ConfirmFbMarketplaceListedButton(item_id))
-        msg = await send_item_card(
-            channel, item, view=pending_view,
-            extra_text="📘 Added to the FB Marketplace CSV batch - waiting for someone to run "
-                       "/fb-marketplace export-batch, upload it to Facebook, then tap **Confirm "
-                       "Listed** below once it's live.",
-        )
-        db.update_status(
-            item_id, db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD, actor_id=interaction.user.id, new_message_id=msg.id
-        )
-        await self._clear_old_card(interaction.message, item_id, "add to FB Marketplace batch")
-        await interaction.followup.send(
-            f"Added to the FB Marketplace batch CSV. Moved to <#{channel.id}> pending upload confirmation.",
-            ephemeral=True,
-        )
-        await finance_utils.refresh_finance_message(self.bot, pallet_id)
 
     async def list_on_ebay_api(self, interaction: discord.Interaction, item_id: int):
-        """'List on eBay (API)' - the direct-API path, only reachable at all
-        once config.EBAY_ENABLED is True (the button is removed from the view
-        otherwise). See ebay_api.py."""
+        """'List on eBay' - creates the live listing through eBay's Sell
+        Inventory API (ebay_api.create_listing) and moves the item straight
+        to Listed with its real eBay listing ID. Only reachable once
+        config.EBAY_ENABLED is True (the button is removed otherwise)."""
         if not config.EBAY_ENABLED:
             await interaction.response.send_message("Direct eBay API listing isn't enabled.", ephemeral=True)
             return
@@ -1839,11 +1649,19 @@ class ItemFlow(commands.Cog):
             await interaction.followup.send(f"⚠️ {e}", ephemeral=True)
             return
         except Exception as e:
-            await interaction.followup.send(f"eBay API listing failed: {e}", ephemeral=True)
+            await interaction.followup.send(
+                f"eBay API listing failed: {e}\nFix the details with **Edit Details** on the card, then try "
+                f"**List on eBay** again. (For a wrong category or condition, `/item move-back` it to Queue "
+                f"Review and approve it again.)",
+                ephemeral=True,
+            )
             return
 
         if result.get("ebay_item_id"):
             db.set_ebay_item_id(item_id, result["ebay_item_id"])
+        # A real, live listing - so the category picker can trust this
+        # category as "proven to work on eBay" and sort it first.
+        db.record_ebay_category_confirmed(listing["category_id"])
 
         pallet_id = item["pallet_id"]
         channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
@@ -1858,81 +1676,59 @@ class ItemFlow(commands.Cog):
         await interaction.followup.send(f"Listed live on eBay. See <#{channel.id}>.", ephemeral=True)
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
 
-    async def confirm_ebay_pending_item(self, item: dict, actor_id: int, ebay_item_id: str = None) -> bool:
-        """
-        Used by /ebay confirm-listed and /ebay import-results (cogs/ebay.py)
-        once an item from a CSV batch is confirmed to have actually gone
-        live on eBay - either by hand after checking Seller Hub, or parsed
-        from a downloaded results CSV. Moves it from pending_ebay_upload
-        straight to Listed, and records the real eBay listing ID when one's
-        known. Returns False (does nothing) if the item isn't actually
-        pending anymore.
-        """
-        if item["status"] != db.STATUS_PENDING_EBAY_UPLOAD:
-            return False
+    async def open_edit_listing_details(self, interaction: discord.Interaction, item_id: int):
+        """'Edit Details' on an Awaiting Listing card - reopens the Approve
+        form (title, price, weight, dimensions, item specifics) pre-filled
+        with what's saved, keeping the item's condition/category/format."""
+        if not await self._require_role(interaction, config.ROLE_LISTING_MGMT):
+            return
+        item = db.get_item(item_id)
+        if not await recovery_safety.require_current_card(interaction, item, db.STATUS_AWAITING_LISTING):
+            return
+        if item["status"] != db.STATUS_AWAITING_LISTING:
+            await interaction.response.send_message(
+                f"This item was already moved on (current status: {item['status']}).", ephemeral=True
+            )
+            return
+        listing = db.get_ebay_listing_data(item_id)
+        if not listing:
+            await interaction.response.send_message(
+                "No listing details were saved for this item - move it back to Queue Review "
+                "(`/item move-back`) and approve it again.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(EditListingDetailsModal(
+            item_id, listing["condition_id"], listing["category_id"], listing["listing_format"],
+            listing["auction_duration"],
+        ))
 
-        if ebay_item_id:
-            db.set_ebay_item_id(item["id"], ebay_item_id)
-
-        listing = db.get_ebay_listing_data(item["id"])
-        if listing:
-            # Only a REAL confirmed listing bumps this - not just being
-            # picked during Queue Review - so the category select can trust
-            # it as "this category actually works on eBay" and sort/label
-            # it accordingly. This is the only such signal available
-            # without eBay API access to verify categories directly.
-            db.record_ebay_category_confirmed(listing["category_id"])
-
-        pallet_id = item["pallet_id"]
-        old_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "pending-ebay-upload"))
-        if old_channel and item.get("current_message_id"):
-            try:
-                old_msg = await old_channel.fetch_message(item["current_message_id"])
-            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-                old_msg = None
-            if old_msg:
-                await self._clear_old_card(old_msg, item["id"], "confirm eBay listed")
-
-        listed_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
-        view = ListedView(item["id"])
-        extra = f"✅ Confirmed live on eBay from batch upload (item ID: {ebay_item_id})." if ebay_item_id \
-            else "✅ Confirmed live on eBay from batch upload."
-        msg = await send_item_card(listed_channel, item, view=view, extra_text=extra,
-                                   destination_status=db.STATUS_LISTED)
-        db.update_status(item["id"], db.STATUS_LISTED, actor_id=actor_id, new_message_id=msg.id)
-        return True
-
-    async def confirm_fb_marketplace_pending_item(self, item: dict, actor_id: int) -> bool:
-        """
-        Used by /fb-marketplace confirm-listed once an item from a CSV batch
-        is confirmed to have actually gone live on Facebook Marketplace (by
-        hand - Facebook doesn't give back a results file the way eBay's
-        Seller Hub does, so there's no automated-reconciliation counterpart
-        to /ebay import-results here). Moves it from
-        pending_fb_marketplace_upload straight to Listed. Returns False
-        (does nothing) if the item isn't actually pending anymore.
-        """
-        if item["status"] != db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD:
-            return False
-
-        pallet_id = item["pallet_id"]
-        old_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "pending-fb-marketplace-upload"))
-        if old_channel and item.get("current_message_id"):
-            try:
-                old_msg = await old_channel.fetch_message(item["current_message_id"])
-            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-                old_msg = None
-            if old_msg:
-                await self._clear_old_card(old_msg, item["id"], "confirm FB Marketplace listed")
-
-        listed_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
-        view = ListedView(item["id"])
-        msg = await send_item_card(
-            listed_channel, item, view=view, extra_text="✅ Confirmed live on FB Marketplace from batch upload.",
-            destination_status=db.STATUS_LISTED,
+    async def save_listing_detail_edits(self, interaction: discord.Interaction, item_id: int, title: str,
+                                        price: float, specifics: dict, weight_lb: float, length_in: float,
+                                        width_in: float, height_in: float):
+        """Saves an Edit Details form - only the fields that form shows;
+        condition/category/format stay exactly as approved."""
+        item = db.get_item(item_id)
+        listing = db.get_ebay_listing_data(item_id)
+        if not item or item["status"] != db.STATUS_AWAITING_LISTING or not listing:
+            await interaction.response.send_message(
+                "This item isn't waiting to be listed anymore - nothing was changed.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        db.save_ebay_listing_data(
+            item_id, ebay_title=title, category_id=listing["category_id"], condition_id=listing["condition_id"],
+            price=price, item_specifics=specifics, listing_format=listing["listing_format"],
+            auction_duration=listing["auction_duration"], weight_lb=weight_lb, length_in=length_in,
+            width_in=width_in, height_in=height_in, actor_id=interaction.user.id,
         )
-        db.update_status(item["id"], db.STATUS_LISTED, actor_id=actor_id, new_message_id=msg.id)
-        return True
+        note = await self._missing_specifics_note(listing["category_id"], specifics, item["item_number"])
+        await interaction.followup.send(
+            f"✏️ Saved item #{item['item_number']}'s listing details (${price:.2f}). "
+            f"Tap **List on eBay** when ready.{note}",
+            ephemeral=True,
+        )
+        await finance_utils.refresh_finance_message(self.bot, item["pallet_id"])
 
     async def place_item_on_hold(self, item: dict, reason: str, note: str, actor_id: int) -> bool:
         """
@@ -2316,17 +2112,15 @@ class ItemFlow(commands.Cog):
     async def auto_mark_sold_from_ebay(self, item: dict, order_id: str, ebay_item_id: str = None) -> bool:
         """
         eBay order came in for this item -> Sold (platform eBay), exactly
-        like Mark as Sold + picking eBay. An item still in
-        pending_ebay_upload is first confirmed live (it obviously is - it
-        sold), via the same confirm_ebay_pending_item path /ebay
-        confirm-listed uses. Doesn't log anything to QuickBooks - that stays
-        the #ebay-orders card's human "Confirm & log sale" click.
+        like Mark as Sold + picking eBay. Records the eBay listing ID if
+        this item doesn't have one yet. Doesn't log anything to QuickBooks -
+        that stays the #ebay-orders card's human "Confirm & log sale" click.
         """
-        if item["status"] == db.STATUS_PENDING_EBAY_UPLOAD:
-            await self.confirm_ebay_pending_item(item, actor_id=None, ebay_item_id=ebay_item_id)
-            item = db.get_item(item["id"])
         if item["status"] != db.STATUS_LISTED:
             return False
+        listing = db.get_ebay_listing_data(item["id"])
+        if ebay_item_id and listing and not listing.get("ebay_item_id"):
+            db.set_ebay_item_id(item["id"], ebay_item_id)
 
         pallet_id = item["pallet_id"]
         old_card = await self._fetch_current_card(item, "listed")

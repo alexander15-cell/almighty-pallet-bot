@@ -9,10 +9,10 @@ live, auto-updating cost/profit card per pallet:
         ↓
 [ SHARED across every pallet ]
 #automated-review (AI) → #queue-review → #awaiting-listing → #listed → #sold
-                                                    ↓               ↑      ↓
-                                          #pending-ebay-upload ------      #10-day-alerts
+                                                     (List on eBay)   ↓
+                                                               #10-day-alerts
 
-(any of #queue-review/#awaiting-listing/#pending-*-upload/#listed/#sold → #hold → back to where it came from)
+(any of #queue-review/#awaiting-listing/#listed/#sold → #hold → back to where it came from)
 ```
 
 Only **#pallet-discussion** and **#data-entry** are created per pallet.
@@ -93,30 +93,28 @@ Every item's card always shows which pallet it belongs to.
   option is only ever sorted first or applied automatically - never a
   checkmark you have to re-tap.)
 - **Awaiting Listing** (shared) is where Listing Management actually lists
-  the item, via whichever of four buttons fits:
-  - **Add to eBay Batch** - appends the item (using the listing data
-    captured above) as a row to a local CSV matching eBay's classic File
-    Exchange **Add** template - a single file ready to upload as-is (see
-    "eBay CSV format" below), no API call. Moves the item to
-    **#pending-ebay-upload**, where it sits until an admin runs
-    `/ebay export-batch` to grab the file and upload it via Seller Hub's
-    Upload tab - once eBay actually shows it live, tap **Confirm Listed**
-    right on that card (or run `/ebay confirm-listed`) to move it into
-    #listed.
-  - **Add to FB Marketplace Batch** - same idea, using Facebook's own bulk
-    listing CSV template (Title/Price/Description/Photo URL - see "FB
-    Marketplace CSV format" below). Moves the item to
-    **#pending-fb-marketplace-upload**; confirm the same way once it's live
-    (**Confirm Listed** on the card, or `/fb-marketplace confirm-listed`).
-  - **List on eBay (API)** - the direct eBay API path. Only shows up once
-    `EBAY_ENABLED` is true (see "Running without the eBay API" below);
-    currently a stub pending eBay developer API approval.
+  the item, via one of three buttons:
+  - **List on eBay** - creates the live listing through eBay's Sell
+    Inventory API (see "Running with the eBay API" below) and moves the
+    item straight to **#listed** with its real eBay listing ID. Only shows
+    up once `EBAY_ENABLED` is true.
+  - **Edit Details** - reopens the Approve form (title, price, weight,
+    dimensions, item specifics) pre-filled with what was saved, to fix
+    something before listing - e.g. an item specific eBay says is
+    required, or after eBay rejected a listing. Condition/category/format
+    stay as approved; for those, `/item move-back` it to Queue Review.
   - **Mark Listed (Other)** - manual path for anywhere else entirely (a
     website, in person, etc.) - moves straight to #listed. For any non-eBay
     sale, **Finance Management** can also run `/finance set-shipping-info`
     once a buyer's address is known, feeding `/pirate-ship export-batch`
     (see below) - eBay sales never need this, since Pirate Ship pulls those
     directly via its own native eBay integration.
+
+  (The old eBay CSV batch upload and Facebook Marketplace CSV paths, with
+  their `#pending-ebay-upload` / `#pending-fb-marketplace-upload` stages,
+  were removed - every eBay listing goes through the API now. Their
+  Discord channels aren't deleted automatically; delete them by hand if
+  you like.)
 - **Listed** (shared) items get a "Mark as Sold" button - a single click,
   no form, no price prompt. Operational speed was the whole point of
   removing price entry from this button.
@@ -211,8 +209,8 @@ and type a number:
 Every pallet's **#pallet-discussion** channel gets a pinned card, posted as
 the very first message, that shows: cost, items received, cost-per-item,
 revenue so far, items priced, a **pending sale value** (the sum of listing
-prices for everything priced but not yet sold - awaiting listing, added to
-an eBay or FB Marketplace batch, or already `#listed`, so an item counts the
+prices for everything priced but not yet sold - awaiting listing, on
+hold, or already `#listed`, so an item counts the
 moment Queue Review approves it, not just once it's actually live somewhere
 - expected revenue still "in the pipeline", separate from revenue already
 realized), profit/loss vs. cost, a cost-recovery progress bar, and
@@ -401,17 +399,12 @@ Both are created by `/setup shared-channels` like every other shared
 channel; the dashboard also gets its first pinned snapshot posted
 automatically the moment the channel is created.
 
-## Important limitation: no Vendoo API, and eBay/FB Marketplace both use CSV batches
+## Listing: eBay through the API, everything else by hand
 
-Neither eBay nor Facebook Marketplace offer a listing-creation API this bot
-can call directly (Vendoo doesn't offer one at all) - **Add to eBay Batch**
-and **Add to FB Marketplace Batch** both work by accumulating a CSV and
-handing it to each platform's own bulk-upload tool instead. Both are the
-primary path today. eBay additionally has a direct-API path (**List on eBay
-(API)**) that's wired in but stubbed out (see `ebay_api.py`) until the eBay
-developer API application is approved - see "Running without the eBay API"
-below. **Mark Listed (Other)** is the manual fallback for anywhere else
-entirely (a website, in person, etc.) after listing by hand.
+Every eBay listing is created through eBay's own API (**List on eBay** on
+the Awaiting Listing card). There's no listing integration for other
+platforms (Vendoo doesn't offer an API at all) - list those by hand and use
+**Mark Listed (Other)**.
 
 ---
 
@@ -607,12 +600,14 @@ needed either way.
 ### Running without the eBay API
 
 Leave `EBAY_APP_ID`, `EBAY_CERT_ID`, and `EBAY_REFRESH_TOKEN` blank in `.env`
-(the default). **List on eBay (API)** simply won't appear on Awaiting Listing
-cards - use **Add to eBay Batch** instead, which needs no API access at all.
+(the default). **List on eBay** simply won't appear on Awaiting Listing
+cards, and every eBay feature (order sync, fees, category search, item
+specifics) is off - list items on eBay by hand and use **Mark Listed
+(Other)**.
 
 ### Running with the eBay API
 
-Once your eBay developer application is approved, `ebay_api.py` is a real
+`ebay_api.py` is a real
 integration against eBay's modern Sell Inventory API (not the older XML
 Trading API) - creating a listing is three calls under the hood
 (`createOrReplaceInventoryItem` -> `createOffer` -> `publishOffer`), all
@@ -629,8 +624,8 @@ handled for you by `create_listing()`.
    EBAY_CERT_ID=...
    EBAY_REFRESH_TOKEN=...
    ```
-   Once all three are set, `config.EBAY_ENABLED` turns on and **List on eBay
-   (API)** appears on Awaiting Listing cards.
+   Once all three are set, `config.EBAY_ENABLED` turns on and **List on
+   eBay** appears on Awaiting Listing cards.
 2. Publishing a listing also needs four more values that only exist on your
    eBay seller account - `create_listing()` checks these and fails with a
    clear message naming whichever is missing, rather than a confusing eBay
@@ -641,22 +636,23 @@ handled for you by `create_listing()`.
    - `EBAY_FULFILLMENT_POLICY_ID`, `EBAY_PAYMENT_POLICY_ID`,
      `EBAY_RETURN_POLICY_ID` - your Business Policy **IDs** (Seller Hub >
      Business Policies shows each policy's ID next to its name, or fetch
-     them via `GET /sell/account/v1/fulfillment_policy` etc.). These are a
-     different mechanism from `EBAY_SHIPPING_PROFILE_NAME`/
-     `EBAY_RETURN_PROFILE_NAME`/`EBAY_PAYMENT_PROFILE_NAME` below, which the
-     CSV batch path matches by policy *name* instead.
+     them via `GET /sell/account/v1/fulfillment_policy` etc.).
+   - Photos: eBay needs public photo URLs, so configure R2 (see "Running
+     without R2") - without it, listings go out with no photos.
+
+   `/ebay status` checks all of these against your eBay account.
 3. `EBAY_ENVIRONMENT` defaults to `production`; set it to `sandbox` (with
    sandbox credentials from developer.ebay.com's Sandbox tab) to test
    without creating real listings.
 
 Condition IDs (`EBAY_CONDITIONS`) are translated to the Inventory API's own
 condition strings (`NEW`, `NEW_OTHER`, `USED_EXCELLENT`, etc.) internally -
-nothing to configure there. The same Brand/MPN/Type placeholder and
-weight-estimate rules the CSV batch path already uses (tuned against real
-eBay error codes) apply here too, since they're genuinely shared,
-category-level requirements, not CSV-specific quirks.
+nothing to configure there. Brand/MPN/Type always get a value (a real
+one, or eBay's own "Does Not Apply" placeholder - some categories reject a
+listing outright without them, error 21919303), and an item with no real
+weight gets a category-keyword estimate - see `ebay_listing_rules.py`.
 
-Unlike the CSV batch path, this direct API path checks each listing's
+This API path checks each listing's
 condition ID against eBay's **real per-category condition policy**
 (`getItemConditionPolicies`, eBay's Metadata API) before publishing,
 instead of only the coarse global `EBAY_BROADLY_ACCEPTED_CONDITION_IDS`
@@ -665,7 +661,7 @@ grant - just `EBAY_APP_ID`/`EBAY_CERT_ID`, no extra scope or user consent
 needed), so it works immediately with the same credentials already set up
 above. If that live lookup fails or times out for any reason (eBay
 downtime, an unrecognized category), it falls back to the exact same
-static safe-set check the CSV path uses - a listing never gets blocked on
+static safe-set check (`ebay_listing_rules.py`) - a listing never gets blocked on
 a flaky metadata call.
 
 ### eBay order auto-sync
@@ -728,9 +724,8 @@ driven by eBay's own data:
 
 - **Paid order -> Sold.** The item's card moves from `#listed` to `#sold`
   (platform eBay), the `#accounting` worklist entry is posted, and a short
-  line goes to `#ebay-orders`. An item still in `#pending-ebay-upload` is
-  confirmed live first (it sold, so it obviously was) and its eBay listing
-  ID recorded. **Nothing is logged to QuickBooks** - that stays the
+  line goes to `#ebay-orders`. Its eBay listing ID is recorded if it
+  wasn't already. **Nothing is logged to QuickBooks** - that stays the
   `#ebay-orders` card's **Confirm & log sale** click.
 - **eBay shows the line shipped -> Shipped**, card updated in place. Works
   whether the item was moved to Sold automatically or by hand.
@@ -881,133 +876,23 @@ days in `ebay_category_aspects`) instead of only guessing Brand/MPN/Type:
    and never used for a different category.
 3. **After Approve**, the confirmation names any specific eBay *requires*
    for the final category that's still blank, so it can be added with
-   `/ebay retry-item ... specifics:` before it's rejected.
+   **Edit Details** on the Awaiting Listing card before listing.
 
 `/ebay category-aspects <category_id>` shows what eBay requires/recommends
 for any category. This needs no new eBay permission (same app token as the
 category search) and costs one small extra AI call per reviewed item. It
 only runs with the default `anthropic` AI backend - with Ollama, or if
 eBay or the AI is unreachable, there's simply no pre-fill, exactly as
-before. The export-time Brand/MPN/Type "Does Not Apply" safety net is
+before. The listing-time Brand/MPN/Type "Does Not Apply" safety net is
 unchanged.
-
-### eBay CSV format
-
-The eBay batch CSV (`ebay_csv.py`) matches eBay's **classic File Exchange
-"Add"** template - a single file that's ready to upload as-is, built
-entirely from data Queue Review already captured during approval (title,
-category, condition, price, weight/dimensions, item specifics). Unlike
-eBay's separate **AI-Powered Prefill Listing** tool (still available by
-hand - see `/ebay fill-recommendations` below - just not what `/ebay
-export-batch` builds anymore), there's no suggest-then-review round trip:
-upload the CSV **Add to eBay Batch** builds through the **Upload** tab in
-Seller Hub, review row-level errors if any come back (most commonly
-category, which still needs a human to confirm - see "Known limitations"),
-fix and re-upload just those rows, then either run `/ebay import-results`
-with the results CSV Seller Hub gives back, or `/ebay confirm-listed` by
-hand, to move items out of #pending-ebay-upload.
-
-Columns, in order: `Action(...)` (always `Add`), `CustomLabel` (this bot's
-`pallet-N-item-M` SKU), `*Category` (the real eBay leaf category ID Queue
-Review resolved via `ebay_taxonomy.py`), `*Title`, `*ConditionID` (checked
-against `EBAY_BROADLY_ACCEPTED_CONDITION_IDS` first - falls back to
-`EBAY_CONDITION_FALLBACK_ID` rather than risking a category-specific
-rejection). Per eBay's own ConditionEnum reference, only `1000` (New) and
-`3000` (Used) carry "most categories support this condition" - so that's
-the entire broadly-accepted set. Everything else, including `1500`/`1750`
-(confirmed by real upload failures against Lights/Lamps categories,
-error 21916883) and the `2000`-`2030` Refurbished tiers (which need a
-separate seller enrollment program this account isn't in), falls back to
-`EBAY_CONDITION_FALLBACK_ID` (`3000`, i.e. Used - more honest than
-claiming New for items that usually aren't factory-sealed). `PicURL`
-(every R2-hosted photo URL, pipe-separated, up to
-eBay's 24-photo cap), `*Description`, `*Format`/`*Duration` (`GTC` for
-FixedPrice, the real auction duration for Auction), `ScheduleTime` (every
-listing in the batch starts `EBAY_LISTING_SCHEDULE_DELAY_DAYS` - 7 by
-default - days out, stamped once by `/ebay export-batch` at export time,
-not when each item was individually added to the running batch, since a
-batch can sit for a while before it's actually uploaded and eBay rejects a
-scheduled time that's already close to or past "now"; left blank until
-then), `*StartPrice`,
-`*Quantity` (always `1`), `*Location` (`EBAY_ITEM_LOCATION`), `PostalCode`
-(`EBAY_SHIP_FROM_POSTAL_CODE`), `WeightMajor`/`WeightMinor` (from the
-item's real captured weight, or a rough category-keyword estimate -
-`EBAY_DEFAULT_WEIGHT_BY_CATEGORY_LB` - when none was captured),
-`PackageLength`/`Width`/`Depth`, and `ShippingProfileName`/
-`ReturnProfileName`/`PaymentProfileName` (your saved Seller Hub Business
-Policy names - `EBAY_SHIPPING_PROFILE_NAME`/`EBAY_RETURN_PROFILE_NAME`/
-`EBAY_PAYMENT_PROFILE_NAME` - update these if you ever rename a policy in
-Seller Hub). Item specifics grow the header with dynamic `C:<Name>`
-columns, same as before - `C:Brand` and `C:MPN` always have a value (a
-real one, or eBay's own `Does Not Apply` placeholder when Queue Review
-didn't capture one), and `C:Type` tries `EBAY_TYPE_KEYWORDS` against the
-title first, logging a warning and falling back to the same `Does Not
-Apply` placeholder when nothing matches. All three confirmed against a
-real upload: eBay rejects the entire row outright when any of them is
-blank (error 21919303, "item specific ... is missing") for at least some
-categories - not a weaker listing, a hard failure - so none of them are
-ever left empty.
-
-**`/ebay fill-recommendations`** is a separate, optional path - not part of
-the `/ebay export-batch` flow above - for anyone who chooses to use eBay's
-own **AI-Powered Prefill Listing** tool by hand instead (upload a lean
-SKU/photo/title/category file through Seller Hub's Reports tab, eBay
-suggests the rest). `ebay_recommendations.py` takes eBay's downloaded
-recommendations file from that tool (a `.xlsm`, a different, classic-style
-per-item template eBay uses internally for this - `Template=eBay-
-listings-template_EBAY_US`, one sheet per matched category named
-`Cat-<CategoryName>...`) and, for every row whose `Custom Label (SKU)`
-matches one of this bot's items, fills in Start price/Quantity/Condition
-ID/Format/Duration from `ebay_listing_data` - never overwriting a cell
-that already has something in it, whether that's eBay's own suggestion or
-something already typed in by hand. `EBAY_ITEM_LOCATION`/
-`EBAY_SHIPPING_SERVICE` (optional, see "Installation") fill Location/
-Shipping service 1 option too, if set. Known limitation: saving through
-this tool drops Excel's dropdown pick-lists (openpyxl doesn't support
-re-saving them) - the data itself is unaffected, but a cell without its
-dropdown UI anymore just needs a value typed directly if you want to
-change it. Macros are preserved.
-
-### FB Marketplace CSV format
-
-The FB Marketplace batch CSV (`fb_marketplace_csv.py`) matches Facebook's
-own "Use a spreadsheet for multiple listings on Facebook Marketplace" bulk
-tool - a much simpler one-step upload than eBay's (no processing/
-recommendations round trip): **Add to FB Marketplace Batch** accumulates
-rows, `/fb-marketplace export-batch` hands you the file, you upload it
-directly through Facebook's bulk listing tool, and it's live.
-
-Columns: `Title` and `Price` reuse the exact same data captured for every
-approved item during Queue Review's listing form (`ebay_listing_data`
-isn't actually eBay-specific despite the table name - every approved item
-gets a title/price captured there regardless of which platform it
-eventually sells on), `Description` falls back from the AI-generated
-description to the raw Data Entry note, and `Photo URL` (the first
-R2-hosted photo URL, if any) is included even though it's not one of the
-three columns Facebook's own docs list as required, since a listing with
-no photo isn't realistically sellable. **Facebook's docs are explicit that
-changing/removing the Title/Price/Description headers breaks the upload**
-- if you check the file against a real template downloaded from Facebook
-and the `Photo URL` header doesn't match what Facebook expects (or it
-supports more than one photo per row and you want to use that), that's the
-one column safe to rename/extend in `fb_marketplace_csv.py`. Facebook
-auto-predicts each listing's category from Title/Description, so there's
-no category column here at all - review its guesses once the upload's
-live, from the listings screen.
-
-Since Facebook doesn't hand back a results file the way eBay's Seller Hub
-does, there's no `/fb-marketplace import-results` equivalent - once the
-CSV is actually live, run `/fb-marketplace confirm-listed` by hand to move
-those items out of `#pending-fb-marketplace-upload` into `#listed`.
 
 ### Running without R2
 
 Leave `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
 `R2_BUCKET_NAME`, and `R2_PUBLIC_URL_BASE` blank in `.env` (the default).
 Data Entry still saves photos locally either way - that's what Discord item
-cards render from - it just skips uploading a second copy to R2, and the
-eBay CSV batch's `PicURL` column stays blank (see the known
-limitation below). Once all five values are set, restart the bot: every
+cards render from - it just skips uploading a second copy to R2, and
+**List on eBay** has no public photo URLs to send eBay. Once all five values are set, restart the bot: every
 photo saved from then on gets uploaded to R2 automatically, no other setup
 needed. Photos saved before R2 was configured are not retroactively
 uploaded.
@@ -1082,28 +967,18 @@ UI after a restart (a Discord client caching quirk, not a bug here).
    (title/category/condition/format/price are required; specifics can be
    left blank).
 7. Approved items land in the shared `#awaiting-listing`. **Listing
-   Management** picks one of four buttons:
-   - **Add to eBay Batch** - appends the item to the local eBay CSV batch, no
-     API call. Moves it to `#pending-ebay-upload` to wait for someone to
-     actually upload that CSV.
-   - **Add to FB Marketplace Batch** - same idea, for Facebook's own CSV
-     bulk-listing tool. Moves it to `#pending-fb-marketplace-upload`.
-   - **List on eBay (API)** - only shown if the eBay developer API is
-     configured and enabled (see "Running without the eBay API" above).
-   - **Mark Listed (Other)** - for anywhere else entirely, listed manually.
-8. Items added to a batch: a Pallet Admin runs `/ebay export-batch` or
-   `/fb-marketplace export-batch` whenever ready (from anywhere - these
-   aren't pallet-specific, they export the whole shared batch at once),
-   uploads the attached CSV on that platform, then once it actually shows
-   those listings live, taps **Confirm Listed** right on that item's card
-   in `#pending-ebay-upload`/`#pending-fb-marketplace-upload` (or runs
-   `/ebay confirm-listed`/`/fb-marketplace confirm-listed` to confirm every
-   pending item in one pallet at once) to move it into `#listed`.
-9. However it got there, `#listed` items get a **Mark as Sold** button - one
-   click, no price prompt.
-10. **Finance Management** runs `/finance record-sale` (in that pallet's
-    category, any time - immediately or days later) to log the actual price.
-    The pinned card updates: revenue, profit/loss, and cost-recovery bar.
+   Management** taps **List on eBay** (live in seconds, straight to
+   `#listed`), **Edit Details** first if something needs fixing, or **Mark
+   Listed (Other)** for anywhere else, listed by hand.
+8. eBay sales move to `#sold` and then shipped on their own from eBay's
+   order data (see "eBay order automation"); for anything else:
+9. `#listed` items get a **Mark as Sold** button - one click, no price
+   prompt.
+10. **Finance Management** works the `#accounting` to-do list: **Confirm &
+    log sale** on the `#ebay-orders` card for an eBay sale, `/finance
+    log-sale` for anything else - either books the Sales Receipt and ticks
+    the entry ✅. The pinned card updates: revenue, profit/loss, and
+    cost-recovery bar.
     For a non-eBay sale, once the buyer's address is known, also run
     `/finance set-shipping-info` - that feeds `/pirate-ship export-batch`
     later. eBay sales don't need this at all.
@@ -1168,85 +1043,12 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   keep accumulating there after everything else is gone. The shared
   pipeline channels themselves are NOT deleted, since they're reusable
   infrastructure - only their message history is cleared.
-- `/ebay export-batch` - downloads the accumulated eBay CSV batch as a
-  Discord attachment, archives and clears it so the next **Add to eBay
-  Batch** click starts a fresh file, and records a durable, numbered batch
-  snapshot (`/ebay batches`/`/ebay batch`) of exactly which items went out
-  in it. This is eBay's classic File Exchange "Add" template, ready to
-  upload as-is - see "eBay CSV format" above.
-- `/ebay fill-recommendations <recommendations_file>` - a separate,
-  optional tool for anyone using eBay's own AI-Powered Prefill Listing tool
-  by hand instead of the export-batch flow above; attach the file eBay's
-  Seller Hub gave back after processing a Prefill upload and this bot fills
-  in Start price/Quantity/Condition ID/Format/Duration for every item it
-  recognizes, straight from Queue Review data - see "eBay CSV format"
-  above.
 - `/ebay category-search <query>` - looks up real eBay leaf category IDs,
   via eBay's live Taxonomy API when available (falling back to local
   keyword search against `ebay_taxonomy.py`'s bundled ~18,000-category
-  taxonomy otherwise) - mainly for finding an ID to pass to `/ebay
-  retry-item`'s `category_id`.
-- `/ebay retry-item <item_number> [category_id] [condition_id] [specifics]
-  [weight_lb] [dimensions]` - run inside a pallet's category. Re-queues an
-  item into the current live CSV so the next `/ebay export-batch` picks it
-  up again, with corrected data applied fresh. Pass `category_id` (look one
-  up via `/ebay category-search`) to correct the category shown in the CSV,
-  `specifics` as `Key=Value, Key2=Value2` to add/fix item specifics (feeds
-  the CSV's `Aspects` column) - merged into whatever specifics are already
-  saved, not a full replacement - and/or `condition_id` and `weight_lb`/
-  `dimensions` (as `"12 x 8 x 4"`, in inches) to correct data captured
-  during Queue Review that doesn't appear in this CSV but still feeds the
-  Pirate Ship export and your own records. Correcting any one of these
-  always preserves whatever weight/dimensions were already saved, even if
-  this particular retry doesn't touch them.
-  Skipping a needed correction just resubmits the same bad data and fails
-  identically.
-- `/ebay requeue-pending` - the bulk version of `/ebay retry-item` above:
-  re-queues EVERY item currently pending an eBay upload (across every
-  pallet, already-exported or not) into a fresh live batch at once, no
-  pallet context needed. Doesn't take corrections like `retry-item` does -
-  just rebuilds each row from whatever's currently in the database. Useful
-  after fixing stored data that already-exported items' CSV rows were
-  originally built from (e.g. `/admin rewrite-photo-url-base` correcting a
-  wrong `R2_PUBLIC_URL_BASE`) - the database fix doesn't retroactively
-  rewrite a CSV file that's already been downloaded (or even already
-  uploaded), so getting the correction into eBay's hands means generating
-  a fresh CSV, which this does for everything pending in one command
-  instead of running `/ebay retry-item` once per item.
-- `/ebay import-results <batch_id> <results_csv>` - reconciles a batch
-  against the results/report CSV Seller Hub gives you after processing an
-  upload. Column names in eBay's results CSVs vary, so this matches them
-  loosely (a SKU-like column, a listing-ID-like column, an optional status/
-  error column) rather than expecting one fixed layout. Rows it can
-  confidently match as succeeded move that item to Listed and record the
-  real eBay item ID; anything else (no listing ID, an explicit error, an
-  unrecognized SKU) is reported back unresolved instead of guessed at - the
-  response lists exactly what wasn't resolved.
-- `/ebay batches` - lists recent batches with how many items in each are
-  still waiting on a result. `/ebay batch <batch_id>` shows one batch's
-  still-pending items.
-- `/ebay confirm-listed [item_number]` - run inside a pallet's category
-  (needed for the bulk mode: confirms every pending item in that pallet at
-  once, since item numbers aren't unique across pallets). The fully-manual
-  fallback to `/ebay import-results`: confirms that item actually went live
-  on eBay, moving it from `#pending-ebay-upload` to `#listed`. For a single
-  item, tapping **Confirm Listed** right on its card in
-  `#pending-ebay-upload` does the same thing without needing pallet
-  context - no reason to leave the shared channel for one item.
-- `/fb-marketplace export-batch` - downloads the accumulated FB Marketplace
-  CSV batch as a Discord attachment and archives + clears it so the next
-  **Add to FB Marketplace Batch** click starts a fresh file - see "FB
-  Marketplace CSV format" above.
-- `/fb-marketplace confirm-listed [item_number]` - run inside a pallet's
-  category (same bulk-mode reasoning as `/ebay confirm-listed` above).
-  Confirms an item (or, with no `item_number`, every item in that pallet
-  still waiting) actually went live on Facebook, moving it to `#listed` -
-  or tap **Confirm Listed** on its card in `#pending-fb-marketplace-upload`
-  for a single item without leaving the shared channel. There's no results-CSV
-  reconciliation equivalent to `/ebay import-results` here - Facebook
-  doesn't give one back.
+  taxonomy otherwise).
 - `/pirate-ship export-batch` - exports every sold item on a non-eBay
-  platform ("Other"/FB Marketplace/website, recorded via `/finance
+  platform ("Other"/website, recorded via `/finance
   record-sale`) that hasn't been exported yet, as a CSV for Pirate Ship's
   batch/spreadsheet order import, then marks them exported so a re-run
   doesn't duplicate them. Recipient name/address come from `/finance
@@ -1331,8 +1133,8 @@ python backup.py restore path/to/backup.zip --destination path/to/new-data
 Restore only ever writes into a new, empty directory - it refuses to touch
 one that already has files in it, so a bad restore can't overwrite a
 working installation. The restored directory has the same layout as
-`data/` (`pallet_tracker.db`, `photos/`, `ebay_batch_archive/`,
-`pirate_ship_exports/`); point `DATABASE_PATH`/`PHOTO_DIR`/etc at it, or
+`data/` (`pallet_tracker.db`, `photos/`, `pirate_ship_exports/`, plus the
+old `ebay_batch_archive/` CSVs if you have any); point `DATABASE_PATH`/`PHOTO_DIR`/etc at it, or
 move its contents into your real `data/` directory, then restart the bot.
 
 ---
@@ -1347,12 +1149,12 @@ pytest tests/
 An early, incremental suite (not exhaustive) covering: core `database.py`
 behavior (pallets/items, financials including refunds/expenses/reversals,
 structured shipping addresses, buyer-data retention, R2 photo retention
-after a sale, `wipe_database`'s table-by-table scope, the eBay batch
-lifecycle), `r2_storage.py`'s deletion helpers (mocked boto3 client, no
-real network calls), `ai_review.py`'s fallback shape and timeout path, `ebay_csv.py`/
-`fb_marketplace_csv.py`/`pirate_ship_csv.py`'s row-building (including the
-legacy-address fallback and buyer-data redaction), `ebay_results.py`'s
-flexible results-CSV parsing, `runtime_settings.py`'s role-ID bindings,
+after a sale, `wipe_database`'s table-by-table scope), `r2_storage.py`'s
+deletion helpers (mocked boto3 client, no real network calls),
+`ai_review.py`'s fallback shape and timeout path, `pirate_ship_csv.py`'s
+row-building (including the legacy-address fallback and buyer-data
+redaction), `ebay_listing_rules.py`, the eBay API listing / order sync /
+order automation / fee / item-specifics features, `runtime_settings.py`'s role-ID bindings,
 `quickbooks.py`'s OAuth token exchange/refresh (rotation included) and API
 request shaping (all against a fake `aiohttp.ClientSession`, no real
 network calls), the credit-card charge → pallet allocation workflow and
@@ -1360,9 +1162,8 @@ awaiting-pallet-charge claiming (cogs/finance.py, cogs/pallet_setup.py),
 `pirate_ship_import.py`'s flexible CSV column-scanning, the new financial
 reporting queries (cost-by-type breakdown, month-to-date spend/revenue,
 pallet in-progress/sold-out counts, the auto-flag early warnings, pending
-sale value), the FB Marketplace batch/confirm-listed workflow
-(cogs/item_flow.py, cogs/fb_marketplace.py) and its per-card **Confirm
-Listed** buttons (both eBay and FB Marketplace), `discord_resilience.py`'s exception coverage
+sale value), the Awaiting Listing card's List on eBay / Edit Details,
+`discord_resilience.py`'s exception coverage
 (including the exact DNS-failure class that exposed the bug it fixes), and
 a regression guard that fails if a `discord.ui.SelectOption` in
 `cogs/item_flow.py` is ever
@@ -1424,19 +1225,17 @@ Tables:
   they never affect `/pallet delete` or `/admin db-wipe`; kept across a
   wipe like `ebay_seen_orders`.
 
-The eBay CSV batch itself is **not** in the database - it's a plain CSV file
-at `data/ebay_batch.csv` (see `ebay_csv.py`), archived to
-`data/ebay_batch_archive/` on each `/ebay export-batch`. The FB Marketplace
-batch works the same way, at `data/fb_marketplace_batch.csv` / `data/
-fb_marketplace_batch_archive/` (see `fb_marketplace_csv.py`). Pirate Ship
-exports work similarly but with nothing accumulating between runs - each
-`/pirate-ship export-batch` queries the database directly and writes
-straight to `data/pirate_ship_exports/` (see `pirate_ship_csv.py`).
+`ebay_batches` (and each item's `ebay_batch_id`) are history only, from
+the removed eBay CSV batch path - kept so nothing is deleted; any CSVs it
+archived stay in `data/ebay_batch_archive/` (and Facebook's in
+`data/fb_marketplace_batch_archive/`) and are still included in backups.
+Pirate Ship exports are written straight to `data/pirate_ship_exports/`
+by each `/pirate-ship export-batch` (see `pirate_ship_csv.py`).
 
 ### Backing this up
 Since this is the only copy of your item/financial history, set up a
-periodic backup of the `data/` folder (database, all saved item photos, the
-eBay batch CSV + its archive, and the Pirate Ship export archive) - a daily
+periodic backup of the `data/` folder (database, all saved item photos, and
+the Pirate Ship export archive) - a daily
 `cron` job copying it elsewhere, or syncing to cloud storage, is enough at
 this scale.
 
@@ -1461,28 +1260,20 @@ this scale.
 - **`/setup shared-channels` is a one-time setup step.** If you ever need to
   move or recreate the shared channels, you'd need to update the
   `shared_channels` table manually (there's no command for this yet, since
-  it should rarely be needed). If you're adding this after already running
-  the bot, run it again to create just the new `#pending-ebay-upload`
-  channel - it skips any channel that already exists.
-- **The eBay CSV batch's photo URLs depend on R2 being configured.** Without
-  `R2_ENABLED` (see "Running without R2" above), `PicURL` is left
-  blank in the exported CSV - add photos yourself before or after
-  uploading. With R2 configured, it's filled in automatically (every
-  photo, pipe-separated, up to eBay's 24-photo cap).
+  it should rarely be needed). Running it again only ever creates
+  whatever's missing - it skips any channel that already exists.
+- **eBay listing photos depend on R2 being configured.** Without
+  `R2_ENABLED` (see "Running without R2" above), there are no public photo
+  URLs for **List on eBay** to send.
 - **Weight/Type fallbacks are best-effort, not authoritative.**
   `EBAY_DEFAULT_WEIGHT_BY_CATEGORY_LB` and `EBAY_TYPE_KEYWORDS` are rough
   estimates for when Queue Review didn't capture real data - update them
   (or start weighing items at intake) for better accuracy.
-- **Condition validation is real per-category eBay data on the direct API
-  path, but still a coarse global check on the CSV batch path.** The
-  direct API path (`ebay_api.py`'s `create_listing()`) checks eBay's actual
-  `getItemConditionPolicies` for each listing's category before publishing.
-  The CSV batch path (`ebay_csv.py`) has no live API call in its export
-  step, so it still only checks the coarse global
-  `EBAY_BROADLY_ACCEPTED_CONDITION_IDS` safe-set.
-- **`/ebay confirm-listed` is a manual step.** There's no live eBay API to
-  automatically detect that an uploaded CSV batch was actually processed, so
-  someone has to check Seller Hub and confirm it by hand.
+- **Condition validation uses eBay's real per-category data.**
+  `ebay_api.py`'s `create_listing()` checks eBay's actual
+  `getItemConditionPolicies` for each listing's category before publishing,
+  falling back to the coarse global `EBAY_BROADLY_ACCEPTED_CONDITION_IDS`
+  safe-set only if that lookup fails.
 - **eBay category selection uses eBay's own official taxonomy, not a
   hand-typed list.** `ebay_categories.json` (loaded by `ebay_taxonomy.py`)
   is generated from eBay's published category export (~18,000 real leaf
@@ -1496,12 +1287,11 @@ this scale.
   otherwise) rather than picking from a small fixed list - there are simply
   too many real eBay categories to hand the AI a fixed enum or fit in a
   single Discord dropdown (25-option cap). `/ebay category-search <query>`
-  looks the same data up on demand, e.g. to find an ID for `/ebay
-  retry-item <item_number> category_id:<corrected id>`. Since even a real
+  looks the same data up on demand. Since even a real
   category ID can turn out to be a poor fit or underperform for this business, Queue
   Review's quick-pick dropdown still sorts by what's actually **confirmed
-  working**: once an item in a category is confirmed live (via `/ebay
-  confirm-listed` or a matched success row in `/ebay import-results`), that
+  working**: once an item in a category is actually listed live via
+  **List on eBay**, that
   category gets a "✅ " label and sorts ahead of everything else, including
   categories picked more often but never confirmed - the team naturally
   converges on proven-working categories over time without anyone tracking
@@ -1520,12 +1310,10 @@ this scale.
   it's a starting point pre-filled on the eBay listing form at Queue Review
   approval, always human-confirmed or corrected before Approve, never
   treated as authoritative. A wrong value here has a real dollar cost via
-  the Pirate Ship export (wrong weight/dims → wrong shipping label cost),
-  even though it no longer affects eBay's own CSV upload directly. Items
-  approved before weight/dimensions became required fields have neither a
-  human-confirmed nor an AI-estimated value, and show up with blank
-  weight/dims in a Pirate Ship export until corrected via `/ebay retry-item
-  weight_lb:... dimensions:...`.
+  eBay's Calculated shipping and the Pirate Ship export (wrong weight/dims
+  → wrong shipping cost). Items approved before weight/dimensions became
+  required fields have neither a human-confirmed nor an AI-estimated value
+  - fix them with **Edit Details** before listing.
 - `/finance set-shipping-info` captures a structured address (address lines,
   city, state, postal code, country) as of the fields themselves, but none
   of it is validated against a real address database - a typo'd city or zip
@@ -1552,26 +1340,11 @@ this scale.
   Nothing in `quickbooks.py` (or anywhere else) can initiate a payment,
   transfer, or card action (freeze, limit change, etc) - a deliberate
   safety boundary, not an oversight to revisit.
-- **FB Marketplace's CSV columns beyond Title/Price/Description aren't
-  confirmed against a real downloaded template.** Facebook's own help docs
-  list those three as required; `Photo URL` was added here as a reasonable
-  best guess (only the first photo, since Facebook's exact multi-photo
-  convention isn't confirmed either) since a listing with no photo isn't
-  realistically sellable. If Facebook's bulk uploader rejects or ignores
-  that column, or a real template shows a different header, fix the header
-  name (and/or the single-photo assumption) in `fb_marketplace_csv.py` -
-  never touch the `Title`/`Price`/`Description` headers, Facebook's docs
-  are explicit that changing those breaks the upload entirely.
-- **No results-file reconciliation for FB Marketplace, unlike
-  `/ebay import-results`.** Facebook's bulk tool doesn't hand back a
-  processed results file the way eBay's Seller Hub does, so
-  `/fb-marketplace confirm-listed` (checking Facebook by hand) is the only
-  way to move an item out of `#pending-fb-marketplace-upload`.
 - **`/admin purge-old-photos` and the R2 wipe in `/admin db-wipe` only ever
   touch R2 - never the local disk copy under `PHOTO_DIR`.** Local photos
   are cheap to keep and are what Discord item cards render from, so they're
   left alone on purpose; only the durable, publicly-linkable R2 copy (used
-  for eBay/FB Marketplace CSV uploads and nothing else) gets cleaned up.
+  for eBay listings and nothing else) gets cleaned up.
   Retention is a manual admin action (preview by default, `confirm:True` to
   run), never an automatic background job - same as buyer data retention.
 

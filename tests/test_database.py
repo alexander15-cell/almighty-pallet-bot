@@ -94,57 +94,6 @@ def test_buyer_data_purge_candidates_respects_retention_window(fresh_db):
     assert fresh_db.get_buyer_data_purge_candidates(90) == []
 
 
-def test_ebay_batch_lifecycle(fresh_db):
-    pallet_id = fresh_db.create_pallet("Pallet E", category_id=555, created_by=1)
-    item_ids = []
-    for i in range(3):
-        item_id = fresh_db.create_item(pallet_id, f"item{i}", [], 1)
-        fresh_db.save_ebay_listing_data(
-            item_id, f"Title {i}", "12345", "1500", 19.99, {"Brand": "Test"}, actor_id=1,
-        )
-        fresh_db.update_status(item_id, fresh_db.STATUS_PENDING_EBAY_UPLOAD, actor_id=1)
-        item_ids.append(item_id)
-
-    unbatched = fresh_db.get_unbatched_pending_items()
-    assert {i["id"] for i in unbatched} == set(item_ids)
-
-    batch_id = fresh_db.create_ebay_batch(csv_filename="test.csv", exported_by=1, item_ids=item_ids)
-    assert fresh_db.get_unbatched_pending_items() == []
-
-    batch_items = fresh_db.get_ebay_batch_items(batch_id)
-    assert {i["id"] for i in batch_items} == set(item_ids)
-
-    b = fresh_db.get_ebay_batch(batch_id)
-    assert b["item_count"] == 3
-
-    fresh_db.set_ebay_item_id(item_ids[0], "110099998888")
-    fresh_db.update_status(item_ids[0], fresh_db.STATUS_LISTED, actor_id=1)
-    still_pending = fresh_db.get_ebay_batch_items(batch_id)
-    assert len(still_pending) == 2
-
-    listing = fresh_db.get_ebay_listing_data(item_ids[0])
-    assert listing["ebay_item_id"] == "110099998888"
-
-
-def test_clear_ebay_batch_id_requeues_item_for_a_fresh_export(fresh_db):
-    # Used by /ebay retry-item: an item whose upload actually failed (e.g.
-    # missing a config-driven required field) stays pending_ebay_upload but
-    # is still stamped with the failed batch's id - clearing it must make
-    # the item eligible for the *next* export again.
-    pallet_id = fresh_db.create_pallet("Pallet F", category_id=666, created_by=1)
-    item_id = fresh_db.create_item(pallet_id, "item", [], 1)
-    fresh_db.save_ebay_listing_data(item_id, "Title", "12345", "1500", 19.99, {}, actor_id=1)
-    fresh_db.update_status(item_id, fresh_db.STATUS_PENDING_EBAY_UPLOAD, actor_id=1)
-
-    batch_id = fresh_db.create_ebay_batch(csv_filename="failed_batch.csv", exported_by=1, item_ids=[item_id])
-    assert fresh_db.get_unbatched_pending_items() == []  # now tied to the failed batch
-
-    fresh_db.clear_ebay_batch_id(item_id)
-    assert [i["id"] for i in fresh_db.get_unbatched_pending_items()] == [item_id]
-    # The old batch record itself is untouched - just the item's link to it.
-    assert fresh_db.get_ebay_batch(batch_id)["item_count"] == 1
-
-
 def test_retry_item_can_correct_the_category_before_requeueing(fresh_db):
     # /ebay retry-item accepts an optional corrected category_id - confirmed
     # against a real eBay error 87 ("category selected is not a leaf

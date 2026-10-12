@@ -680,13 +680,13 @@ def test_create_listing_auction_offer_shape(monkeypatch):
     assert body["listingDuration"] == "DAYS_5"
 
 
-def test_create_listing_uses_the_same_sku_as_the_csv_batch_path(monkeypatch):
-    import ebay_csv
+def test_create_listing_uses_the_bots_pallet_item_sku(monkeypatch):
+    import ebay_listing_rules
     calls = _install_fake_session(monkeypatch, _happy_path_responder)
     item = _item(pallet_id=7, item_number=3)
     asyncio.run(ebay_api.create_listing(item, _listing()))
     offer_call = next(c for c in calls if c["method"] == "POST" and c["url"].endswith("/offer"))
-    assert offer_call["json"]["sku"] == ebay_csv.custom_label(item)
+    assert offer_call["json"]["sku"] == ebay_listing_rules.custom_label(item) == "pallet-7-item-3"
 
 
 def test_create_listing_raises_with_ebay_error_detail_on_failure(monkeypatch):

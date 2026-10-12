@@ -2,7 +2,7 @@
 Parses a Pirate Ship order/shipping CSV export (uploaded via
 /finance import-pirateship in cogs/finance.py) and finds each row's
 shipping cost and its "pallet-<id>-item-<number>" reference - the same
-identifier ebay_csv.custom_label() and pirate_ship_csv.order_number()
+identifier ebay_listing_rules.custom_label() and pirate_ship_csv.order_number()
 already embed as their own Custom Label (SKU) / Order Number columns.
 
 No real Pirate Ship export was available to check exact column names
@@ -24,7 +24,7 @@ available, tighten this matching rather than guessing further - don't
 widen it speculatively.
 
 Purely a text/regex parser with no database access (matches the existing
-ebay_results.py on purpose), so it's easy to test without touching one.
+the old eBay results-CSV parser on purpose), so it's easy to test without touching one.
 The caller resolves each match's pallet_id/item_number against the
 database and performs the actual pallet_costs write - see
 cogs/finance.py's import_pirateship command.

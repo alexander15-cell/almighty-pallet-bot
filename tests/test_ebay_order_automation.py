@@ -24,7 +24,7 @@ import cogs.ebay as ebay_module
 import cogs.item_flow as item_flow_module
 from cogs.item_flow import ItemFlow
 
-LISTED, SOLD, ORDERS, ACCOUNTING, PENDING = 501, 502, 503, 504, 505
+LISTED, SOLD, ORDERS, ACCOUNTING = 501, 502, 503, 504
 AFTER = "2099-01-01T00:00:00.000Z"   # after the test item was created/listed
 BEFORE = "2000-01-01T00:00:00.000Z"  # before it was listed
 
@@ -68,7 +68,7 @@ class _FakeChannel:
 
 class _FakeBot:
     def __init__(self):
-        self.channels = {cid: _FakeChannel(cid) for cid in (LISTED, SOLD, ORDERS, ACCOUNTING, PENDING)}
+        self.channels = {cid: _FakeChannel(cid) for cid in (LISTED, SOLD, ORDERS, ACCOUNTING)}
         self.cog = None
 
     def get_channel(self, channel_id):
@@ -81,7 +81,7 @@ class _FakeBot:
 @pytest.fixture
 def env(fresh_db, monkeypatch):
     for stage, cid in (("listed", LISTED), ("sold", SOLD), ("ebay-orders", ORDERS),
-                       ("accounting", ACCOUNTING), ("pending-ebay-upload", PENDING)):
+                       ("accounting", ACCOUNTING)):
         fresh_db.set_shared_channel(stage, cid)
     monkeypatch.setattr(item_flow_module.finance_utils, "refresh_finance_message", AsyncMock())
     bot = _FakeBot()
@@ -90,14 +90,12 @@ def env(fresh_db, monkeypatch):
     return bot, pallet_id
 
 
-def _listed_item(db, bot, pallet_id, status=None):
-    """An item with a real card sitting in #listed (or `status`'s channel)."""
+def _listed_item(db, bot, pallet_id):
+    """An item with a real card sitting in #listed."""
     item_id = db.create_item(pallet_id, "widget", [], 1)
     db.save_ebay_listing_data(item_id, "Widget", "123", "1000", 20.0, {})
-    target = status or db.STATUS_LISTED
-    channel = bot.channels[PENDING if target == db.STATUS_PENDING_EBAY_UPLOAD else LISTED]
-    card = asyncio.run(channel.send(content="card"))
-    db.update_status(item_id, target, actor_id=1, new_message_id=card.id)
+    card = asyncio.run(bot.channels[LISTED].send(content="card"))
+    db.update_status(item_id, db.STATUS_LISTED, actor_id=1, new_message_id=card.id)
     return db.get_item(item_id), card
 
 
@@ -165,19 +163,6 @@ def test_a_human_moving_the_item_back_sticks(fresh_db, env):
     _run(bot, [_order(item, date="2100-01-01T00:00:00.000Z")])
 
     assert fresh_db.get_item(item["id"])["status"] == fresh_db.STATUS_LISTED
-
-
-def test_pending_upload_item_is_confirmed_live_then_sold(fresh_db, env):
-    bot, pallet_id = env
-    item, pending_card = _listed_item(fresh_db, bot, pallet_id, status=fresh_db.STATUS_PENDING_EBAY_UPLOAD)
-
-    _run(bot, [_order(item, legacy="110099")])
-
-    after = fresh_db.get_item(item["id"])
-    assert after["status"] == fresh_db.STATUS_SOLD
-    assert after["listed_at"] is not None
-    assert fresh_db.get_ebay_listing_data(item["id"])["ebay_item_id"] == "110099"
-    assert pending_card.deleted
 
 
 @pytest.mark.parametrize("payment", ["PENDING", "FAILED", "FULLY_REFUNDED"])

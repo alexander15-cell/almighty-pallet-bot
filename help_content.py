@@ -63,18 +63,8 @@ ENTRIES = (
     ),
     HelpEntry(
         "Awaiting Listing card buttons (#awaiting-listing)",
-        "Add to eBay Batch, Add to FB Marketplace Batch, List on eBay (API), or Mark Listed (Other).",
-        ("list item", "list on ebay", "list on facebook", "listing", "awaiting listing"),
-    ),
-    HelpEntry(
-        "/ebay export-batch",
-        "Download the accumulated eBay CSV batch and start a fresh one.",
-        ("ebay batch", "ebay csv", "export ebay"),
-    ),
-    HelpEntry(
-        "/ebay fill-recommendations",
-        "Upload eBay's returned recommendations file - fills in price/quantity/condition/format from Queue Review data.",
-        ("ebay recommendations", "fill recommendations"),
+        "List on eBay (live through the API, straight to #listed), Edit Details (fix title/price/item specifics first), or Mark Listed (Other).",
+        ("list item", "list on ebay", "listing", "awaiting listing", "edit details", "fix listing", "change price"),
     ),
     HelpEntry(
         "/ebay category-search <query>",
@@ -85,21 +75,6 @@ ENTRIES = (
         "/ebay category-aspects <category_id>",
         "Show the item specifics eBay requires or recommends for a category.",
         ("item specifics", "aspects", "required specifics", "category aspects", "brand type color"),
-    ),
-    HelpEntry(
-        "/ebay retry-item <item_number> ...",
-        "Fix and re-queue an item whose batch upload needs a correction.",
-        ("retry item", "fix ebay upload", "requeue item"),
-    ),
-    HelpEntry(
-        "/ebay requeue-pending",
-        "Bulk retry-item: re-queue every item pending an eBay upload into a fresh batch, no corrections needed.",
-        ("requeue all", "bulk retry", "pending ebay upload"),
-    ),
-    HelpEntry(
-        "/ebay batches / batch <id>",
-        "List recent eBay batches, or show one batch's still-pending items.",
-        ("ebay batches", "batch status"),
     ),
     HelpEntry(
         "/ebay sync-finances [days_back]",
@@ -115,26 +90,6 @@ ENTRIES = (
         "💸 eBay fees cards / /ebay fee-cards since:<date>",
         "Book eBay's fees, labels and ad fees to QuickBooks and the pallet's cost - Confirm & log fees in #ebay-orders.",
         ("log ebay fees", "ebay fee expense", "final value fee", "shipping label cost", "fee cards", "undeposited funds"),
-    ),
-    HelpEntry(
-        "/ebay import-results <batch_id> <csv>",
-        "Reconcile a batch against a results CSV downloaded from Seller Hub.",
-        ("ebay results", "reconcile", "seller hub"),
-    ),
-    HelpEntry(
-        "/ebay confirm-listed [item_number]",
-        "Manually confirm an item is live on eBay (or tap Confirm Listed on its card in #pending-ebay-upload).",
-        ("confirm listed ebay", "ebay live"),
-    ),
-    HelpEntry(
-        "/fb-marketplace export-batch",
-        "Download the accumulated FB Marketplace CSV batch and start a fresh one.",
-        ("facebook batch", "fb marketplace csv", "facebook csv"),
-    ),
-    HelpEntry(
-        "/fb-marketplace confirm-listed [item_number]",
-        "Manually confirm an item is live on FB Marketplace.",
-        ("confirm listed facebook", "facebook live"),
     ),
     HelpEntry(
         "Mark as Sold / Mark as Shipped buttons",

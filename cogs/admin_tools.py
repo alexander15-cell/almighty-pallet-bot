@@ -80,8 +80,6 @@ _LIST_ITEMS_STATUS_CHOICES = [
     app_commands.Choice(name="Automated Review", value=db.STATUS_AUTOMATED_REVIEW),
     app_commands.Choice(name="Queue Review", value=db.STATUS_QUEUE_REVIEW),
     app_commands.Choice(name="Awaiting Listing", value=db.STATUS_AWAITING_LISTING),
-    app_commands.Choice(name="Pending eBay Upload", value=db.STATUS_PENDING_EBAY_UPLOAD),
-    app_commands.Choice(name="Pending FB Marketplace Upload", value=db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD),
     app_commands.Choice(name="Listed", value=db.STATUS_LISTED),
     app_commands.Choice(name="Sold", value=db.STATUS_SOLD),
     app_commands.Choice(name="Shipped", value=db.STATUS_SHIPPED),

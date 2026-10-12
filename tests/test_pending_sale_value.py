@@ -35,17 +35,15 @@ def test_pending_sale_value_sums_listed_items(fresh_db):
 
 def test_pending_sale_value_includes_every_pre_sale_stage(fresh_db):
     # The scenario that prompted this: items just approved out of Queue
-    # Review into Awaiting Listing, not yet added to any batch or listed
-    # anywhere - still expected to count.
+    # Review into Awaiting Listing, not yet listed anywhere - still
+    # expected to count.
     pallet_id = fresh_db.create_pallet("Pending Pallet 5", category_id=6, created_by=1)
     _priced_item(fresh_db, pallet_id, 10.0, fresh_db.STATUS_AWAITING_LISTING)
-    _priced_item(fresh_db, pallet_id, 20.0, fresh_db.STATUS_PENDING_EBAY_UPLOAD)
-    _priced_item(fresh_db, pallet_id, 30.0, fresh_db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD)
     _priced_item(fresh_db, pallet_id, 40.0, fresh_db.STATUS_LISTED)
 
     fin = fresh_db.get_pallet_financials(pallet_id)
-    assert fin["items_pending_sale"] == 4
-    assert fin["pending_sale_value"] == 100.0
+    assert fin["items_pending_sale"] == 2
+    assert fin["pending_sale_value"] == 50.0
 
 
 def test_pending_sale_value_includes_items_on_hold(fresh_db):

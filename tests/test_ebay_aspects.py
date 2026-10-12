@@ -381,7 +381,7 @@ def test_missing_specifics_note_names_required_blanks_except_auto_filled_ones(fr
 
     note = asyncio.run(cog._missing_specifics_note("117503", {"Color": "Black"}, 7))
     assert "**Wattage**" in note and "Brand" not in note and "Type" not in note
-    assert "/ebay retry-item 7" in note
+    assert "**Edit Details** on item #7" in note
     assert asyncio.run(cog._missing_specifics_note("117503", {"Wattage": "60"}, 7)) == ""
 
 

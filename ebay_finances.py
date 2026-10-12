@@ -49,7 +49,7 @@ import aiohttp
 import config
 import database as db
 import ebay_api
-import ebay_csv
+import ebay_listing_rules
 
 log = logging.getLogger(__name__)
 
@@ -337,7 +337,7 @@ def match_line_to_item(line: dict):
     module's docstring for why."""
     order_dt = _parse_dt(line.get("order_date"))
     candidates = []
-    parsed = ebay_csv.parse_custom_label(line.get("sku") or "")
+    parsed = ebay_listing_rules.parse_custom_label(line.get("sku") or "")
     if parsed:
         candidates.append(db.get_item_by_pallet_and_number(*parsed))
     candidates.append(db.get_item_by_ebay_listing_id(line.get("legacy_item_id")))

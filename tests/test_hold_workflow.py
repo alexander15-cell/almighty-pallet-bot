@@ -203,18 +203,6 @@ def test_channel_and_view_for_awaiting_listing():
     assert isinstance(view, AwaitingListingView)
 
 
-def test_channel_and_view_for_pending_ebay_upload():
-    stage, view = _channel_and_view_for_status(5, db.STATUS_PENDING_EBAY_UPLOAD)
-    assert stage == "pending-ebay-upload"
-    assert view.children[0].item.custom_id == "pallet_bot:confirm_ebay_listed:5"
-
-
-def test_channel_and_view_for_pending_fb_marketplace_upload():
-    stage, view = _channel_and_view_for_status(5, db.STATUS_PENDING_FB_MARKETPLACE_UPLOAD)
-    assert stage == "pending-fb-marketplace-upload"
-    assert view.children[0].item.custom_id == "pallet_bot:confirm_fb_listed:5"
-
-
 def test_channel_and_view_for_listed():
     stage, view = _channel_and_view_for_status(1, db.STATUS_LISTED)
     assert stage == "listed"

@@ -38,8 +38,9 @@ STATUS_DATA_ENTRY = "data_entry"
 STATUS_AUTOMATED_REVIEW = "automated_review"
 STATUS_QUEUE_REVIEW = "queue_review"
 STATUS_AWAITING_LISTING = "awaiting_listing"
-STATUS_PENDING_EBAY_UPLOAD = "pending_ebay_upload"  # added to the eBay CSV batch, not yet confirmed live
-STATUS_PENDING_FB_MARKETPLACE_UPLOAD = "pending_fb_marketplace_upload"  # added to the FB Marketplace CSV batch, not yet confirmed live
+# (The "pending_ebay_upload"/"pending_fb_marketplace_upload" stages belonged to
+# the removed eBay/Facebook CSV batch paths - every eBay listing now goes
+# straight from awaiting_listing to listed through the API.)
 STATUS_LISTED = "listed"
 STATUS_SOLD = "sold"
 STATUS_SHIPPED = "shipped"
@@ -219,7 +220,7 @@ def init_db():
                 postal_code         TEXT,
                 country             TEXT,
                 pirate_ship_exported INTEGER DEFAULT 0,  -- set once this item's shipping info has gone out in a /pirate-ship export-batch, so it isn't exported twice
-                ebay_batch_id       INTEGER,             -- set to ebay_batches.id at /ebay export-batch time, so /ebay import-results knows which batch this item belongs to
+                ebay_batch_id       INTEGER,             -- history only: the ebay_batches row from the removed eBay CSV batch path this item went out in, if any
                 shipped_at          TEXT,
                 stale_alert_sent    INTEGER DEFAULT 0,
                 created_at          TEXT NOT NULL,
@@ -285,11 +286,10 @@ def init_db():
                 updated_at      TEXT NOT NULL
             );
 
-            -- One row per /ebay export-batch run - a durable, numbered
-            -- snapshot of exactly which items went out in that CSV
-            -- (items.ebay_batch_id points back here), so /ebay import-results
-            -- and /ebay batches can look up a specific batch's contents
-            -- instead of only ever operating on "whatever's pending now".
+            -- History only: one row per /ebay export-batch run from the
+            -- removed eBay CSV batch path (items.ebay_batch_id points back
+            -- here). Nothing writes to it anymore; kept so past batch
+            -- records aren't deleted.
             CREATE TABLE IF NOT EXISTS ebay_batches (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 csv_filename TEXT NOT NULL,
@@ -1138,12 +1138,10 @@ def save_ebay_listing_data(item_id: int, ebay_title: str, category_id: str, cond
 
     weight_lb/length_in/width_in/height_in are required for every item
     going forward (EbayListingModal makes them mandatory fields) - they
-    feed the Pirate Ship CSV export, since every approved item gets this
-    captured here regardless of which platform it eventually sells on.
-    eBay's own CSV upload (ebay_csv.py, eBay's newer AI-prefill bulk
-    template) doesn't carry shipping/weight data at all, so this is purely
-    for Pirate Ship and general record-keeping now. Still nullable in the
-    schema so already-approved items from before this existed don't break.
+    feed the eBay API listing's Calculated shipping and the Pirate Ship CSV
+    export, since every approved item gets this captured here regardless of
+    where it eventually sells. Still nullable in the schema so
+    already-approved items from before this existed don't break.
     """
     with get_conn() as conn:
         now = _now()
@@ -1195,7 +1193,7 @@ def delete_ebay_listing_data(item_id: int):
 
 # Pipeline order for unwind_item_downstream_data's "how far forward did this
 # item get" comparisons - deliberately excludes the off-pipeline statuses
-# (on_hold, rejected, deleted, pending_ebay_upload, pending_fb_marketplace_upload),
+# (on_hold, rejected, deleted),
 # which are never compared against for that purpose.
 _STAGE_ORDER = [
     STATUS_DATA_ENTRY, STATUS_AUTOMATED_REVIEW, STATUS_QUEUE_REVIEW, STATUS_AWAITING_LISTING,
@@ -1270,123 +1268,12 @@ def unwind_item_downstream_data(item_id: int, target_status: str, actor_id: int,
     return {"reversed_sale_amount": reversed_amount, "cleared_listing_data": cleared_listing_data}
 
 
-def get_unbatched_pending_items():
-    """
-    Items currently in pending_ebay_upload that haven't been through an
-    /ebay export-batch run yet (ebay_batch_id IS NULL) - exactly what the
-    live, not-yet-exported ebay_csv.py CSV contains, since "Add to eBay
-    Batch" (item_flow.py) moves an item to pending_ebay_upload the moment
-    it's added, before any export happens. Used by /ebay export-batch to
-    snapshot a new ebay_batches row.
-    """
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM items WHERE status = ? AND ebay_batch_id IS NULL ORDER BY pallet_id, item_number",
-            (STATUS_PENDING_EBAY_UPLOAD,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def get_all_items_pending_ebay_upload():
-    """
-    EVERY item currently in pending_ebay_upload, regardless of whether
-    it's already been through an export (unlike get_unbatched_pending_items,
-    which only returns the not-yet-exported ones) - used by /ebay
-    requeue-pending to re-queue every already-exported-but-still-pending
-    item into a fresh live batch at once (e.g. after a bulk data fix like
-    correcting a wrong R2_PUBLIC_URL_BASE across many items' photo URLs -
-    the original CSV those items went out in has the old, stale data baked
-    into it as a static file, so getting the fix into eBay's hands means
-    generating a fresh CSV, not editing the one already downloaded).
-    """
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM items WHERE status = ? ORDER BY pallet_id, item_number",
-            (STATUS_PENDING_EBAY_UPLOAD,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def get_items_pending_fb_marketplace_upload():
-    """
-    Items currently sitting in pending_fb_marketplace_upload, waiting on
-    someone to run /fb-marketplace export-batch and upload the CSV to
-    Facebook. Unlike the eBay path, there's no numbered-batch/results-
-    reconciliation tracking here (not asked for) - just the live list of
-    what's in the not-yet-exported CSV, mirroring exactly what
-    fb_marketplace_csv.py's accumulating file already contains.
-    """
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM items WHERE status = ? ORDER BY pallet_id, item_number",
-            (STATUS_PENDING_FB_MARKETPLACE_UPLOAD,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def create_ebay_batch(csv_filename: str, exported_by: int, item_ids: list) -> int:
-    """Records a new ebay_batches snapshot and stamps ebay_batch_id onto
-    every item included in it. Returns the new batch's id."""
-    with get_conn() as conn:
-        cursor = conn.execute(
-            "INSERT INTO ebay_batches (csv_filename, exported_by, item_count, created_at) VALUES (?, ?, ?, ?)",
-            (csv_filename, exported_by, len(item_ids), _now()),
-        )
-        batch_id = cursor.lastrowid
-        conn.executemany(
-            "UPDATE items SET ebay_batch_id = ? WHERE id = ?",
-            [(batch_id, item_id) for item_id in item_ids],
-        )
-        return batch_id
-
-
-def get_ebay_batch(batch_id: int):
-    with get_conn() as conn:
-        row = conn.execute("SELECT * FROM ebay_batches WHERE id = ?", (batch_id,)).fetchone()
-        return dict(row) if row else None
-
-
-def get_ebay_batch_items(batch_id: int):
-    """Items from this batch still waiting on a result (status still
-    pending_ebay_upload) - what /ebay import-results has left to match
-    against. Items already confirmed (moved to listed) or otherwise moved
-    on don't show up here anymore, same as any other status-based query in
-    this bot."""
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM items WHERE ebay_batch_id = ? AND status = ? ORDER BY pallet_id, item_number",
-            (batch_id, STATUS_PENDING_EBAY_UPLOAD),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def list_ebay_batches(limit: int = 15):
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM ebay_batches ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
 def set_ebay_item_id(item_id: int, ebay_item_id: str):
     with get_conn() as conn:
         conn.execute(
             "UPDATE ebay_listing_data SET ebay_item_id = ?, updated_at = ? WHERE item_id = ?",
             (ebay_item_id, _now(), item_id),
         )
-
-
-def clear_ebay_batch_id(item_id: int):
-    """
-    Detaches an item from whichever batch it's currently stamped with,
-    making it show up in get_unbatched_pending_items() again (still
-    pending_ebay_upload, but no longer tied to a specific past batch) - used
-    by /ebay retry-item to re-queue an item whose upload failed (e.g. a
-    config-driven required field, like eBay's item location, wasn't set
-    yet) back into the live batch for a corrected re-export.
-    """
-    with get_conn() as conn:
-        conn.execute("UPDATE items SET ebay_batch_id = NULL WHERE id = ?", (item_id,))
 
 
 def record_ebay_category_use(category_id: str):
@@ -1493,8 +1380,7 @@ def get_pallet_financials(pallet_id: int):
         (the listing price captured for every approved item regardless of
         which platform it eventually sells on - see save_ebay_listing_data's
         docstring) across every item that's been priced but not yet sold -
-        awaiting_listing, pending_ebay_upload, pending_fb_marketplace_upload,
-        and listed. Deliberately broad: an item is "priced" the moment Queue
+        awaiting_listing and listed. Deliberately broad: an item is "priced" the moment Queue
         Review approves it, well before it's actually live anywhere, and
         this is meant to answer "what's the value of everything I've priced
         so far" regardless of exactly which pre-sale stage it's sitting in
@@ -1535,9 +1421,8 @@ def get_pallet_financials(pallet_id: int):
         pending_row = conn.execute(
             """SELECT COUNT(*) AS n, COALESCE(SUM(eld.price), 0) AS total
                FROM items i JOIN ebay_listing_data eld ON eld.item_id = i.id
-               WHERE i.pallet_id = ? AND i.status IN (?, ?, ?, ?, ?)""",
-            (pallet_id, STATUS_AWAITING_LISTING, STATUS_PENDING_EBAY_UPLOAD,
-             STATUS_PENDING_FB_MARKETPLACE_UPLOAD, STATUS_LISTED, STATUS_ON_HOLD),
+               WHERE i.pallet_id = ? AND i.status IN (?, ?, ?)""",
+            (pallet_id, STATUS_AWAITING_LISTING, STATUS_LISTED, STATUS_ON_HOLD),
         ).fetchone()
 
     items_received = pallet.get("items_received_override")

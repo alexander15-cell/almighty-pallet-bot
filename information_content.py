@@ -22,7 +22,6 @@ def build_embeds() -> list:
         _pipeline_embed(),
         _roles_embed(),
         _ebay_commands_embed(),
-        _fb_marketplace_commands_embed(),
         _finance_commands_embed(),
         _finance_channels_embed(),
         _website_shop_embed(),
@@ -105,26 +104,18 @@ def _pipeline_embed() -> discord.Embed:
     embed.add_field(
         name="4️⃣ #awaiting-listing (shared)",
         value=(
-            "Listing Management actually lists it: **Add to eBay Batch** or **Add to FB "
-            "Marketplace Batch** (CSV, no API - see the commands below), **List on eBay "
-            "(API)** (once configured), or **Mark Listed (Other)** for anywhere else entirely."
+            "Listing Management actually lists it: **List on eBay** puts it live on eBay "
+            "through the API in seconds (straight to #listed), **Edit Details** fixes the "
+            "title/price/item specifics first, or **Mark Listed (Other)** for anywhere else."
         ),
         inline=False,
     )
     embed.add_field(
-        name="5️⃣ #pending-ebay-upload / #pending-fb-marketplace-upload → #listed (shared)",
+        name="5️⃣ #listed → #sold → shipped",
         value=(
-            "Batch items wait here until confirmed live. Tap **Confirm Listed** right on the "
-            "card once you see it live on eBay/Facebook, then it moves to #listed alongside "
-            "everything else - no need to go find that pallet's own channel."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="6️⃣ #listed → #sold → shipped",
-        value=(
-            "**Mark as Sold** is a single click, no price prompt - Finance Management records "
-            "the actual price separately, at their own pace. **Mark as Shipped** checks it off. "
+            "eBay sales move to Sold and Shipped by themselves from eBay's order data; for "
+            "anything else, **Mark as Sold** is a single click and **Mark as Shipped** checks it "
+            "off. Finance Management logs the price separately (see #accounting). "
             "#10-day-alerts pings if anything sits in Listed for 10+ days."
         ),
         inline=False,
@@ -140,7 +131,7 @@ def _roles_embed() -> discord.Embed:
     )
     embed.add_field(name="Data Entry", value="Posts new items in #data-entry.", inline=True)
     embed.add_field(name="Queue Review", value="Approves/edits/rejects items in #queue-review.", inline=True)
-    embed.add_field(name="Listing Management", value="Lists approved items in #awaiting-listing; runs `/ebay`, `/fb-marketplace`, and `/pirate-ship` commands.", inline=True)
+    embed.add_field(name="Listing Management", value="Lists approved items in #awaiting-listing; runs `/ebay` and `/pirate-ship` commands.", inline=True)
     embed.add_field(name="Purchase Management", value="Sets a pallet's total cost with `/finance setprice`; submits invoices in #submit-invoices.", inline=True)
     embed.add_field(name="Finance Management", value="Records sales, refunds, expenses, shipping info - everything under `/finance`.", inline=True)
     embed.add_field(name="Pallet Admin", value="Full access everywhere, plus `/admin`, `/item`, `/pallet`, and `/setup` commands.", inline=True)
@@ -149,26 +140,12 @@ def _roles_embed() -> discord.Embed:
 
 def _ebay_commands_embed() -> discord.Embed:
     embed = discord.Embed(title="💬 Commands - eBay (`/ebay ...`)", color=COLOR)
-    embed.add_field(name="export-batch", value="Download the accumulated eBay CSV batch and start a fresh one.", inline=False)
-    embed.add_field(name="fill-recommendations", value="Upload eBay's returned recommendations file - fills in price/quantity/condition/format from Queue Review data.", inline=False)
     embed.add_field(name="category-search <query>", value="Look up a real eBay category ID by keyword.", inline=False)
     embed.add_field(name="category-aspects <category_id>", value="Show the item specifics eBay requires/recommends for a category. (Approve pre-fills these from the photo automatically.)", inline=False)
     embed.add_field(name="status", value="Check every eBay permission (orders, fees, listing, policies, location) and QuickBooks account the bot needs - ✅/❌ with what to fix. Read-only.", inline=False)
-    embed.add_field(name="retry-item <item_number> ...", value="Fix and re-queue an item whose batch upload needs a correction.", inline=False)
-    embed.add_field(name="requeue-pending", value="Bulk retry-item: re-queue EVERY item pending an eBay upload into a fresh batch, no corrections needed.", inline=False)
-    embed.add_field(name="batches / batch <id>", value="List recent batches, or show one batch's still-pending items.", inline=False)
-    embed.add_field(name="import-results <batch_id> <csv>", value="Reconcile a batch against a results CSV from Seller Hub.", inline=False)
-    embed.add_field(name="confirm-listed [item_number]", value="Manually confirm an item is live on eBay (or tap **Confirm Listed** right on its card in #pending-ebay-upload).", inline=False)
     embed.add_field(name="sync-finances [days_back]", value="Pull eBay's own fees, buyer-paid shipping, labels, refunds, and payouts (up to 5 years). Read-only - changes no recorded number, card, or QuickBooks entry.", inline=False)
     embed.add_field(name="net-report [pallet_name]", value="Recorded eBay revenue vs. eBay's real net payout, per pallet or business-wide, with a per-item CSV. Finance Management or Pallet Admin.", inline=False)
     embed.add_field(name="fee-cards since:<YYYY-MM-DD>", value="Post **💸 eBay fees to log** cards for older orders. New orders get one automatically in #ebay-orders - **Confirm & log fees** books eBay's fees/labels/ads to QuickBooks and the pallet's cost.", inline=False)
-    return embed
-
-
-def _fb_marketplace_commands_embed() -> discord.Embed:
-    embed = discord.Embed(title="💬 Commands - FB Marketplace (`/fb-marketplace ...`)", color=COLOR)
-    embed.add_field(name="export-batch", value="Download the accumulated FB Marketplace CSV batch and start a fresh one.", inline=False)
-    embed.add_field(name="confirm-listed [item_number]", value="Manually confirm an item is live on FB Marketplace (or tap **Confirm Listed** right on its card in #pending-fb-marketplace-upload).", inline=False)
     return embed
 
 

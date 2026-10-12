@@ -7,7 +7,7 @@ directly via its own native eBay integration, so exporting them again here
 would just be a duplicate. This only covers items sold somewhere Pirate
 Ship can't see on its own.
 
-Unlike ebay_csv.py, there's no separate "add to batch" step: /pirate-ship
+There's no separate "add to batch" step: /pirate-ship
 export-batch (cogs/pirate_ship.py) queries the database directly, each time
 it's run, for every STATUS_SOLD item with a non-eBay sale_platform that
 hasn't been exported yet (see database.get_unexported_other_platform_sales),
@@ -24,7 +24,7 @@ splits that for those rows only.
 Weight/dimensions reuse the same data captured on Queue Review's
 EbayListingModal (ebay_listing_data.weight_lb/length_in/width_in/
 height_in - eBay's own CSV upload doesn't carry this data at all any more,
-see ebay_csv.py) - database.get_unexported_other_platform_sales() resolves
+see ebay_listing_rules.py) - database.get_unexported_other_platform_sales() resolves
 each item's best-available value (human-confirmed via that modal when the
 item went through that flow, else the AI's automated-review estimate) as
 pirate_ship_weight_lb/length_in/width_in/height_in. Still left blank when
@@ -66,7 +66,7 @@ def _split_weight_lb(weight_lb) -> tuple:
     """
     Pirate Ship's import wants whole pounds and remaining ounces as separate
     columns (Weight (lb)/Weight (oz)), not one decimal-pounds value - same
-    split ebay_csv.py's WeightMajor/WeightMinor columns need, duplicated
+    split (whole pounds + ounces), duplicated
     here rather than imported since it's a tiny pure function and these two
     export modules otherwise have no dependency on each other. Returns
     ("", "") if weight_lb is None (no weight captured for this item yet)

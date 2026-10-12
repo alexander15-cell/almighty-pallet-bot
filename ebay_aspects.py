@@ -6,7 +6,7 @@ pre-fill built on top of them.
 Why: eBay ranks listings with complete item specifics higher, and some
 categories reject a listing outright without certain ones. Until now the bot
 only ever guessed three of them (Brand/MPN/Type, "Does Not Apply" when it
-couldn't - see ebay_csv.py), so most listings went out with almost none.
+couldn't - see ebay_api._build_aspects), so most listings went out with almost none.
 Now:
 
   1. Automated Review (cogs/item_flow.py's run_ai_review) matches the AI's
