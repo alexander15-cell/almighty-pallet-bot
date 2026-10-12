@@ -166,6 +166,19 @@ async def get_access_token() -> str:
     config.EBAY_REFRESH_TOKEN) if the cached one is at or past its safety
     margin. Every API call below goes through this - nothing else in this
     module reads the cache directly.
+
+    Deliberately omits `scope` from the refresh grant rather than
+    hardcoding one - per OAuth spec, an omitted scope on a refresh_token
+    grant defaults to everything the refresh token itself was actually
+    granted, so the resulting access token's permissions track whatever
+    EBAY_REFRESH_TOKEN currently covers automatically. An earlier version
+    of this function hardcoded "sell.inventory" here, which silently
+    narrowed every access token it minted to JUST that scope even after
+    EBAY_REFRESH_TOKEN was re-consented with sell.fulfillment/sell.account
+    added - confirmed as the real cause of get_orders() failing with a
+    permission-shaped 403 even though the refresh token itself genuinely
+    carried the wider scope (verified by requesting that scope alone,
+    directly, outside this function, and having it succeed).
     """
     global _cached_access_token, _cached_expires_at
 
@@ -176,7 +189,6 @@ async def get_access_token() -> str:
     data = {
         "grant_type": "refresh_token",
         "refresh_token": config.EBAY_REFRESH_TOKEN,
-        "scope": "https://api.ebay.com/oauth/api_scope/sell.inventory",
     }
     url = f"{_identity_base_url()}/identity/v1/oauth2/token"
     async with aiohttp.ClientSession() as session:

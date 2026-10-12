@@ -125,6 +125,18 @@ def test_get_access_token_requests_a_fresh_token(monkeypatch):
     assert calls[0]["data"]["refresh_token"] == "test-refresh-token"
 
 
+def test_get_access_token_does_not_narrow_the_scope(monkeypatch):
+    """Regression test: this grant must NOT send a `scope` field - doing
+    so silently narrows the minted access token to only that scope no
+    matter how wide EBAY_REFRESH_TOKEN's own granted scope actually is,
+    which is exactly what caused get_orders() to fail with a
+    permission-shaped 403 even once the refresh token genuinely carried
+    sell.fulfillment."""
+    calls = _install_fake_session(monkeypatch, lambda m, u, d: (200, {"access_token": "tok-1", "expires_in": 7200}))
+    asyncio.run(ebay_api.get_access_token())
+    assert "scope" not in calls[0]["data"]
+
+
 def test_get_access_token_reuses_a_still_valid_cached_token(monkeypatch):
     calls = _install_fake_session(monkeypatch, lambda m, u, d: (200, {"access_token": "tok-1", "expires_in": 7200}))
     asyncio.run(ebay_api.get_access_token())
