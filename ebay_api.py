@@ -251,9 +251,15 @@ async def get_condition_policies(category_id: str) -> set:
     is.
     """
     access_token = await get_app_access_token()
+    # The path really is "get_item_condition_policies" (verb included) per
+    # eBay's Metadata API spec - the shorter "item_condition_policies" 404s
+    # (errorId 2002, "Resource not found"), which silently sent every
+    # lookup to the static safe-set fallback. The filter value is
+    # URL-encoded, as eBay's docs require.
+    filter_value = urllib.parse.quote(f"categoryIds:{{{category_id}}}", safe="")
     url = (
-        f"{_metadata_base_url()}/marketplace/{config.EBAY_MARKETPLACE_ID}/item_condition_policies"
-        f"?filter=categoryIds:{{{category_id}}}"
+        f"{_metadata_base_url()}/marketplace/{config.EBAY_MARKETPLACE_ID}/get_item_condition_policies"
+        f"?filter={filter_value}"
     )
     headers = {"Authorization": f"Bearer {access_token}"}
     async with aiohttp.ClientSession() as session:

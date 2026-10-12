@@ -205,7 +205,7 @@ def _condition_policy_responder(conditions):
     def responder(method, url, body):
         if "oauth2/token" in url:
             return 200, {"access_token": "app-tok-1", "expires_in": 7200}
-        if method == "GET" and "/item_condition_policies" in url:
+        if method == "GET" and "/get_item_condition_policies" in url:
             return 200, {
                 "itemConditionPolicies": [
                     {"categoryId": "12345", "itemConditions": [{"conditionId": c} for c in conditions]},
@@ -220,6 +220,19 @@ def test_get_condition_policies_returns_the_live_allowed_set(monkeypatch):
     _install_fake_session(monkeypatch, _condition_policy_responder(["1000", "1500"]))
     allowed = asyncio.run(ebay_api.get_condition_policies("12345"))
     assert allowed == {"1000", "1500"}
+
+
+def test_get_condition_policies_calls_ebays_real_endpoint_path(monkeypatch):
+    # Regression guard: the path was once ".../item_condition_policies"
+    # (missing "get_"), which 404s on real eBay and silently pushed every
+    # lookup into the static fallback. Pinned to eBay's published spec path.
+    calls = _install_fake_session(monkeypatch, _condition_policy_responder(["1000"]))
+    asyncio.run(ebay_api.get_condition_policies("12345"))
+    lookup = next(c for c in calls if "oauth2/token" not in c["url"])
+    assert lookup["url"] == (
+        "https://api.ebay.com/sell/metadata/v1/marketplace/EBAY_US/get_item_condition_policies"
+        "?filter=categoryIds%3A%7B12345%7D"
+    )
 
 
 def test_get_condition_policies_raises_when_category_has_no_match(monkeypatch):
@@ -573,7 +586,7 @@ def test_create_listing_requires_publish_config(monkeypatch):
 def _happy_path_responder(method, url, body):
     if "oauth2/token" in url:
         return 200, {"access_token": "tok-1", "expires_in": 7200}
-    if method == "GET" and "/item_condition_policies" in url:
+    if method == "GET" and "/get_item_condition_policies" in url:
         # No live condition data for these fake test category IDs - this
         # exercises resolve_condition_id_with_live_check's fallback to the
         # same static check the pre-existing tests below assume.
@@ -595,7 +608,7 @@ def test_create_listing_happy_path_returns_the_real_ebay_item_id(monkeypatch):
     assert result == {"ebay_item_id": "ebay-item-999"}
     methods_and_urls = [
         (c["method"], c["url"]) for c in calls
-        if "oauth2/token" not in c["url"] and "item_condition_policies" not in c["url"]
+        if "oauth2/token" not in c["url"] and "get_item_condition_policies" not in c["url"]
     ]
     assert methods_and_urls == [
         ("PUT", f"{ebay_api._api_base_url()}/inventory_item/pallet-1-item-1"),
@@ -691,7 +704,7 @@ def test_create_listing_raises_if_offer_has_no_offer_id(monkeypatch):
     def responder(method, url, body):
         if "oauth2/token" in url:
             return 200, {"access_token": "tok-1", "expires_in": 7200}
-        if method == "GET" and "/item_condition_policies" in url:
+        if method == "GET" and "/get_item_condition_policies" in url:
             return 200, {"itemConditionPolicies": []}
         if method == "PUT":
             return 200, {}
