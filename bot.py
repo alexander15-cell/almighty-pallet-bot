@@ -30,6 +30,7 @@ COGS = [
     "cogs.finance",
     "cogs.ebay",
     "cogs.pirate_ship",
+    "cogs.partners",
     "cogs.help",
 ]
 if config.WEBSITE_SHOP_ENABLED:

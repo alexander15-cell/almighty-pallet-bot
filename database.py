@@ -684,6 +684,42 @@ def init_db():
                 cogs_amount      REAL NOT NULL,
                 voided_at        TEXT NOT NULL
             );
+
+            -- The business's partners (see partner_ledger.py) - profit is
+            -- split equally between the ACTIVE ones. Removing a partner
+            -- only sets active = 0; their ledger history stays.
+            CREATE TABLE IF NOT EXISTS partners (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_user_id  INTEGER NOT NULL UNIQUE,
+                display_name     TEXT NOT NULL,
+                active           INTEGER NOT NULL DEFAULT 1,
+                added_by         INTEGER,
+                added_at         TEXT NOT NULL
+            );
+
+            -- Money between the business and its partners. A record only -
+            -- the bot never moves money or posts these to QuickBooks.
+            --   contribution  - partner put money into the business
+            --   fronted       - partner paid a business expense personally
+            --                   (the business owes it back; the expense
+            --                   itself is still recorded the normal way)
+            --   reimbursement - business paid a partner back for fronted costs
+            --   payout        - business paid a partner part of the profit
+            -- amount is always positive. Mistakes are voided (voided_at +
+            -- reason), never deleted, so the history stays complete.
+            CREATE TABLE IF NOT EXISTS partner_ledger (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                partner_id   INTEGER NOT NULL,
+                entry_type   TEXT NOT NULL,
+                amount       REAL NOT NULL,
+                note         TEXT,
+                entry_date   TEXT NOT NULL,
+                created_by   INTEGER,
+                created_at   TEXT NOT NULL,
+                voided_at    TEXT,
+                voided_by    INTEGER,
+                void_reason  TEXT
+            );
             """
         )
         _migrate_add_columns(conn)
@@ -2367,6 +2403,87 @@ def mark_accounting_entry_logged(item_id: int, sale_id: int):
             "UPDATE accounting_worklist SET sale_id = ?, logged_at = ? WHERE item_id = ?",
             (sale_id, _now(), item_id),
         )
+
+
+# ---------------------------------------------------------- partner ledger --
+# See partner_ledger.py. Plain records - nothing here moves money.
+
+def add_partner(discord_user_id: int, display_name: str, added_by: int) -> dict:
+    """Adds a partner, or re-activates one who was removed (keeping their
+    history). Returns the partner row."""
+    with get_conn() as conn:
+        existing = conn.execute("SELECT * FROM partners WHERE discord_user_id = ?", (discord_user_id,)).fetchone()
+        if existing:
+            conn.execute("UPDATE partners SET active = 1, display_name = ? WHERE id = ?",
+                         (display_name, existing["id"]))
+        else:
+            conn.execute(
+                "INSERT INTO partners (discord_user_id, display_name, active, added_by, added_at) VALUES (?, ?, 1, ?, ?)",
+                (discord_user_id, display_name, added_by, _now()),
+            )
+        return dict(conn.execute("SELECT * FROM partners WHERE discord_user_id = ?", (discord_user_id,)).fetchone())
+
+
+def deactivate_partner(discord_user_id: int) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE partners SET active = 0 WHERE discord_user_id = ? AND active = 1", (discord_user_id,))
+        return cur.rowcount == 1
+
+
+def get_partner_by_discord_id(discord_user_id: int):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM partners WHERE discord_user_id = ?", (discord_user_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_partners(active_only: bool = True) -> list:
+    with get_conn() as conn:
+        query = "SELECT * FROM partners" + (" WHERE active = 1" if active_only else "") + " ORDER BY id"
+        return [dict(r) for r in conn.execute(query).fetchall()]
+
+
+def add_partner_ledger_entry(partner_id: int, entry_type: str, amount: float, note: str, entry_date: str,
+                             created_by: int) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO partner_ledger (partner_id, entry_type, amount, note, entry_date, created_by, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (partner_id, entry_type, round(amount, 2), note, entry_date, created_by, _now()),
+        )
+        return cur.lastrowid
+
+
+def get_partner_ledger_entry(entry_id: int):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM partner_ledger WHERE id = ?", (entry_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def void_partner_ledger_entry(entry_id: int, reason: str, voided_by: int) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE partner_ledger SET voided_at = ?, voided_by = ?, void_reason = ? WHERE id = ? AND voided_at IS NULL",
+            (_now(), voided_by, reason, entry_id),
+        )
+        return cur.rowcount == 1
+
+
+def get_partner_ledger(partner_id: int = None, include_voided: bool = False, limit: int = None) -> list:
+    """Ledger entries (newest first) joined with the partner's name."""
+    query = ("SELECT l.*, p.display_name, p.discord_user_id FROM partner_ledger l "
+             "JOIN partners p ON p.id = l.partner_id WHERE 1 = 1")
+    params = []
+    if partner_id is not None:
+        query += " AND l.partner_id = ?"
+        params.append(partner_id)
+    if not include_voided:
+        query += " AND l.voided_at IS NULL"
+    query += " ORDER BY l.entry_date DESC, l.id DESC"
+    if limit:
+        query += " LIMIT ?"
+        params.append(limit)
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(query, params).fetchall()]
 
 
 def count_item_refunds_and_expenses(item_ids: list) -> int:

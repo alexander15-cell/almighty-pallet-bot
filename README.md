@@ -399,6 +399,36 @@ Both are created by `/setup shared-channels` like every other shared
 channel; the dashboard also gets its first pinned snapshot posted
 automatically the moment the channel is created.
 
+## Partner ledger (`/partners`)
+
+Keeps the four of you square: who put money into the business, who paid a
+business expense out of pocket and is owed for it, what's been paid back,
+and each partner's **equal** share of the profit. A record only - the bot
+never moves money or posts these to QuickBooks.
+
+- `/partners add @member` / `remove @member` (Pallet Admin) - who the
+  partners are. Profit splits equally between the active ones; removing
+  someone keeps their history (re-adding restores it).
+- `/partners put-in <amount>` - a partner put money in (defaults to you).
+- `/partners paid-expense <amount> <note>` - a partner paid a business
+  expense personally, so the business owes it back. **Still record the
+  expense itself the normal way** (`/finance setprice`, `#submit-invoices`,
+  `/finance expense`) - this only records who paid it.
+- `/partners reimburse @member <amount>` - the business paid them back
+  (refused if it's more than they're owed).
+- `/partners payout @member <amount>` - profit paid out.
+- `/partners void <entry_id> <reason>` - undo a mistake; it stays in
+  history, struck through. Every entry also posts to `#finance-audit-log`.
+- `/partners summary` / `history` - Finance Management or any partner.
+
+Recording entries needs Finance Management (or Pallet Admin); each takes an
+optional `date` (YYYY-MM-DD) and `note`. The summary shows profit to date
+(every pallet's net revenue minus its cost, from the bot's own numbers -
+pallets with sales but no cost entered are flagged, since they'd overstate
+it), the equal share, and per partner: **equity** (put in + share -
+payouts), what the business **owes them** for expenses, and how far
+**behind on payouts** they are versus whoever has been paid the most.
+
 ## Listing: eBay through the API, everything else by hand
 
 Every eBay listing is created through eBay's own API (**List on eBay** on
@@ -1333,9 +1363,10 @@ this scale.
   rather than trusting one fixed schema. If a real export's columns don't
   match well in practice, tighten the matching in that module rather than
   guessing further - don't widen it speculatively.
-- **No automatic partner profit distribution.** Flagged as a possible
-  future feature, deliberately not built without an explicit spec for how
-  payouts/splits should actually work.
+- **The partner ledger is a record, not a payment system.** `/partners`
+  tracks money in, reimbursements and payouts and splits profit equally,
+  but never moves money or posts to QuickBooks - pay people outside the
+  bot, then record it.
 - **QuickBooks integration is read/allocate/report only, on purpose.**
   Nothing in `quickbooks.py` (or anywhere else) can initiate a payment,
   transfer, or card action (freeze, limit change, etc) - a deliberate

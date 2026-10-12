@@ -167,6 +167,11 @@ ENTRIES = (
         ("undo sale", "reverse sale", "fix sale", "void sale", "cancelled sale"),
     ),
     HelpEntry(
+        "/partners summary / put-in / paid-expense / reimburse / payout",
+        "Partner ledger: money each partner put in, expenses they paid personally, reimbursements, profit payouts, and everyone's equal share. A record only - never moves money.",
+        ("partner", "partners", "split profit", "payout", "reimburse", "reimbursement", "who owes", "contribution", "put money in", "equity"),
+    ),
+    HelpEntry(
         "/ebay status",
         "Check every eBay permission and QuickBooks setting the bot needs - shows what works and what to fix. Read-only.",
         ("status", "health check", "is it working", "ebay permissions", "scopes", "check setup"),

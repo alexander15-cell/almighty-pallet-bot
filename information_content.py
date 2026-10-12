@@ -24,6 +24,7 @@ def build_embeds() -> list:
         _ebay_commands_embed(),
         _finance_commands_embed(),
         _finance_channels_embed(),
+        _partners_embed(),
         _website_shop_embed(),
         _shipping_commands_embed(),
         _pallet_item_commands_embed(),
@@ -146,6 +147,25 @@ def _ebay_commands_embed() -> discord.Embed:
     embed.add_field(name="sync-finances [days_back]", value="Pull eBay's own fees, buyer-paid shipping, labels, refunds, and payouts (up to 5 years). Read-only - changes no recorded number, card, or QuickBooks entry.", inline=False)
     embed.add_field(name="net-report [pallet_name]", value="Recorded eBay revenue vs. eBay's real net payout, per pallet or business-wide, with a per-item CSV. Finance Management or Pallet Admin.", inline=False)
     embed.add_field(name="fee-cards since:<YYYY-MM-DD>", value="Post **💸 eBay fees to log** cards for older orders. New orders get one automatically in #ebay-orders - **Confirm & log fees** books eBay's fees/labels/ads to QuickBooks and the pallet's cost.", inline=False)
+    return embed
+
+
+def _partners_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🤝 Partner Ledger (`/partners ...`)",
+        description=(
+            "Who put money in, who paid a business expense out of pocket and is owed for it, what's been "
+            "paid back, and everyone's **equal** share of the profit. A record only - the bot never moves "
+            "money. Recording needs Finance Management; any partner can view."
+        ),
+        color=COLOR,
+    )
+    embed.add_field(name="summary / history", value="Profit to date, each partner's equity (put in + share - payouts), what they're owed, and how far behind on payouts.", inline=False)
+    embed.add_field(name="put-in <amount>", value="A partner put money into the business (defaults to you).", inline=False)
+    embed.add_field(name="paid-expense <amount> <note>", value="A partner paid a business expense personally - the business owes it back. Still record the expense itself the normal way.", inline=False)
+    embed.add_field(name="reimburse / payout @member <amount>", value="The business paid a partner back for expenses, or paid out profit.", inline=False)
+    embed.add_field(name="void <entry_id> <reason>", value="Undo a mistaken entry (kept in history, struck through).", inline=False)
+    embed.add_field(name="add / remove @member", value="Pallet Admin: who the partners are. Profit splits equally between active partners.", inline=False)
     return embed
 
 
