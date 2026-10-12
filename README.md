@@ -763,6 +763,11 @@ driven by eBay's own data:
   `#ebay-orders` pointing at `/item move-back`. Never reversed
   automatically, since a logged sale may need its Sales Receipt voided.
 - **Sold while On Hold** -> one alert; the item stays on hold.
+- **Every paid order whose item is Sold/Shipped gets a Confirm & log sale
+  card.** The new-order check above only looks at orders created in the
+  last 3 days; an older order eBay updates later (e.g. when it ships) is
+  picked up here instead, and its card is posted then - unless that sale
+  was already logged another way (e.g. `/finance log-sale`).
 
 Orders that aren't paid (pending, failed, fully refunded) or have a cancel
 request open are left alone. Items are matched by SKU, then confirmed

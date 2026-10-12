@@ -416,6 +416,12 @@ async def _reconcile_ebay_order_statuses(bot: discord.Client, orders: list) -> d
     ever auto-sold/auto-shipped once (ebay_order_automation_log, recorded
     only after the move succeeds, so a transient failure retries next poll
     while a human moving an item back afterwards sticks). Returns counts.
+
+    Also makes sure every paid order whose item ended up Sold/Shipped has a
+    "Confirm & log sale" card (_ensure_order_card) - the new-order check in
+    order_poll_loop only looks at orders CREATED in the last 3 days, so an
+    older order that eBay updated later (e.g. when it shipped) used to get
+    moved to Sold here with no card to log it from.
     """
     cog = bot.get_cog("ItemFlow")
     counts = {"sold": 0, "shipped": 0, "alerts": 0}
@@ -428,6 +434,7 @@ async def _reconcile_ebay_order_statuses(bot: discord.Client, orders: list) -> d
         cancelled = cancel_state == "CANCELED"
         cancel_requested = cancel_state not in ("NONE_REQUESTED", "CANCELED")
         paid = order.get("payment_status") not in _UNPAID_PAYMENT_STATUSES
+        sold_items = []
 
         for line in order["line_items"]:
             item = ebay_finances.match_line_to_item({**line, "order_date": order.get("order_date")})
@@ -472,9 +479,46 @@ async def _reconcile_ebay_order_statuses(bot: discord.Client, orders: list) -> d
                     if await cog.auto_mark_shipped_from_ebay(item, order_id):
                         db.record_ebay_order_automation(order_id, item["id"], "shipped")
                         counts["shipped"] += 1
+                    item = db.get_item(item["id"])
+
+                if item["status"] in (db.STATUS_SOLD, db.STATUS_SHIPPED) and not _order_predates_listing(order, item):
+                    sold_items.append(item)
             except discord_resilience.TRANSIENT_DISCORD_ERRORS:
                 log.exception("eBay order automation failed for %s (order %s) - will retry next poll", label, order_id)
+
+        if sold_items and paid and not cancelled and not cancel_requested \
+                and not db.has_seen_ebay_order(order_id) \
+                and not any(db.get_item_sale(i["id"]) for i in sold_items):
+            await _ensure_order_card(bot, order_id)
     return counts
+
+
+async def _ensure_order_card(bot: discord.Client, order_id: str) -> bool:
+    """
+    Posts the "Confirm & log sale" card for an order the new-order check
+    never carded (see _reconcile_ebay_order_statuses), fetching it fresh
+    from eBay for the price/date/SKUs the card needs. Marks the order seen
+    once posted, so it's never carded twice. Returns True if a card was
+    posted. An eBay or Discord failure is logged and left un-seen, so the
+    next poll tries again.
+    """
+    try:
+        order = await ebay_api.get_order(order_id)
+    except ebay_api.EbayAPIError:
+        log.exception("Couldn't fetch eBay order %s to post its sale card - will retry next poll", order_id)
+        return False
+    matched = _match_order_line_items(order)
+    if not matched or any(db.get_item_sale(i["id"]) for i in matched):
+        db.mark_ebay_order_seen(order_id)
+        return False
+    try:
+        await _post_ebay_order_match(bot, order, matched)
+    except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+        log.exception("Couldn't post eBay order %s's sale card - will retry next poll", order_id)
+        return False
+    db.mark_ebay_order_seen(order_id)
+    log.info("Posted a missing Confirm & log sale card for eBay order %s", order_id)
+    return True
 
 
 async def _run_order_automation(bot: discord.Client) -> dict:

@@ -84,6 +84,10 @@ def env(fresh_db, monkeypatch):
                        ("accounting", ACCOUNTING)):
         fresh_db.set_shared_channel(stage, cid)
     monkeypatch.setattr(item_flow_module.finance_utils, "refresh_finance_message", AsyncMock())
+    # The missing-card fetch (_ensure_order_card) - unavailable by default so
+    # the older tests stay about status moves; the card tests below override.
+    monkeypatch.setattr(ebay_module.ebay_api, "get_order",
+                        AsyncMock(side_effect=ebay_api.EbayAPIError("not faked in this test")))
     bot = _FakeBot()
     bot.cog = ItemFlow(bot)
     pallet_id = fresh_db.create_pallet("Pallet-A", category_id=1, created_by=1)
@@ -116,7 +120,17 @@ def _run(bot, orders):
 
 
 def _order_alerts(bot):
-    return [m["content"] for m in bot.channels[ORDERS].sent]
+    return [m["content"] for m in bot.channels[ORDERS].sent if m.get("content")]
+
+
+def _order_cards(bot):
+    return [m for m in bot.channels[ORDERS].sent if m.get("embed") is not None]
+
+
+def _full_order(item, order_id="O-1", total=16.76):
+    """ebay_api.get_order's shape - what the Confirm & log sale card needs."""
+    return {"order_id": order_id, "sale_date": "2026-10-12", "total_price": total,
+            "line_items": [{"sku": f"pallet-{item['pallet_id']}-item-{item['item_number']}", "quantity": 1}]}
 
 
 # ------------------------------------------------------------------- Sold
@@ -264,6 +278,104 @@ def test_sale_of_an_on_hold_item_alerts_once_and_leaves_it_on_hold(fresh_db, env
     assert fresh_db.get_item(item["id"])["status"] == fresh_db.STATUS_ON_HOLD
     alerts = [a for a in _order_alerts(bot) if "on hold" in a]
     assert len(alerts) == 1
+
+
+# ------------------------------------- missing "Confirm & log sale" cards
+# The production bug: older orders (created > 3 days ago, so the new-order
+# check never saw them) got moved to Sold here once eBay updated them, but
+# never got a card to log the sale from.
+
+def test_auto_sold_order_without_a_card_gets_one(fresh_db, env, monkeypatch):
+    bot, pallet_id = env
+    item, _ = _listed_item(fresh_db, bot, pallet_id)
+    get_order = AsyncMock(return_value=_full_order(item, total=16.04))
+    monkeypatch.setattr(ebay_module.ebay_api, "get_order", get_order)
+
+    _run(bot, [_order(item)])
+
+    cards = _order_cards(bot)
+    assert len(cards) == 1
+    assert cards[0]["embed"].title == "📦 New eBay order" and "$16.04" in cards[0]["embed"].fields[1].value
+    assert cards[0]["view"].children[0].order_id == "O-1"
+    assert fresh_db.has_seen_ebay_order("O-1")
+    get_order.assert_awaited_once_with("O-1")
+
+
+def test_item_already_sold_from_an_uncarded_order_gets_its_card(fresh_db, env, monkeypatch):
+    """Exactly the case that happened: items were moved to Sold before
+    this fix, with no card - the next poll that sees the order posts it."""
+    bot, pallet_id = env
+    item, _ = _listed_item(fresh_db, bot, pallet_id)
+    fresh_db.update_status(item["id"], fresh_db.STATUS_SOLD, actor_id=None)
+    monkeypatch.setattr(ebay_module.ebay_api, "get_order", AsyncMock(return_value=_full_order(item)))
+
+    _run(bot, [_order(item, fulfillment="FULFILLED")])
+
+    assert len(_order_cards(bot)) == 1
+    assert fresh_db.get_item(item["id"])["status"] == fresh_db.STATUS_SHIPPED
+
+
+def test_a_card_is_never_posted_twice(fresh_db, env, monkeypatch):
+    bot, pallet_id = env
+    item, _ = _listed_item(fresh_db, bot, pallet_id)
+    get_order = AsyncMock(return_value=_full_order(item))
+    monkeypatch.setattr(ebay_module.ebay_api, "get_order", get_order)
+
+    _run(bot, [_order(item)])
+    _run(bot, [_order(item, fulfillment="FULFILLED")])
+
+    assert len(_order_cards(bot)) == 1 and get_order.await_count == 1
+
+
+def test_order_the_new_order_check_already_carded_is_left_alone(fresh_db, env, monkeypatch):
+    bot, pallet_id = env
+    item, _ = _listed_item(fresh_db, bot, pallet_id)
+    fresh_db.mark_ebay_order_seen("O-1")
+    get_order = AsyncMock(return_value=_full_order(item))
+    monkeypatch.setattr(ebay_module.ebay_api, "get_order", get_order)
+
+    _run(bot, [_order(item)])
+
+    assert _order_cards(bot) == [] and get_order.await_count == 0
+
+
+def test_sale_already_logged_another_way_gets_no_card(fresh_db, env, monkeypatch):
+    bot, pallet_id = env
+    item, _ = _listed_item(fresh_db, bot, pallet_id)
+    fresh_db.update_status(item["id"], fresh_db.STATUS_SOLD, actor_id=1)
+    sale_id = fresh_db.create_sale("eBay", "2026-10-12", 16.04, False, created_by=1)  # e.g. /finance log-sale
+    fresh_db.add_sale_item(sale_id, item["id"], 16.04)
+    get_order = AsyncMock(return_value=_full_order(item))
+    monkeypatch.setattr(ebay_module.ebay_api, "get_order", get_order)
+
+    _run(bot, [_order(item)])
+
+    assert _order_cards(bot) == [] and get_order.await_count == 0
+
+
+def test_ebay_failure_retries_the_card_next_poll(fresh_db, env, monkeypatch):
+    bot, pallet_id = env
+    item, _ = _listed_item(fresh_db, bot, pallet_id)
+
+    _run(bot, [_order(item)])  # get_order fails (fixture default)
+    assert _order_cards(bot) == [] and not fresh_db.has_seen_ebay_order("O-1")
+    assert fresh_db.get_item(item["id"])["status"] == fresh_db.STATUS_SOLD  # the move itself still happened
+
+    monkeypatch.setattr(ebay_module.ebay_api, "get_order", AsyncMock(return_value=_full_order(item)))
+    _run(bot, [_order(item)])
+    assert len(_order_cards(bot)) == 1
+
+
+def test_cancelled_or_unpaid_orders_get_no_card(fresh_db, env, monkeypatch):
+    bot, pallet_id = env
+    item, _ = _listed_item(fresh_db, bot, pallet_id)
+    fresh_db.update_status(item["id"], fresh_db.STATUS_SOLD, actor_id=1)
+    get_order = AsyncMock(return_value=_full_order(item))
+    monkeypatch.setattr(ebay_module.ebay_api, "get_order", get_order)
+
+    _run(bot, [_order(item, cancel="CANCELED"), _order(item, order_id="O-2", payment="FULLY_REFUNDED")])
+
+    assert _order_cards(bot) == [] and get_order.await_count == 0
 
 
 # ------------------------------------------------------------ poll wiring
