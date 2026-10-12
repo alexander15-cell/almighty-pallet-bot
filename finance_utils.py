@@ -340,6 +340,31 @@ async def update_accounting_entries(bot: discord.Client, sale_id: int, receipt_d
             db.mark_accounting_entry_logged(sale_item["item_id"], sale_id)
 
 
+async def mark_accounting_entries_reversed(bot: discord.Client, item_ids: list, sale_id: int, reason: str):
+    """Edits each item's #accounting post to show its logged sale was
+    reversed (/finance reverse-sale) - back on the to-do list if it sells
+    again. Best-effort, same rules as update_accounting_entries."""
+    if config.PRESERVE_DISCORD_HISTORY:
+        return
+    for item_id in item_ids:
+        entry = db.get_accounting_entry(item_id)
+        if not entry:
+            continue
+        item = db.get_item(item_id)
+        pallet = db.get_pallet(item["pallet_id"])
+        title = item.get("ai_title") or item.get("raw_description") or "(no title)"
+        text = (f"↩️ **{pallet['name'] if pallet else item['pallet_id']}** item #{item['item_number']} - \"{title}\" - "
+                f"sale #{sale_id} was reversed ({reason}).")
+        channel = bot.get_channel(entry["channel_id"])
+        if channel is None:
+            continue
+        try:
+            message = await channel.fetch_message(entry["message_id"])
+            await message.edit(content=text)
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
+            print(f"[finance_utils] Could not update #accounting entry for item {item_id}: {e}")
+
+
 async def _post_pallet_warnings(channel: discord.TextChannel, pallet: dict, fin: dict):
     """
     Simple early-warning checks (see config.QUICKBOOKS_MARGIN_WARNING_THRESHOLD_PCT)

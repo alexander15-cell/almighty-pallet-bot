@@ -208,8 +208,13 @@ ENTRIES = (
     ),
     HelpEntry(
         "/finance reverse-sale",
-        "Undo an item's recorded sale (duplicate entry, fell through).",
-        ("undo sale", "reverse sale", "fix sale"),
+        "Undo an item's recorded sale (duplicate entry, fell through). For a sale already in QuickBooks: void its Sales Receipt there, then run with quickbooks_voided:True.",
+        ("undo sale", "reverse sale", "fix sale", "void sale", "cancelled sale"),
+    ),
+    HelpEntry(
+        "/ebay status",
+        "Check every eBay permission and QuickBooks setting the bot needs - shows what works and what to fix. Read-only.",
+        ("status", "health check", "is it working", "ebay permissions", "scopes", "check setup"),
     ),
     HelpEntry(
         "/finance set-shipping-info",

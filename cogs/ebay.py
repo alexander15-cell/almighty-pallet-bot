@@ -89,6 +89,7 @@ import ebay_recommendations
 import ebay_results
 import finance_utils
 import runtime_settings
+import status_checks
 
 log = logging.getLogger(__name__)
 
@@ -1124,6 +1125,27 @@ class Ebay(commands.Cog):
             "(Uses the last `/ebay sync-finances` data - run that first for older orders.)",
             ephemeral=True,
         )
+
+    @ebay_group.command(
+        name="status",
+        description="Check every eBay permission and QuickBooks setting the bot needs. Read-only.",
+    )
+    async def status(self, interaction: discord.Interaction):
+        if not await _require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        ebay_results = await status_checks.ebay_checks()
+        qb_results = await status_checks.quickbooks_checks()
+        problems = sum(1 for c in ebay_results + qb_results if c.state is False)
+        embed = discord.Embed(
+            title="🩺 Bot connection status",
+            description="All good ✅" if not problems else f"**{problems} problem(s)** - see ❌ below.",
+            color=discord.Color.green() if not problems else discord.Color.red(),
+        )
+        embed.add_field(name="eBay", value=status_checks.format_checks(ebay_results)[:1024], inline=False)
+        embed.add_field(name="QuickBooks", value=status_checks.format_checks(qb_results)[:1024], inline=False)
+        embed.set_footer(text="Read-only check - nothing was created or changed.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @ebay_group.command(
         name="category-aspects",

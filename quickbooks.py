@@ -260,6 +260,20 @@ async def get_account_balance(account_id: str) -> dict:
     return {"id": account["Id"], "name": account.get("Name"), "balance": account.get("CurrentBalance", 0.0)}
 
 
+async def get_account(account_id: str) -> dict:
+    """One account's {'id', 'name', 'type', 'active'} - used by /ebay status
+    to check the configured account IDs exist and are the right kind.
+    Raises QuickBooksError if there's no account with that ID."""
+    result = await _request("GET", "query", params={
+        "query": f"SELECT Id, Name, AccountType, Active FROM Account WHERE Id = '{_quote_query_string(str(account_id))}'"
+    })
+    rows = result.get("QueryResponse", {}).get("Account", [])
+    if not rows:
+        raise QuickBooksError(f"No QuickBooks account found with id {account_id!r}.")
+    row = rows[0]
+    return {"id": row["Id"], "name": row.get("Name"), "type": row.get("AccountType"), "active": row.get("Active", True)}
+
+
 async def list_recent_transactions(account_id: str, since: datetime = None, max_results: int = 100) -> list:
     """
     Purchase transactions (QuickBooks' entity for card charges/expenses)

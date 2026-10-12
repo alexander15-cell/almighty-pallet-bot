@@ -1176,8 +1176,10 @@ class Finance(commands.Cog):
     @app_commands.describe(
         item_number="The item's number shown on its card (e.g. 3)",
         reason="Why - shown in /finance history",
+        quickbooks_voided="For a sale already logged to QuickBooks: True once its Sales Receipt is voided there",
     )
-    async def reverse_sale(self, interaction: discord.Interaction, item_number: int, reason: str):
+    async def reverse_sale(self, interaction: discord.Interaction, item_number: int, reason: str,
+                           quickbooks_voided: bool = False):
         if not await _require_any_role(interaction, [config.ROLE_FINANCE_MGMT]):
             return
         pallet = _get_pallet_or_none(interaction)
@@ -1191,6 +1193,16 @@ class Finance(commands.Cog):
             await interaction.response.send_message(f"No item #{item_number} found in **{pallet['name']}**.", ephemeral=True)
             return
 
+        # A LOGGED sale (sales/sale_items rows, normally a QuickBooks Sales
+        # Receipt) has to be undone as a whole - just clearing the price
+        # (the old behavior) left the sale_items row behind, so the item
+        # could never be logged again and Discord no longer matched
+        # QuickBooks. See database.void_logged_sale.
+        logged = db.get_item_sale(item["id"])
+        if logged:
+            await self._reverse_logged_sale(interaction, item, logged["sale_id"], reason.strip(), quickbooks_voided)
+            return
+
         await interaction.response.defer(ephemeral=True, thinking=True)
         old_price = db.reverse_sale(item["id"], reason.strip(), actor_id=interaction.user.id)
         if old_price is None:
@@ -1202,6 +1214,50 @@ class Finance(commands.Cog):
         await interaction.followup.send(
             f"⏪ Reversed **{pallet['name']}** item #{item_number}'s sale (was ${old_price:.2f}, {reason.strip()}). "
             f"Live card updated.",
+            ephemeral=True,
+        )
+
+    async def _reverse_logged_sale(self, interaction: discord.Interaction, item: dict, sale_id: int,
+                                   reason: str, quickbooks_voided: bool):
+        """The logged-sale half of /finance reverse-sale: the whole sale is
+        reversed (one Sales Receipt covers every item in it), and only once
+        the person confirms its Sales Receipt was voided in QuickBooks - the
+        bot never voids anything in QuickBooks itself."""
+        sale = db.get_sale(sale_id)
+        sale_items = db.get_sale_items(sale_id)
+        names = ", ".join(f"{si['pallet_name']}#{si['item_number']}" for si in sale_items)
+        receipt = sale.get("quickbooks_sales_receipt_id")
+        if receipt and not quickbooks_voided:
+            await interaction.response.send_message(
+                f"Item #{item['item_number']} is part of logged **sale #{sale_id}** ({names}, "
+                f"${sale['total_price']:.2f}) with QuickBooks Sales Receipt `{receipt}`.\n"
+                f"1. Void that Sales Receipt in QuickBooks.\n"
+                f"2. Run this again with `quickbooks_voided:True` - that reverses the **whole sale** "
+                f"({len(sale_items)} item(s)) here so each can be logged again.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            reversed_items = db.void_logged_sale(sale_id, reason, actor_id=interaction.user.id)
+        except ValueError as e:
+            await interaction.followup.send(f"Nothing reversed: {e}", ephemeral=True)
+            return
+
+        for pallet_id in {r["pallet_id"] for r in reversed_items}:
+            await finance_utils.refresh_finance_message(self.bot, pallet_id)
+        await finance_utils.mark_accounting_entries_reversed(
+            interaction.client, [r["item_id"] for r in reversed_items], sale_id, reason
+        )
+        receipt_note = f" (Sales Receipt `{receipt}` voided in QuickBooks)" if receipt else " (it never reached QuickBooks)"
+        await finance_utils.post_to_finance_audit_log(
+            interaction.client,
+            f"⏪ **Sale #{sale_id}** ({names}) reversed - ${sale['total_price']:.2f}{receipt_note}: {reason}",
+        )
+        await interaction.followup.send(
+            f"⏪ Reversed logged **sale #{sale_id}** ({names}){receipt_note}. Each item can now be logged in a new "
+            f"sale. Live card(s) updated.",
             ephemeral=True,
         )
 

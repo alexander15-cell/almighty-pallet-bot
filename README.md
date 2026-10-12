@@ -179,7 +179,14 @@ and type a number:
     fees, etc.), optionally tied to one item.
   - `/finance reverse-sale` - undoes an item's recorded sale (duplicate
     entry, a sale that fell through) - clears its sale price but keeps a
-    record of what was reversed and why.
+    record of what was reversed and why. If the sale was **logged**
+    (`/finance log-sale` or the eBay order card, so it has a QuickBooks
+    Sales Receipt), it first tells you the sale and receipt number: void
+    that receipt in QuickBooks, then run it again with
+    `quickbooks_voided:True` - that reverses the **whole sale** (every item
+    on that receipt), moves its lines to `voided_sale_items` (nothing is
+    deleted), and frees each item to be logged in a new sale. The bot never
+    voids anything in QuickBooks itself.
   - `/finance history` - lists a pallet's recent refunds/expenses/reversals.
   - `/finance set-shipping-info` - opens a two-step form for a buyer's
     recipient name and structured address (address lines, city, state,
@@ -742,6 +749,18 @@ item's history (`item_events`) with no user and a note naming the order.
 Set `EBAY_ORDER_AUTOMATION=false` in `.env` to go back to the fully manual
 buttons. Needs the same `sell.fulfillment` scope as the order sync above -
 nothing new.
+
+### Checking the setup (`/ebay status`)
+
+`/ebay status` (Pallet Admin) checks everything the eBay and QuickBooks
+features depend on, against the live services, and shows ✅ / ❌ / ➖ with
+what to fix: the app keys, the seller sign-in token, each permission
+(`sell.fulfillment`, `sell.finances`, `sell.inventory`), the merchant
+location and the three business policy IDs API listing uses, QuickBooks
+being connected, and that Undeposited Funds and the eBay fee / shipping /
+ads accounts exist and are the right kind of account (an income account
+there would quietly mis-book fees). Strictly read-only - every check is a
+lookup. Run it after any `.env` change or eBay re-sign-in.
 
 ### eBay fee & payout sync (`/ebay sync-finances`, `/ebay net-report`)
 

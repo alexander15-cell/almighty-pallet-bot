@@ -660,6 +660,30 @@ def init_db():
                 sale_id          INTEGER,
                 logged_at        TEXT
             );
+
+            -- Sales undone with /finance reverse-sale after being logged
+            -- (void_logged_sale). The sales row itself is kept untouched;
+            -- this marks it voided. Its sale_items rows MOVE to
+            -- voided_sale_items (same columns) - sale_items.item_id is
+            -- UNIQUE, so leaving them would block the item from ever being
+            -- logged again - so the full history is kept, just not in the
+            -- table that means "this item is currently sold".
+            CREATE TABLE IF NOT EXISTS voided_sales (
+                sale_id                      INTEGER PRIMARY KEY,
+                reason                       TEXT,
+                quickbooks_sales_receipt_id  TEXT,
+                voided_by                    INTEGER,
+                voided_at                    TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS voided_sale_items (
+                id               INTEGER PRIMARY KEY,   -- the original sale_items.id
+                sale_id          INTEGER NOT NULL,
+                item_id          INTEGER NOT NULL,
+                allocated_price  REAL NOT NULL,
+                purchase_price   REAL NOT NULL,
+                cogs_amount      REAL NOT NULL,
+                voided_at        TEXT NOT NULL
+            );
             """
         )
         _migrate_add_columns(conn)
@@ -1217,8 +1241,9 @@ def unwind_item_downstream_data(item_id: int, target_status: str, actor_id: int,
     item = get_item(item_id)
     if get_item_sale(item_id) and target_status != STATUS_SOLD:
         raise ValueError(
-            "This item's sale was already logged to QuickBooks via /finance log-sale - "
-            "correct or void that in QuickBooks first before moving it to a different stage."
+            "This item's sale was already logged to QuickBooks - void its Sales Receipt in QuickBooks, "
+            "then undo it here with `/finance reverse-sale` (quickbooks_voided:True) before moving it to a "
+            "different stage."
         )
 
     reversed_amount = None
@@ -1831,6 +1856,69 @@ def reverse_sale(item_id: int, reason: str, actor_id: int) -> float:
             (item_id, item_id, actor_id, f"Sale reversed: was ${old_price:.2f} ({reason})", _now()),
         )
     return old_price
+
+
+def void_logged_sale(sale_id: int, reason: str, actor_id: int) -> list:
+    """
+    Undoes a sale that was LOGGED (/finance log-sale or the #ebay-orders
+    Confirm & log sale - i.e. it has sales/sale_items rows, and normally a
+    QuickBooks Sales Receipt) - the whole sale, every item in it, since one
+    Sales Receipt covers them all. Used by /finance reverse-sale once the
+    Sales Receipt has been voided in QuickBooks by hand.
+
+    In one database transaction: marks the sale voided (voided_sales),
+    moves its sale_items rows to voided_sale_items (nothing is deleted
+    outright - see that table's comment), and for every item that still
+    has a sale price, logs a 'reversal' finance_transactions row and clears
+    the price - exactly what reverse_sale() does for an unlogged price.
+    Afterwards each item can be logged in a new sale. Returns
+    [{'item_id', 'reversed_price'}]; raises ValueError if the sale doesn't
+    exist or was already voided.
+    """
+    now = _now()
+    with get_conn() as conn:
+        sale = conn.execute("SELECT * FROM sales WHERE id = ?", (sale_id,)).fetchone()
+        if not sale:
+            raise ValueError(f"No sale #{sale_id}.")
+        if conn.execute("SELECT 1 FROM voided_sales WHERE sale_id = ?", (sale_id,)).fetchone():
+            raise ValueError(f"Sale #{sale_id} was already reversed.")
+        rows = conn.execute("SELECT * FROM sale_items WHERE sale_id = ?", (sale_id,)).fetchall()
+        conn.execute(
+            "INSERT INTO voided_sales (sale_id, reason, quickbooks_sales_receipt_id, voided_by, voided_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (sale_id, reason, sale["quickbooks_sales_receipt_id"], actor_id, now),
+        )
+        results = []
+        for row in rows:
+            conn.execute(
+                "INSERT INTO voided_sale_items (id, sale_id, item_id, allocated_price, purchase_price, cogs_amount, "
+                "voided_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (row["id"], row["sale_id"], row["item_id"], row["allocated_price"], row["purchase_price"],
+                 row["cogs_amount"], now),
+            )
+            conn.execute("DELETE FROM sale_items WHERE id = ?", (row["id"],))
+            item = conn.execute("SELECT * FROM items WHERE id = ?", (row["item_id"],)).fetchone()
+            old_price = item["sale_price"]
+            if old_price is not None:
+                conn.execute(
+                    "INSERT INTO finance_transactions (pallet_id, item_id, type, amount, note, actor_id, created_at) "
+                    "VALUES (?, ?, 'reversal', ?, ?, ?, ?)",
+                    (item["pallet_id"], item["id"], old_price, f"Sale #{sale_id} reversed: {reason}", actor_id, now),
+                )
+                conn.execute(
+                    "UPDATE items SET sale_price = NULL, sale_platform = NULL, updated_at = ?, sale_recorded_at = NULL "
+                    "WHERE id = ?",
+                    (now, item["id"]),
+                )
+            conn.execute(
+                "INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp) "
+                "VALUES (?, NULL, ?, ?, ?, ?)",
+                (item["id"], item["status"], actor_id,
+                 f"Logged sale #{sale_id} reversed ({reason})" + (f" - was ${old_price:.2f}" if old_price is not None else ""),
+                 now),
+            )
+            results.append({"item_id": item["id"], "pallet_id": item["pallet_id"], "reversed_price": old_price})
+        return results
 
 
 def get_finance_transactions(pallet_id: int, limit: int = 20) -> list:
