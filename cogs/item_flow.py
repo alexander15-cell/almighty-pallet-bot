@@ -2259,11 +2259,20 @@ class ItemFlow(commands.Cog):
             await interaction.followup.send("Marked shipped. The earlier card was kept.", ephemeral=True)
             return
         db.update_status(item_id, db.STATUS_SHIPPED, actor_id=interaction.user.id)
+        await self._show_card_as_shipped(interaction.message, item)
+        await interaction.followup.send("Marked shipped.", ephemeral=True)
+        await finance_utils.refresh_finance_message(self.bot, item["pallet_id"])
+
+    async def _show_card_as_shipped(self, message: discord.Message, item: dict, footer_note: str = ""):
+        """Edits an item's #sold card in place to its Shipped look and removes
+        its buttons - shared by the Mark as Shipped button and the eBay order
+        automation (auto_mark_shipped_from_ebay). Best-effort: a card that
+        can't be edited never undoes the status change already saved."""
         try:
-            all_embeds = list(interaction.message.embeds)
+            all_embeds = list(message.embeds)
             main_embed = all_embeds[0]
             contract = build_website_contract(
-                item, db.get_ebay_listing_data(item_id), status=db.STATUS_SHIPPED,
+                item, db.get_ebay_listing_data(item["id"]), status=db.STATUS_SHIPPED,
                 photo_count=0, sku_prefix=config.WEBSITE_SKU_PREFIX,
             )
             # Replace prior contract fields in place. Preserve image/gallery and
@@ -2276,12 +2285,76 @@ class ItemFlow(commands.Cog):
                                      inline=field.inline)
             for field in contract["fields"]:
                 main_embed.add_field(**field)
-            main_embed.set_footer(text=FOOTER_PREFIX + " | Shipped ✅")
-            await interaction.message.edit(embeds=all_embeds, view=None)
+            main_embed.set_footer(text=FOOTER_PREFIX + " | Shipped ✅" + footer_note)
+            await message.edit(embeds=all_embeds, view=None)
         except (*discord_resilience.TRANSIENT_DISCORD_ERRORS, IndexError, KeyError, TypeError, ValueError):
             pass
-        await interaction.followup.send("Marked shipped.", ephemeral=True)
+
+    async def _fetch_current_card(self, item: dict, stage: str):
+        """The item's current card message in `stage`'s channel, or None if
+        it can't be found (deleted, channel gone, transient error)."""
+        channel = self.bot.get_channel(db.resolve_channel_id(item["pallet_id"], stage))
+        if not channel or not item.get("current_message_id"):
+            return None
+        try:
+            return await channel.fetch_message(item["current_message_id"])
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+            return None
+
+    # ------------------------------------------------- eBay order automation --
+    # Called by cogs/ebay.py's _reconcile_ebay_order_statuses - the same
+    # transitions as the Mark as Sold / Mark as Shipped buttons, just driven
+    # by eBay's own order data instead of a click. Each re-checks the item's
+    # current status first and does nothing (returns False) if it doesn't
+    # fit, so re-processing an order on every poll is harmless.
+
+    async def auto_mark_sold_from_ebay(self, item: dict, order_id: str, ebay_item_id: str = None) -> bool:
+        """
+        eBay order came in for this item -> Sold (platform eBay), exactly
+        like Mark as Sold + picking eBay. An item still in
+        pending_ebay_upload is first confirmed live (it obviously is - it
+        sold), via the same confirm_ebay_pending_item path /ebay
+        confirm-listed uses. Doesn't log anything to QuickBooks - that stays
+        the #ebay-orders card's human "Confirm & log sale" click.
+        """
+        if item["status"] == db.STATUS_PENDING_EBAY_UPLOAD:
+            await self.confirm_ebay_pending_item(item, actor_id=None, ebay_item_id=ebay_item_id)
+            item = db.get_item(item["id"])
+        if item["status"] != db.STATUS_LISTED:
+            return False
+
+        pallet_id = item["pallet_id"]
+        old_card = await self._fetch_current_card(item, "listed")
+        db.record_sale_platform(item["id"], "eBay", actor_id=None)
+        channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "sold"))
+        note = f"Sold on eBay (order {order_id}) - moved automatically from eBay's order data."
+        msg = await send_item_card(channel, item, view=ShippedView(item["id"]), extra_text=f"🤖 {note}",
+                                   destination_status=db.STATUS_SOLD)
+        db.update_status(item["id"], db.STATUS_SOLD, actor_id=None, note=note, new_message_id=msg.id)
+        if old_card:
+            await self._clear_old_card(old_card, item["id"], "auto mark sold (eBay order)")
+        await self._post_to_accounting_channel(item["id"], "eBay")
+        await finance_utils.refresh_finance_message(self.bot, pallet_id)
+        return True
+
+    async def auto_mark_shipped_from_ebay(self, item: dict, order_id: str) -> bool:
+        """eBay shows this item's order line shipped -> Shipped, exactly
+        like Mark as Shipped."""
+        if item["status"] != db.STATUS_SOLD:
+            return False
+        note = f"Shipped per eBay (order {order_id}) - moved automatically."
+        card = await self._fetch_current_card(item, "sold")
+        if config.PRESERVE_DISCORD_HISTORY:
+            channel = self.bot.get_channel(db.resolve_channel_id(item["pallet_id"], "sold"))
+            msg = await send_item_card(channel, item, destination_status=db.STATUS_SHIPPED,
+                                       extra_text="Shipped per eBay; previous card preserved")
+            db.update_status(item["id"], db.STATUS_SHIPPED, actor_id=None, note=note, new_message_id=msg.id)
+        else:
+            db.update_status(item["id"], db.STATUS_SHIPPED, actor_id=None, note=note)
+            if card:
+                await self._show_card_as_shipped(card, item, footer_note=" (per eBay)")
         await finance_utils.refresh_finance_message(self.bot, item["pallet_id"])
+        return True
 
     async def _clear_old_card(self, message: discord.Message, item_id: int, context: str):
         """

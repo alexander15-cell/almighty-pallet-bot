@@ -483,6 +483,62 @@ def _parse_order(raw_order: dict):
     }
 
 
+# getOrders' page-size maximum, per eBay's Fulfillment API spec.
+_ORDERS_PAGE_LIMIT = 200
+
+
+async def get_recently_modified_orders(since: datetime) -> list:
+    """
+    Every order eBay has changed on/after `since` (lastmodifieddate filter
+    - a new order, a payment, a shipment, a cancellation all bump it),
+    paginated, with the status fields cogs/ebay.py's order automation acts
+    on. Separate from get_orders() above (which the #ebay-orders confirm
+    cards depend on, unchanged) because this needs the per-line shipping
+    status and the order's cancel/payment state, and every page rather than
+    just the first. Needs the sell.fulfillment scope, same as get_orders().
+
+    Returns [{'order_id', 'order_date' (raw ISO creationDate),
+    'payment_status', 'cancel_state', 'line_items': [{'line_item_id',
+    'sku', 'legacy_item_id', 'fulfillment_status'}, ...]}, ...] - an order
+    with no ID is skipped. No buyer data is returned.
+    """
+    access_token = await get_access_token()
+    headers = {"Authorization": f"Bearer {access_token}", "X-EBAY-C-MARKETPLACE-ID": config.EBAY_MARKETPLACE_ID}
+    since_iso = since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    filter_value = urllib.parse.quote(f"lastmodifieddate:[{since_iso}..]")
+    orders, offset = [], 0
+    while True:
+        url = f"{_fulfillment_base_url()}/order?filter={filter_value}&limit={_ORDERS_PAGE_LIMIT}&offset={offset}"
+        async with aiohttp.ClientSession() as session:
+            async with session.request("GET", url, headers=headers) as resp:
+                body = await resp.json(content_type=None)
+                if resp.status >= 300:
+                    _raise_for_ebay_error(resp.status, body, "getOrders (modified)")
+        page = body.get("orders") or []
+        for raw in page:
+            if not raw.get("orderId"):
+                continue
+            orders.append({
+                "order_id": raw["orderId"],
+                "order_date": raw.get("creationDate"),
+                "payment_status": raw.get("orderPaymentStatus"),
+                "cancel_state": (raw.get("cancelStatus") or {}).get("cancelState"),
+                "line_items": [
+                    {
+                        "line_item_id": li.get("lineItemId"),
+                        "sku": li.get("sku"),
+                        "legacy_item_id": str(li["legacyItemId"]) if li.get("legacyItemId") else None,
+                        "fulfillment_status": li.get("lineItemFulfillmentStatus"),
+                    }
+                    for li in raw.get("lineItems") or []
+                ],
+            })
+        offset += len(page)
+        if not page or offset >= (body.get("total") or 0):
+            break
+    return orders
+
+
 def _raise_for_ebay_error(resp_status: int, body: dict, context: str):
     errors = (body or {}).get("errors")
     detail = errors if errors else body

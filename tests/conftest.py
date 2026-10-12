@@ -20,6 +20,11 @@ os.environ["PRESERVE_DISCORD_HISTORY"] = "false"
 # defaults off in production (see config.WEBSITE_MARKERS_ENABLED) so the
 # standalone bot's real cards don't show unused marker fields.
 os.environ["WEBSITE_MARKERS_ENABLED"] = "true"
+# The eBay order automation (on by default in real deployments) makes its
+# own eBay call at the end of every order poll - off for the upstream
+# order-sync tests, which only fake get_orders(); test_ebay_order_automation.py
+# turns it on explicitly with its own fakes.
+os.environ["EBAY_ORDER_AUTOMATION"] = "false"
 os.environ["DATABASE_PATH"] = str(_TEST_DATA_DIR / "test.db")
 os.environ["PHOTO_DIR"] = str(_TEST_DATA_DIR / "photos")
 os.environ["EBAY_BATCH_CSV_PATH"] = str(_TEST_DATA_DIR / "ebay_batch.csv")

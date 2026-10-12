@@ -706,6 +706,37 @@ Discord) and nothing gets posted - the same as if eBay itself were briefly
 down, so there's no harm in leaving `EBAY_ENABLED` on with only the
 narrower token while you get to this.
 
+### eBay order automation (Sold / Shipped without clicking)
+
+On every order poll above, the bot also checks every order eBay has changed
+in the last `EBAY_ORDER_AUTOMATION_LOOKBACK_DAYS` (default 3) and moves
+tracked items along to match - the same transitions as the buttons, just
+driven by eBay's own data:
+
+- **Paid order -> Sold.** The item's card moves from `#listed` to `#sold`
+  (platform eBay), the `#accounting` worklist entry is posted, and a short
+  line goes to `#ebay-orders`. An item still in `#pending-ebay-upload` is
+  confirmed live first (it sold, so it obviously was) and its eBay listing
+  ID recorded. **Nothing is logged to QuickBooks** - that stays the
+  `#ebay-orders` card's **Confirm & log sale** click.
+- **eBay shows the line shipped -> Shipped**, card updated in place. Works
+  whether the item was moved to Sold automatically or by hand.
+- **Cancelled order** on an item already Sold/Shipped -> one alert in
+  `#ebay-orders` pointing at `/item move-back`. Never reversed
+  automatically, since a logged sale may need its Sales Receipt voided.
+- **Sold while On Hold** -> one alert; the item stays on hold.
+
+Orders that aren't paid (pending, failed, fully refunded) or have a cancel
+request open are left alone. Items are matched by SKU, then confirmed
+listing ID, and only to items created before the order; an order placed
+before the item's latest listing (returned and relisted) is ignored; and
+each order + item is auto-moved at most once (`ebay_order_automation_log`),
+so moving an item back by hand sticks. Every automatic move is in the
+item's history (`item_events`) with no user and a note naming the order.
+Set `EBAY_ORDER_AUTOMATION=false` in `.env` to go back to the fully manual
+buttons. Needs the same `sell.fulfillment` scope as the order sync above -
+nothing new.
+
 ### eBay fee & payout sync (`/ebay sync-finances`, `/ebay net-report`)
 
 A pallet's revenue is whatever was logged as each item's sale price - and
