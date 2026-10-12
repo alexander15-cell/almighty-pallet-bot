@@ -42,6 +42,7 @@ import database as db
 import ai_review
 import discord_resilience
 import ebay_api
+import ebay_aspects
 import ebay_csv
 import ebay_taxonomy
 import fb_marketplace_csv
@@ -673,8 +674,17 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
         existing = db.get_ebay_listing_data(item_id)
 
         specifics_default = ""
+        specifics_label = "Item Specifics (one per line: Key: Value)"
         if existing and existing.get("item_specifics"):
             specifics_default = "\n".join(f"{k}: {v}" for k, v in existing["item_specifics"].items())
+        else:
+            # Automated Review's eBay-aspect pre-fill (ebay_aspects.py) -
+            # only when the reviewer kept the category it was filled for,
+            # since a different category has different specifics.
+            suggestion = db.get_item_aspect_suggestion(item_id)
+            if suggestion and str(suggestion["category_id"]) == str(category_id) and suggestion["specifics"]:
+                specifics_default = ebay_aspects.format_specifics(suggestion["specifics"])
+                specifics_label = "Item Specifics (Key: Value) - AI, confirm"
 
         if existing:
             price_default = f"{existing['price']:.2f}"
@@ -734,7 +744,7 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
             max_length=30,
         )
         self.item_specifics = discord.ui.TextInput(
-            label="Item Specifics (one per line: Key: Value)",
+            label=specifics_label[:45],
             style=discord.TextStyle.paragraph,
             required=False,
             default=specifics_default,
@@ -1517,6 +1527,17 @@ class ItemFlow(commands.Cog):
             db.update_status(item_id, db.STATUS_QUEUE_REVIEW, new_message_id=msg.id)
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
 
+        # Item specifics pre-fill (ebay_aspects.prefill_for_items) - done
+        # AFTER the Queue Review card is already posted, so the eBay lookup
+        # and second AI call never delay a reviewer seeing the item. Only a
+        # suggestion for the Approve form; any failure just means no
+        # pre-fill, same as before this existed.
+        if not result.get("ai_backend_failed"):
+            await ebay_aspects.prefill_for_items(
+                item_ids, result.get("suggested_category"), photo_paths,
+                result.get("suggested_title", ""), result.get("suggested_description", ""), note_for_review,
+            )
+
     async def rereview_item(self, interaction: discord.Interaction, item_id: int):
         """
         'Re-review (AI)' on a Queue Review card - for after editing the
@@ -1657,13 +1678,32 @@ class ItemFlow(commands.Cog):
             if listing_format == "Auction" else
             f"Fixed Price, ${price:.2f}"
         )
+        specifics_note = await self._missing_specifics_note(category_id, specifics, item["item_number"])
         await interaction.followup.send(
             f"Approved. eBay listing data saved (condition: **{condition_label}**, {format_note}, "
             f"{weight_lb:g} lb, {length_in:g}x{width_in:g}x{height_in:g} in). "
-            f"Moved to <#{channel.id}> for listing.",
+            f"Moved to <#{channel.id}> for listing.{specifics_note}",
             ephemeral=True,
         )
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
+
+    async def _missing_specifics_note(self, category_id: str, specifics: dict, item_number: int) -> str:
+        """A warning line naming item specifics eBay REQUIRES for this
+        category that are still blank, or "" (including whenever eBay's list
+        can't be fetched - this only ever adds information, never blocks).
+        Brand/MPN/Type are left out: the export always fills those itself
+        (a real value or "Does Not Apply", see ebay_csv.py)."""
+        aspects = await ebay_aspects.get_category_aspects(category_id)
+        auto_filled = {"brand", "mpn", "type"}
+        missing = [n for n in ebay_aspects.missing_required(aspects, specifics) if n.lower() not in auto_filled]
+        if not missing:
+            return ""
+        names = ", ".join(missing[:10])
+        return (
+            f"\n⚠️ eBay **requires** these item specifics for this category, still blank: **{names}**. "
+            f"eBay may reject the listing without them - add them with `/ebay retry-item {item_number} "
+            f"specifics:\"Name=Value, ...\"` once it's in the eBay batch."
+        )
 
     async def add_to_ebay_batch(self, interaction: discord.Interaction, item_id: int):
         """'Add to eBay Batch' - the CSV fallback path. Never calls any eBay

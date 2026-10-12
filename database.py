@@ -561,6 +561,33 @@ def init_db():
                 error              TEXT,
                 actor_id           INTEGER
             );
+
+            -- eBay's own list of item specifics ("aspects": Brand, Type,
+            -- Color, ...) for a leaf category, from the Taxonomy API's
+            -- getItemAspectsForCategory - cached because it rarely changes
+            -- and eBay asks callers to cache it (see ebay_aspects.py for
+            -- the refresh age). aspects_json is ebay_aspects' parsed list.
+            CREATE TABLE IF NOT EXISTS ebay_category_aspects (
+                category_id   TEXT PRIMARY KEY,
+                aspects_json  TEXT NOT NULL,
+                fetched_at    TEXT NOT NULL
+            );
+
+            -- The AI's suggested item specifics for an item, filled against
+            -- eBay's aspect list for the category Automated Review matched
+            -- (ebay_aspects.prefill_for_items) - pre-fills Queue Review's
+            -- Item Specifics box at Approve, only when the reviewer keeps
+            -- that same category. A suggestion, never applied by itself.
+            -- item_created_at guards against a stale row ever attaching to
+            -- a different item after /admin db-wipe resets item IDs (no
+            -- foreign keys, same reasoning as the eBay mirror tables).
+            CREATE TABLE IF NOT EXISTS item_aspect_suggestions (
+                item_id          INTEGER PRIMARY KEY,
+                item_created_at  TEXT NOT NULL,
+                category_id      TEXT NOT NULL,
+                specifics_json   TEXT NOT NULL,
+                created_at       TEXT NOT NULL
+            );
             """
         )
         _migrate_add_columns(conn)
@@ -2090,6 +2117,49 @@ def get_ebay_platform_items_with_sale_price(pallet_id: int = None) -> list:
             query += " AND pallet_id = ?"
             params.append(pallet_id)
         return [dict(r) for r in conn.execute(query + " ORDER BY pallet_id, item_number", params).fetchall()]
+
+
+def get_cached_category_aspects(category_id: str):
+    """(aspects list, fetched_at ISO string) for a category, or None."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT aspects_json, fetched_at FROM ebay_category_aspects WHERE category_id = ?", (str(category_id),)
+        ).fetchone()
+        return (json.loads(row["aspects_json"]), row["fetched_at"]) if row else None
+
+
+def save_category_aspects(category_id: str, aspects: list):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO ebay_category_aspects (category_id, aspects_json, fetched_at) VALUES (?, ?, ?)",
+            (str(category_id), json.dumps(aspects), _now()),
+        )
+
+
+def save_item_aspect_suggestion(item_id: int, category_id: str, specifics: dict):
+    item = get_item(item_id)
+    if not item:
+        return
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO item_aspect_suggestions "
+            "(item_id, item_created_at, category_id, specifics_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (item_id, item["created_at"], str(category_id), json.dumps(specifics), _now()),
+        )
+
+
+def get_item_aspect_suggestion(item_id: int):
+    """{'category_id', 'specifics'} for this exact item, or None - ignores a
+    row left from a different item that once had the same ID."""
+    item = get_item(item_id)
+    if not item:
+        return None
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM item_aspect_suggestions WHERE item_id = ? AND item_created_at = ?",
+            (item_id, item["created_at"]),
+        ).fetchone()
+        return {"category_id": row["category_id"], "specifics": json.loads(row["specifics_json"])} if row else None
 
 
 def count_item_refunds_and_expenses(item_ids: list) -> int:

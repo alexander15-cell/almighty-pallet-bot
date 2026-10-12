@@ -82,6 +82,11 @@ ENTRIES = (
         ("ebay category", "category id"),
     ),
     HelpEntry(
+        "/ebay category-aspects <category_id>",
+        "Show the item specifics eBay requires or recommends for a category.",
+        ("item specifics", "aspects", "required specifics", "category aspects", "brand type color"),
+    ),
+    HelpEntry(
         "/ebay retry-item <item_number> ...",
         "Fix and re-queue an item whose batch upload needs a correction.",
         ("retry item", "fix ebay upload", "requeue item"),

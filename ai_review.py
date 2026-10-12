@@ -449,3 +449,87 @@ async def _review_item_ollama(photo_paths: list[str], raw_description: str) -> d
     except Exception as e:
         print(f"[ai_review] Ollama review failed, returning fallback: {e}")
         return _fallback(raw_description, str(e))
+
+
+# ---------------------------------------------------------- item specifics --
+# A second, smaller call made after review_item() above, once Automated
+# Review's suggested category has been matched to a real eBay leaf category
+# and eBay's own list of that category's item specifics ("aspects") fetched
+# - see ebay_aspects.prefill_for_items. Anthropic backend only: the small
+# local Ollama model (moondream) isn't reliable at constrained structured
+# fills like this, so with Ollama this simply returns {} and the Item
+# Specifics box behaves exactly as before.
+
+ASPECTS_SYSTEM_PROMPT = """You fill in eBay "item specifics" for a liquidation resale item, \
+from its photo(s), its draft title/description, and the warehouse note.
+
+You'll get a list of the specifics eBay uses for this item's category. For each one, give a value \
+ONLY when the photo, label, packaging, or text actually shows it. Never invent a brand, model \
+number (MPN), or measurement you can't see - leave those out. Where allowed values are listed, use \
+one of them exactly as written. Keep every value short (under 65 characters).
+
+Respond with a single JSON object mapping specific name -> value (a string), using the names \
+exactly as given. Omit anything you're not confident about. No other text."""
+
+
+def _call_anthropic_aspects(content_blocks: list) -> str:
+    message = _client.messages.create(
+        model=config.ANTHROPIC_MODEL,
+        max_tokens=700,
+        system=ASPECTS_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": content_blocks}],
+    )
+    return "".join(block.text for block in message.content if block.type == "text")
+
+
+def _describe_aspects(aspects: list) -> str:
+    lines = []
+    for a in aspects:
+        tag = "required" if a.get("required") else "recommended"
+        values = a.get("values") or []
+        allowed = ""
+        if values:
+            shown = "; ".join(values[:30])
+            prefix = "must be one of" if a.get("mode") == "SELECTION_ONLY" else "common values"
+            allowed = f" - {prefix}: {shown}"
+        lines.append(f"- {a['name']} ({tag}){allowed}")
+    return "\n".join(lines)
+
+
+async def fill_item_aspects(photo_paths: list[str], title: str, description: str, note: str,
+                            aspects: list) -> dict:
+    """
+    Raw {aspect name: value} suggestions for the given eBay aspects (shape
+    from ebay_aspects.parse_aspects), or {} on any failure, timeout, an
+    empty aspect list, or a non-Anthropic backend. Never raises - this is
+    only ever a pre-fill. ebay_aspects.clean_suggestions validates the
+    result against eBay's rules before anything is stored.
+    """
+    if not aspects or config.AI_REVIEW_BACKEND != "anthropic" or _client is None:
+        return {}
+
+    content_blocks = []
+    for path in photo_paths[:2]:  # brand/model labels - two photos is plenty for this
+        try:
+            content_blocks.append(_image_block(Path(path).read_bytes(), _guess_media_type(path)))
+        except Exception as e:
+            print(f"[ai_review] failed to read image {path} for item specifics: {e}")
+    content_blocks.append({
+        "type": "text",
+        "text": (
+            f"Title: {title or '(none)'}\n"
+            f"Description: {description or '(none)'}\n"
+            f"Warehouse note: {note or '(none)'}\n\n"
+            f"eBay item specifics for this category:\n{_describe_aspects(aspects)}"
+        ),
+    })
+
+    try:
+        text = await asyncio.wait_for(
+            asyncio.to_thread(_call_anthropic_aspects, content_blocks), timeout=config.AI_TIMEOUT_SECONDS
+        )
+        parsed = json.loads(_strip_json_fences(text))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception as e:
+        print(f"[ai_review] item specifics fill failed, skipping the pre-fill: {e!r}")
+        return {}

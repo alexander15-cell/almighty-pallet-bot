@@ -81,6 +81,7 @@ import config
 import database as db
 import discord_resilience
 import ebay_api
+import ebay_aspects
 import ebay_csv
 import ebay_finances
 import ebay_recommendations
@@ -310,6 +311,29 @@ async def _post_ebay_order_match(bot: discord.Client, order: dict, matched_items
     view = discord.ui.View(timeout=None)
     view.add_item(EbayOrderConfirmButton(order["order_id"]))
     await channel.send(embed=embed, view=view)
+
+
+# ----------------------------------------------- /ebay category-aspects --
+
+def build_category_aspects_text(category_id: str, aspects: list, limit: int = 1900) -> str:
+    """Required, then recommended item specifics, with a few example values
+    for pick-list ones - kept under Discord's 2000-char message limit."""
+    def describe(a):
+        line = f"• **{a['name']}**"
+        if a["mode"] == "SELECTION_ONLY" and a["values"]:
+            line += f" - pick one: {', '.join(a['values'][:6])}{'…' if len(a['values']) > 6 else ''}"
+        return line
+
+    required = [describe(a) for a in aspects if a["required"]]
+    recommended = [describe(a) for a in aspects if not a["required"] and a["usage"] == "RECOMMENDED"]
+    parts = [f"Item specifics eBay uses for category `{category_id}`:"]
+    parts.append("**Required:**\n" + ("\n".join(required) if required else "None"))
+    if recommended:
+        parts.append("**Recommended:**\n" + "\n".join(recommended))
+    text = "\n\n".join(parts)
+    if len(text) > limit:
+        text = text[:limit].rsplit("\n", 1)[0] + "\n…"
+    return text
 
 
 # ------------------------------------------------------ /ebay net-report --
@@ -812,6 +836,28 @@ class Ebay(commands.Cog):
             return
         lines = "\n".join(f"`{category_id}` - {path}" for category_id, path in matches)
         await interaction.followup.send(f"Categories matching `{query}`:\n{lines}", ephemeral=True)
+
+    @ebay_group.command(
+        name="category-aspects",
+        description="Show the item specifics eBay requires/recommends for a category (from eBay's own list).",
+    )
+    @app_commands.describe(category_id="An eBay leaf category ID (see /ebay category-search)")
+    async def category_aspects(self, interaction: discord.Interaction, category_id: str):
+        if not await _require_admin(interaction):
+            return
+        if not config.EBAY_ENABLED:
+            await interaction.response.send_message("The eBay API isn't configured.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        aspects = await ebay_aspects.get_category_aspects(category_id.strip())
+        if not aspects:
+            await interaction.followup.send(
+                f"Couldn't get item specifics for category `{category_id}` from eBay - check the ID "
+                "(`/ebay category-search`) and try again.",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(build_category_aspects_text(category_id.strip(), aspects), ephemeral=True)
 
     @ebay_group.command(
         name="retry-item",

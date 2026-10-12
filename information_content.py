@@ -152,6 +152,7 @@ def _ebay_commands_embed() -> discord.Embed:
     embed.add_field(name="export-batch", value="Download the accumulated eBay CSV batch and start a fresh one.", inline=False)
     embed.add_field(name="fill-recommendations", value="Upload eBay's returned recommendations file - fills in price/quantity/condition/format from Queue Review data.", inline=False)
     embed.add_field(name="category-search <query>", value="Look up a real eBay category ID by keyword.", inline=False)
+    embed.add_field(name="category-aspects <category_id>", value="Show the item specifics eBay requires/recommends for a category. (Approve pre-fills these from the photo automatically.)", inline=False)
     embed.add_field(name="retry-item <item_number> ...", value="Fix and re-queue an item whose batch upload needs a correction.", inline=False)
     embed.add_field(name="requeue-pending", value="Bulk retry-item: re-queue EVERY item pending an eBay upload into a fresh batch, no corrections needed.", inline=False)
     embed.add_field(name="batches / batch <id>", value="List recent batches, or show one batch's still-pending items.", inline=False)

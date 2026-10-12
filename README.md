@@ -754,6 +754,37 @@ replace `EBAY_REFRESH_TOKEN` in `.env`, and restart. Until then,
 `/ebay sync-finances` stops with a permissions error that says so - nothing
 else is affected.
 
+### Item specifics from eBay's own category list
+
+eBay ranks listings with complete item specifics (Brand, Type, Color,
+Size, ...) higher, and some categories reject a listing outright without
+certain ones. With the eBay API configured, the bot now uses eBay's own
+per-category list (Taxonomy API `getItemAspectsForCategory`, cached 30
+days in `ebay_category_aspects`) instead of only guessing Brand/MPN/Type:
+
+1. **Automated Review**, right after posting the item's Queue Review card,
+   matches the AI's suggested category to a real eBay category, fetches
+   that category's required and recommended specifics, and asks the AI to
+   fill them from the photo, title and note - only values it can actually
+   see, using eBay's exact wording for pick-list specifics. Anything that
+   doesn't fit eBay's rules (not an allowed value, too long, "Unknown")
+   is thrown away. The result is stored as a *suggestion*
+   (`item_aspect_suggestions`).
+2. **Approve**: the Item Specifics box comes pre-filled with it (labelled
+   "AI, confirm") when the reviewer keeps that category - always editable,
+   and never used for a different category.
+3. **After Approve**, the confirmation names any specific eBay *requires*
+   for the final category that's still blank, so it can be added with
+   `/ebay retry-item ... specifics:` before it's rejected.
+
+`/ebay category-aspects <category_id>` shows what eBay requires/recommends
+for any category. This needs no new eBay permission (same app token as the
+category search) and costs one small extra AI call per reviewed item. It
+only runs with the default `anthropic` AI backend - with Ollama, or if
+eBay or the AI is unreachable, there's simply no pre-fill, exactly as
+before. The export-time Brand/MPN/Type "Does Not Apply" safety net is
+unchanged.
+
 ### eBay CSV format
 
 The eBay batch CSV (`ebay_csv.py`) matches eBay's **classic File Exchange
