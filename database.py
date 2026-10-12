@@ -469,6 +469,98 @@ def init_db():
                 purchase_price   REAL NOT NULL,
                 cogs_amount      REAL NOT NULL
             );
+
+            -- eBay's own financial record, pulled by /ebay sync-finances
+            -- (see ebay_finances.py) - a READ-ONLY mirror of what eBay
+            -- reports, kept entirely separate from this bot's own sale/cost
+            -- tables (items.sale_price, sales, sale_items, pallet_costs,
+            -- finance_transactions), which nothing in the sync ever writes
+            -- to. Lets /ebay net-report show eBay's real fees/shipping/
+            -- payout side-by-side with what's been recorded, without
+            -- changing a single existing number.
+            --
+            -- Deliberately NO foreign keys: these rows describe eBay's
+            -- data, not this bot's, so they must never block (or be
+            -- silently cascaded by) /pallet delete or /admin db-wipe.
+            -- Items are matched at report time instead (SKU / listing ID,
+            -- see ebay_finances.match_line_to_item), never stored here.
+            -- No buyer name/address is stored either - only money fields.
+
+            -- One row per eBay Finances API monetary transaction
+            -- (getTransactions) - SALE, REFUND, SHIPPING_LABEL,
+            -- NON_SALE_CHARGE (ad/insertion/store fees), CREDIT, DISPUTE,
+            -- etc. (transaction_id, transaction_type) is eBay's own unique
+            -- key. amount is always positive; booking_entry (CREDIT/DEBIT)
+            -- gives its direction. Re-syncing refreshes a row in place
+            -- (payout status changes over time), never duplicates it.
+            CREATE TABLE IF NOT EXISTS ebay_fin_transactions (
+                transaction_id          TEXT NOT NULL,
+                transaction_type        TEXT NOT NULL,
+                transaction_date        TEXT,
+                transaction_status      TEXT,
+                booking_entry           TEXT,
+                amount                  REAL,
+                total_fee_amount        REAL,
+                total_fee_basis_amount  REAL,
+                ebay_collected_tax      REAL,
+                order_id                TEXT,
+                fee_type                TEXT,
+                transaction_memo        TEXT,
+                references_json         TEXT,   -- [{"type": "ITEM_ID", "id": "..."}, ...]
+                line_fees_json          TEXT,   -- {"<lineItemId>": total marketplace fees for that line}
+                payout_id               TEXT,
+                first_synced_at         TEXT NOT NULL,
+                last_synced_at          TEXT NOT NULL,
+                PRIMARY KEY (transaction_id, transaction_type)
+            );
+
+            -- One row per eBay order (Fulfillment API getOrders) - the
+            -- price/shipping/discount breakdown the Finances API doesn't
+            -- itemize. Money fields only.
+            CREATE TABLE IF NOT EXISTS ebay_order_breakdowns (
+                ebay_order_id           TEXT PRIMARY KEY,
+                order_date              TEXT,
+                price_subtotal          REAL,
+                price_discount          REAL,   -- stored as a positive number
+                delivery_cost           REAL,
+                delivery_discount       REAL,   -- stored as a positive number
+                adjustment              REAL,
+                order_total             REAL,   -- pricingSummary.total - what the eBay order card logs as the sale
+                total_marketplace_fee   REAL,
+                total_fee_basis_amount  REAL,
+                cancel_state            TEXT,
+                first_synced_at         TEXT NOT NULL,
+                last_synced_at          TEXT NOT NULL
+            );
+
+            -- One row per eBay order line item - sku/legacy_item_id are
+            -- how a line is matched back to a tracked item at report time.
+            CREATE TABLE IF NOT EXISTS ebay_order_lines (
+                line_item_id     TEXT PRIMARY KEY,
+                ebay_order_id    TEXT NOT NULL,
+                sku              TEXT,
+                legacy_item_id   TEXT,
+                title            TEXT,
+                quantity         INTEGER,
+                line_item_cost   REAL,
+                shipping_cost    REAL,
+                first_synced_at  TEXT NOT NULL,
+                last_synced_at   TEXT NOT NULL
+            );
+
+            -- One row per /ebay sync-finances run, so the report can say
+            -- how current its eBay numbers are.
+            CREATE TABLE IF NOT EXISTS ebay_finance_sync_log (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at         TEXT NOT NULL,
+                finished_at        TEXT,
+                transactions_from  TEXT,
+                orders_from        TEXT,
+                transaction_count  INTEGER,
+                order_count        INTEGER,
+                error              TEXT,
+                actor_id           INTEGER
+            );
             """
         )
         _migrate_add_columns(conn)
@@ -1882,6 +1974,164 @@ def mark_ebay_order_seen(ebay_order_id: str):
         )
 
 
+# ---------------------------------------------------------- eBay finances --
+# The read-only eBay mirror tables (see their CREATE TABLE comments in
+# init_db) - written ONLY by /ebay sync-finances (ebay_finances.sync), read
+# by /ebay net-report. Nothing here ever touches an existing bot table.
+
+_EBAY_FIN_TXN_FIELDS = (
+    "transaction_date", "transaction_status", "booking_entry", "amount", "total_fee_amount",
+    "total_fee_basis_amount", "ebay_collected_tax", "order_id", "fee_type", "transaction_memo",
+    "references_json", "line_fees_json", "payout_id",
+)
+
+
+def upsert_ebay_fin_transaction(txn: dict):
+    """Inserts one parsed Finances API transaction (ebay_finances.
+    parse_transaction's shape), or refreshes it in place if already synced -
+    eBay updates a transaction's payout status over time, so a re-sync
+    should reflect that rather than keep the first-seen snapshot."""
+    now = _now()
+    values = [txn.get(f) for f in _EBAY_FIN_TXN_FIELDS]
+    updates = ", ".join(f"{f} = excluded.{f}" for f in _EBAY_FIN_TXN_FIELDS)
+    with get_conn() as conn:
+        conn.execute(
+            f"INSERT INTO ebay_fin_transactions (transaction_id, transaction_type, "
+            f"{', '.join(_EBAY_FIN_TXN_FIELDS)}, first_synced_at, last_synced_at) "
+            f"VALUES (?, ?, {', '.join('?' * len(_EBAY_FIN_TXN_FIELDS))}, ?, ?) "
+            f"ON CONFLICT (transaction_id, transaction_type) DO UPDATE SET {updates}, "
+            f"last_synced_at = excluded.last_synced_at",
+            [txn["transaction_id"], txn["transaction_type"], *values, now, now],
+        )
+
+
+_EBAY_ORDER_FIELDS = (
+    "order_date", "price_subtotal", "price_discount", "delivery_cost", "delivery_discount",
+    "adjustment", "order_total", "total_marketplace_fee", "total_fee_basis_amount", "cancel_state",
+)
+_EBAY_LINE_FIELDS = (
+    "ebay_order_id", "sku", "legacy_item_id", "title", "quantity", "line_item_cost", "shipping_cost",
+)
+
+
+def upsert_ebay_order_breakdown(order: dict):
+    """Inserts/refreshes one parsed Fulfillment API order
+    (ebay_finances.parse_order_breakdown's shape) and its line items, in one
+    transaction. Only ever writes ebay_order_breakdowns/ebay_order_lines."""
+    now = _now()
+    order_updates = ", ".join(f"{f} = excluded.{f}" for f in _EBAY_ORDER_FIELDS)
+    line_updates = ", ".join(f"{f} = excluded.{f}" for f in _EBAY_LINE_FIELDS)
+    with get_conn() as conn:
+        conn.execute(
+            f"INSERT INTO ebay_order_breakdowns (ebay_order_id, {', '.join(_EBAY_ORDER_FIELDS)}, "
+            f"first_synced_at, last_synced_at) VALUES (?, {', '.join('?' * len(_EBAY_ORDER_FIELDS))}, ?, ?) "
+            f"ON CONFLICT (ebay_order_id) DO UPDATE SET {order_updates}, last_synced_at = excluded.last_synced_at",
+            [order["order_id"], *[order.get(f) for f in _EBAY_ORDER_FIELDS], now, now],
+        )
+        for line in order["lines"]:
+            line_values = [order["order_id"], *[line.get(f) for f in _EBAY_LINE_FIELDS[1:]]]
+            conn.execute(
+                f"INSERT INTO ebay_order_lines (line_item_id, {', '.join(_EBAY_LINE_FIELDS)}, "
+                f"first_synced_at, last_synced_at) VALUES (?, {', '.join('?' * len(_EBAY_LINE_FIELDS))}, ?, ?) "
+                f"ON CONFLICT (line_item_id) DO UPDATE SET {line_updates}, last_synced_at = excluded.last_synced_at",
+                [line["line_item_id"], *line_values, now, now],
+            )
+
+
+def get_all_ebay_order_lines() -> list:
+    """Every synced order line joined with its order's breakdown - the
+    report's starting point (ebay_finances.build_item_rows)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT l.*, o.order_date, o.price_subtotal, o.price_discount, o.delivery_cost,
+                      o.delivery_discount, o.adjustment, o.order_total, o.total_marketplace_fee,
+                      o.cancel_state
+               FROM ebay_order_lines l
+               JOIN ebay_order_breakdowns o ON o.ebay_order_id = l.ebay_order_id
+               ORDER BY o.order_date, l.line_item_id"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_all_ebay_fin_transactions() -> list:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM ebay_fin_transactions ORDER BY transaction_date").fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["references"] = json.loads(d["references_json"]) if d["references_json"] else []
+            d["line_fees"] = json.loads(d["line_fees_json"]) if d["line_fees_json"] else {}
+            result.append(d)
+        return result
+
+
+def get_item_by_ebay_listing_id(ebay_item_id: str):
+    """The item whose confirmed eBay listing ID (ebay_listing_data.
+    ebay_item_id, set by /ebay import-results / Confirm Listed) matches -
+    the fallback match for an order line with no usable SKU."""
+    if not ebay_item_id:
+        return None
+    with get_conn() as conn:
+        row = conn.execute(
+            """SELECT i.* FROM items i JOIN ebay_listing_data eld ON eld.item_id = i.id
+               WHERE eld.ebay_item_id = ? ORDER BY i.id DESC LIMIT 1""",
+            (str(ebay_item_id),),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_ebay_platform_items_with_sale_price(pallet_id: int = None) -> list:
+    """Items recorded as sold on eBay with a sale price - used to list ones
+    the eBay data couldn't be matched to. Read-only."""
+    with get_conn() as conn:
+        query = "SELECT * FROM items WHERE sale_price IS NOT NULL AND sale_platform = 'eBay' AND status != ?"
+        params = [STATUS_DELETED]
+        if pallet_id is not None:
+            query += " AND pallet_id = ?"
+            params.append(pallet_id)
+        return [dict(r) for r in conn.execute(query + " ORDER BY pallet_id, item_number", params).fetchall()]
+
+
+def count_item_refunds_and_expenses(item_ids: list) -> int:
+    """How many /finance refund or /finance expense rows are tied to any of
+    these items - /ebay net-report flags these, since eBay's own refund/fee
+    numbers may already cover the same money. Read-only."""
+    if not item_ids:
+        return 0
+    placeholders = ",".join("?" * len(item_ids))
+    with get_conn() as conn:
+        return conn.execute(
+            f"SELECT COUNT(*) AS n FROM finance_transactions WHERE type IN ('refund', 'expense') "
+            f"AND item_id IN ({placeholders})",
+            list(item_ids),
+        ).fetchone()["n"]
+
+
+def start_ebay_finance_sync(transactions_from: str, orders_from: str, actor_id: int) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO ebay_finance_sync_log (started_at, transactions_from, orders_from, actor_id) VALUES (?, ?, ?, ?)",
+            (_now(), transactions_from, orders_from, actor_id),
+        )
+        return cur.lastrowid
+
+
+def finish_ebay_finance_sync(sync_id: int, transaction_count: int, order_count: int, error: str = None):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE ebay_finance_sync_log SET finished_at = ?, transaction_count = ?, order_count = ?, error = ? WHERE id = ?",
+            (_now(), transaction_count, order_count, error, sync_id),
+        )
+
+
+def get_last_successful_ebay_finance_sync():
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM ebay_finance_sync_log WHERE finished_at IS NOT NULL AND error IS NULL ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def set_shipping_info(item_id: int, recipient_name: str, address_line1: str, address_line2: str,
                        city: str, state: str, postal_code: str, country: str, actor_id: int = None):
     """
@@ -2238,6 +2488,13 @@ def wipe_database():
       - ebay_seen_orders: same idea as quickbooks_seen_charges, for the
         eBay order auto-sync poll loop - tied to the eBay connection, not
         to any pallet
+      - ebay_fin_transactions / ebay_order_breakdowns / ebay_order_lines /
+        ebay_finance_sync_log: the read-only mirror of eBay's own records
+        (/ebay sync-finances) - eBay-account-level, not pallet data. They
+        hold no item IDs (matching happens at report time, and only to
+        items created before the order - see
+        ebay_finances.match_line_to_item), so they can't attach to a
+        re-created pallet's items after a wipe.
     """
     with get_conn() as conn:
         conn.executescript(

@@ -157,6 +157,8 @@ def _ebay_commands_embed() -> discord.Embed:
     embed.add_field(name="batches / batch <id>", value="List recent batches, or show one batch's still-pending items.", inline=False)
     embed.add_field(name="import-results <batch_id> <csv>", value="Reconcile a batch against a results CSV from Seller Hub.", inline=False)
     embed.add_field(name="confirm-listed [item_number]", value="Manually confirm an item is live on eBay (or tap **Confirm Listed** right on its card in #pending-ebay-upload).", inline=False)
+    embed.add_field(name="sync-finances [days_back]", value="Pull eBay's own fees, buyer-paid shipping, labels, refunds, and payouts (up to 5 years). Read-only - changes no recorded number, card, or QuickBooks entry.", inline=False)
+    embed.add_field(name="net-report [pallet_name]", value="Recorded eBay revenue vs. eBay's real net payout, per pallet or business-wide, with a per-item CSV. Finance Management or Pallet Admin.", inline=False)
     return embed
 
 

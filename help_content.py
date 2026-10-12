@@ -97,6 +97,16 @@ ENTRIES = (
         ("ebay batches", "batch status"),
     ),
     HelpEntry(
+        "/ebay sync-finances [days_back]",
+        "Pull eBay's real fees, shipping, refunds and payouts into the bot (read-only - changes no recorded numbers).",
+        ("ebay fees", "sync fees", "ebay payout", "final value fee", "sync finances"),
+    ),
+    HelpEntry(
+        "/ebay net-report [pallet_name]",
+        "Compare recorded eBay revenue with eBay's real net payout after fees, labels and refunds.",
+        ("net profit", "ebay net", "profit after fees", "real profit", "net report", "fees report"),
+    ),
+    HelpEntry(
         "/ebay import-results <batch_id> <csv>",
         "Reconcile a batch against a results CSV downloaded from Seller Hub.",
         ("ebay results", "reconcile", "seller hub"),

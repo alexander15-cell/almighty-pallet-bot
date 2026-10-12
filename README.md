@@ -706,6 +706,54 @@ Discord) and nothing gets posted - the same as if eBay itself were briefly
 down, so there's no harm in leaving `EBAY_ENABLED` on with only the
 narrower token while you get to this.
 
+### eBay fee & payout sync (`/ebay sync-finances`, `/ebay net-report`)
+
+A pallet's revenue is whatever was logged as each item's sale price - and
+a sale confirmed from an `#ebay-orders` card logs eBay's order total, which
+includes the shipping the buyer paid. Nothing ever subtracts eBay's own
+fees, eBay-bought shipping labels, refunds, or promoted-listing ad fees.
+eBay already has all of that, so this pulls it in and compares - **without
+changing any existing number**:
+
+- **`/ebay sync-finances [days_back]`** (Pallet Admin) reads eBay's
+  Finances API (every fee, refund, label, ad fee and payout - up to 5
+  years back) and Fulfillment API (each order's per-item price and
+  buyer-paid shipping - up to 2 years back) into four new read-only mirror
+  tables (`ebay_fin_transactions`, `ebay_order_breakdowns`,
+  `ebay_order_lines`, `ebay_finance_sync_log`). It never writes to items,
+  sales, costs, the pinned cards, or QuickBooks. Safe to re-run any time -
+  rows are keyed on eBay's own IDs, so a re-sync refreshes instead of
+  duplicating. Default `days_back` is 1825 (eBay's 5-year maximum).
+- **`/ebay net-report [pallet_name]`** (Finance Management or Pallet
+  Admin) shows, per pallet or business-wide: recorded revenue next to
+  eBay's item price, buyer-paid shipping, fees, labels, refunds, ad fees
+  and **net payout**, plus what the pallet's profit would be using eBay's
+  net for its eBay sales. It flags items whose recorded price included
+  shipping, eBay sales with no matching order, manual `/finance refund`/
+  `expense` entries that eBay's numbers may already cover, and (overview)
+  eBay charges not tied to any item (store subscription, insertion fees,
+  ...). A per-item CSV is attached.
+
+Items are matched by SKU (this bot's `pallet-N-item-M` custom label), then
+by confirmed eBay listing ID - and only to items created before the order.
+Net payout is eBay's own signed total of every transaction on the order;
+an order with no payout record yet shows an estimate (order total minus
+eBay's fee), marked as such. No buyer names or addresses are stored.
+
+**One-time setup:** `EBAY_REFRESH_TOKEN` needs the `sell.finances` scope
+on top of the ones it already has. Redo the consent from "eBay order
+auto-sync" below with this scope list instead (one line, space-separated
+scopes URL-encoded as `+`):
+
+```
+https://auth.ebay.com/oauth2/authorize?client_id=YOUR_APP_ID&redirect_uri=YOUR_RUNAME&response_type=code&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope%2Fsell.inventory+https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope%2Fsell.fulfillment+https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope%2Fsell.account+https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope%2Fsell.finances
+```
+
+Exchange the code for a new refresh token exactly as described there,
+replace `EBAY_REFRESH_TOKEN` in `.env`, and restart. Until then,
+`/ebay sync-finances` stops with a permissions error that says so - nothing
+else is affected.
+
 ### eBay CSV format
 
 The eBay batch CSV (`ebay_csv.py`) matches eBay's **classic File Exchange
@@ -1232,6 +1280,12 @@ Tables:
   the same charge twice
 - **quickbooks_connection** - the single-row OAuth token for the one
   connected QuickBooks company, auto-refreshed before every expiry
+- **ebay_fin_transactions / ebay_order_breakdowns / ebay_order_lines /
+  ebay_finance_sync_log** - a read-only mirror of eBay's own fee/payout
+  and order-price records, filled only by `/ebay sync-finances` (see "eBay
+  fee & payout sync" above). No foreign keys and no item IDs stored, so
+  they never affect `/pallet delete` or `/admin db-wipe`; kept across a
+  wipe like `ebay_seen_orders`.
 
 The eBay CSV batch itself is **not** in the database - it's a plain CSV file
 at `data/ebay_batch.csv` (see `ebay_csv.py`), archived to

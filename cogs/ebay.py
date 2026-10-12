@@ -40,8 +40,17 @@ used while there's no live eBay API integration:
                        against eBay's own official taxonomy (see
                        ebay_taxonomy.py) - mainly for finding an ID to pass
                        to /ebay retry-item's category_id correction.
+/ebay sync-finances  - pulls eBay's own fee/shipping/refund/payout records
+                       into read-only mirror tables (see ebay_finances.py).
+                       Never changes any existing sale, cost, card, or
+                       QuickBooks entry.
+/ebay net-report     - side-by-side: what's recorded vs. what eBay says
+                       (fees, buyer-paid shipping, labels, refunds, ad
+                       fees, net payout), per pallet or business-wide, with
+                       a per-item CSV. Finance Management or Pallet Admin.
 
-All of these require the Pallet Admin role, same as admin_tools.py. The
+All of these require the Pallet Admin role, same as admin_tools.py (except
+/ebay net-report, which Finance Management can also run). The
 actual message/status moving is delegated to the ItemFlow cog (via
 get_cog, same cross-cog pattern QueueReviewView/AwaitingListingView use) so
 that logic stays in one place alongside the rest of the pipeline.
@@ -58,6 +67,8 @@ finance_utils.post_sale_to_quickbooks/split_evenly, the same functions
 /finance log-sale uses, so a sale logged either way is handled identically.
 """
 import asyncio
+import csv
+import io
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -71,6 +82,7 @@ import database as db
 import discord_resilience
 import ebay_api
 import ebay_csv
+import ebay_finances
 import ebay_recommendations
 import ebay_results
 import finance_utils
@@ -298,6 +310,167 @@ async def _post_ebay_order_match(bot: discord.Client, order: dict, matched_items
     view = discord.ui.View(timeout=None)
     view.add_item(EbayOrderConfirmButton(order["order_id"]))
     await channel.send(embed=embed, view=view)
+
+
+# ------------------------------------------------------ /ebay net-report --
+
+def _money(value) -> str:
+    if value is None:
+        return "-"
+    value = round(value, 2) + 0.0  # + 0.0 turns -0.0 into 0.0
+    return f"-${abs(value):,.2f}" if value < 0 else f"${value:,.2f}"
+
+
+def _sync_note(last_sync: dict) -> str:
+    if not last_sync:
+        return "No eBay data synced yet - run `/ebay sync-finances` first."
+    return f"eBay data as of {last_sync['finished_at'][:16].replace('T', ' ')} UTC (`/ebay sync-finances` to refresh)."
+
+
+def _item_label(item: dict) -> str:
+    pallet = db.get_pallet(item["pallet_id"])
+    return f"{pallet['name'] if pallet else 'pallet ' + str(item['pallet_id'])}#{item['item_number']}"
+
+
+def build_pallet_net_embed(report: dict, last_sync: dict) -> discord.Embed:
+    """One pallet's /ebay net-report embed - recorded numbers next to eBay's.
+    Only displays; computes nothing new beyond ebay_finances' report."""
+    pallet, totals, fin = report["pallet"], report["totals"], report["financials"]
+    embed = discord.Embed(
+        title=f"🧾 {pallet['name']} - eBay Net vs. Recorded",
+        description=(
+            "Read-only comparison - **nothing here changes any recorded number**, the pinned card, or QuickBooks.\n"
+            + _sync_note(last_sync)
+        ),
+        color=discord.Color.teal(),
+    )
+    n = len(report["matched"])
+    if n:
+        embed.add_field(
+            name=f"eBay sales matched: {n} item(s)",
+            value=(
+                f"Recorded as revenue: **{_money(report['recorded_for_matched'])}**\n"
+                f"eBay item price: {_money(totals['item_price'])}\n"
+                f"Buyer-paid shipping: {_money(totals['buyer_shipping'])}\n"
+                f"eBay fees: {_money(-totals['ebay_fees'])}\n"
+                f"eBay shipping labels: {_money(-totals['shipping_labels'])}\n"
+                f"Refunds & adjustments: {_money(-totals['refunds'])}\n"
+                f"Ad/listing fees: {_money(-totals['ad_fees'])}\n"
+                f"**eBay net payout: {_money(totals['net_payout'])}**"
+            ),
+            inline=False,
+        )
+        gap = round(report["recorded_for_matched"] - totals["net_payout"], 2)
+        embed.add_field(name="Recorded minus eBay net", value=_money(gap), inline=True)
+    else:
+        embed.add_field(name="eBay sales matched", value="None - no synced eBay order maps to this pallet's items.", inline=False)
+
+    if fin["profit_so_far"] is not None:
+        embed.add_field(
+            name="Profit/Loss",
+            value=(
+                f"On the card now: {_money(fin['profit_so_far'])}\n"
+                f"Using eBay net for matched sales: **{_money(report['profit_with_ebay_net'])}**"
+            ),
+            inline=True,
+        )
+
+    notes = []
+    if report["shipping_in_revenue"]:
+        shown = ", ".join(_item_label(e["item"]) for e in report["shipping_in_revenue"][:8])
+        more = f" +{len(report['shipping_in_revenue']) - 8} more" if len(report["shipping_in_revenue"]) > 8 else ""
+        notes.append(f"📦 Recorded price includes buyer-paid shipping: {shown}{more}")
+    if report["missing"]:
+        shown = ", ".join(f"#{i['item_number']}" for i in report["missing"][:10])
+        more = f" +{len(report['missing']) - 10} more" if len(report["missing"]) > 10 else ""
+        notes.append(f"❓ Recorded as eBay sales but no matching eBay order synced: {shown}{more}")
+    if report["manual_entries_on_matched"]:
+        notes.append(
+            f"⚠️ {report['manual_entries_on_matched']} manual `/finance refund`/`expense` entr(ies) on matched items - "
+            "if those were eBay refunds/fees, eBay's net already includes them, so the adjusted profit counts them twice."
+        )
+    if report["any_estimates"]:
+        notes.append("≈ Some orders have no eBay payout record synced yet - their net is an estimate (total minus eBay's fee).")
+    if notes:
+        embed.add_field(name="Notes", value="\n".join(notes)[:1024], inline=False)
+    embed.set_footer(text="Per-item detail is in the attached CSV.")
+    return embed
+
+
+def build_overview_net_embed(overview: dict) -> discord.Embed:
+    """Business-wide /ebay net-report embed: one line per pallet, plus eBay
+    money that isn't tied to any tracked item."""
+    embed = discord.Embed(
+        title="🧾 eBay Net vs. Recorded - All Pallets",
+        description=(
+            "Read-only comparison - **nothing here changes any recorded number**, the pinned cards, or QuickBooks.\n"
+            + _sync_note(overview["last_sync"])
+        ),
+        color=discord.Color.teal(),
+    )
+    lines = []
+    total_recorded = total_net = 0.0
+    for report in overview["pallets"]:
+        total_recorded += report["recorded_for_matched"]
+        total_net += report["totals"]["net_payout"]
+        lines.append(
+            f"**{report['pallet']['name']}** ({len(report['matched'])}): recorded {_money(report['recorded_for_matched'])}"
+            f" → eBay net {_money(report['totals']['net_payout'])}"
+        )
+    if lines:
+        value = "\n".join(lines)
+        if len(value) > 1024:
+            value = value[:1000].rsplit("\n", 1)[0] + "\n… (see CSV)"
+        embed.add_field(name="By pallet (matched eBay sales)", value=value, inline=False)
+        embed.add_field(name="Total recorded", value=_money(round(total_recorded, 2)), inline=True)
+        embed.add_field(name="Total eBay net", value=_money(round(total_net, 2)), inline=True)
+    else:
+        embed.add_field(name="By pallet", value="No synced eBay orders match any tracked item yet.", inline=False)
+
+    other = []
+    if overview["unmatched_lines"]:
+        other.append(
+            f"{len(overview['unmatched_lines'])} eBay order line(s) with no matching tracked item "
+            f"(net {_money(overview['unmatched_net'])})"
+        )
+    if overview["orders_without_breakdown"]:
+        other.append(
+            f"{overview['orders_without_breakdown']} older order(s) with payout data but no SKU breakdown "
+            f"(net {_money(overview['orders_without_breakdown_net'])})"
+        )
+    for label, amount in sorted(overview["account_level"].items(), key=lambda kv: -abs(kv[1])):
+        other.append(f"{label.replace('_', ' ').title()}: {_money(-amount)}")
+    if other:
+        embed.add_field(name="eBay money not tied to any item", value="\n".join(other)[:1024], inline=False)
+    embed.set_footer(text="Per-item detail is in the attached CSV.")
+    return embed
+
+
+_NET_CSV_FIELDS = [
+    "pallet", "item_number", "ebay_orders", "recorded_sale_price", "ebay_item_price", "buyer_shipping",
+    "ebay_fees", "shipping_labels", "refunds_adjustments", "ad_listing_fees", "ebay_net_payout",
+    "recorded_minus_net", "net_is_estimate",
+]
+
+
+def build_net_report_csv(reports: list) -> bytes:
+    """Per-item rows across the given pallet reports, as CSV bytes."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_NET_CSV_FIELDS)
+    for report in reports:
+        for e in report["matched"]:
+            recorded = e["recorded"]
+            writer.writerow([
+                report["pallet"]["name"], e["item"]["item_number"], " ".join(e["orders"]),
+                f"{recorded:.2f}" if recorded is not None else "",
+                f"{e['item_price']:.2f}", f"{e['buyer_shipping']:.2f}", f"{e['ebay_fees']:.2f}",
+                f"{e['shipping_labels']:.2f}", f"{e['refunds']:.2f}", f"{e['ad_fees']:.2f}",
+                f"{e['net_payout']:.2f}",
+                f"{recorded - e['net_payout']:.2f}" if recorded is not None else "",
+                "yes" if e["estimate"] else "no",
+            ])
+    return buf.getvalue().encode("utf-8")
 
 
 class Ebay(commands.Cog):
@@ -788,6 +961,80 @@ class Ebay(commands.Cog):
             more = f", and {len(skipped_numbers) - 10} more" if len(skipped_numbers) > 10 else ""
             lines.append(f"⚠️ Skipped {len(skipped_numbers)} item(s) with no eBay listing data on file: {shown}{more}.")
         await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    @ebay_group.command(
+        name="sync-finances",
+        description="Pull eBay's fees/shipping/refunds/payouts (read-only - changes no recorded numbers).",
+    )
+    @app_commands.describe(days_back="How far back to pull, in days (default 1825 = eBay's 5-year maximum)")
+    async def sync_finances(self, interaction: discord.Interaction, days_back: int = 1825):
+        """
+        Fills the read-only eBay mirror tables (see ebay_finances.sync) -
+        never writes to any existing sale/cost/item table, card, or
+        QuickBooks. Safe to re-run: rows are keyed on eBay's own IDs.
+        """
+        if not await _require_admin(interaction):
+            return
+        if not config.EBAY_ENABLED:
+            await interaction.response.send_message(
+                "The eBay API isn't configured (`EBAY_APP_ID`/`EBAY_CERT_ID`/`EBAY_REFRESH_TOKEN` in `.env`).",
+                ephemeral=True,
+            )
+            return
+        if days_back < 1:
+            await interaction.response.send_message("`days_back` must be at least 1.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            result = await ebay_finances.sync(days_back, actor_id=interaction.user.id)
+        except ebay_api.EbayAPIError as e:
+            await interaction.followup.send(
+                f"⚠️ eBay sync stopped: {str(e)[:1500]}\n"
+                "Anything already pulled before the error is kept. No recorded numbers were changed.",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            f"✅ Synced **{result['transactions']}** eBay money transaction(s) since "
+            f"{result['transactions_from']:%Y-%m-%d} and **{result['orders']}** order breakdown(s) since "
+            f"{result['orders_from']:%Y-%m-%d} (eBay keeps order detail for 2 years).\n"
+            "No recorded sale, cost, card, or QuickBooks entry was changed. Run `/ebay net-report` to compare.",
+            ephemeral=True,
+        )
+
+    @ebay_group.command(
+        name="net-report",
+        description="Compare recorded eBay revenue with eBay's real fees and payout. Changes nothing.",
+    )
+    @app_commands.describe(pallet_name="Pallet name (omit for every pallet; inside a pallet's channels, that pallet)")
+    async def net_report(self, interaction: discord.Interaction, pallet_name: str = None):
+        if not await _require_finance_role(interaction):
+            return
+
+        pallet = None
+        if pallet_name:
+            pallet = db.get_pallet_by_name(pallet_name.strip())
+            if not pallet:
+                await interaction.response.send_message(f"No pallet named `{pallet_name}` found.", ephemeral=True)
+                return
+        elif getattr(interaction.channel, "category_id", None):
+            pallet = db.get_pallet_by_category(interaction.channel.category_id)
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        last_sync = db.get_last_successful_ebay_finance_sync()
+        if pallet:
+            report = ebay_finances.build_pallet_report(pallet["id"])
+            embed = build_pallet_net_embed(report, last_sync)
+            reports = [report]
+            filename = f"ebay-net-{pallet['name']}.csv"
+        else:
+            overview = ebay_finances.build_overview()
+            embed = build_overview_net_embed(overview)
+            reports = overview["pallets"]
+            filename = "ebay-net-all-pallets.csv"
+        csv_file = discord.File(io.BytesIO(build_net_report_csv(reports)), filename=filename)
+        await interaction.followup.send(embed=embed, file=csv_file, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
