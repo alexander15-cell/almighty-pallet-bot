@@ -175,6 +175,11 @@ and type a number:
     separately against revenue everywhere it's shown.
   - `/finance expense` - logs a cost against a pallet (packaging, listing
     fees, etc.), optionally tied to one item.
+  - `/finance sales [pallet_name] [platform] [limit]` - lists logged sales,
+    newest first: sale number, date, platform, amount, items, and its
+    QuickBooks state (Sales Receipt number, "not in QuickBooks yet" with
+    the retry command, or reversed). Run inside a pallet's channels for
+    just that pallet; `platform:In Person` finds yard/in-person sales.
   - `/finance reverse-sale` - undoes an item's recorded sale (duplicate
     entry, a sale that fell through) - clears its sale price but keeps a
     record of what was reversed and why. If the sale was **logged**
@@ -767,7 +772,11 @@ driven by eBay's own data:
   card.** The new-order check above only looks at orders created in the
   last 3 days; an older order eBay updates later (e.g. when it ships) is
   picked up here instead, and its card is posted then - unless that sale
-  was already logged another way (e.g. `/finance log-sale`).
+  was already logged another way (e.g. `/finance log-sale`). Orders are
+  matched by SKU, or by the item's eBay listing ID when the listing has no
+  SKU (created or edited by hand in Seller Hub). If a card still never
+  appears, `/ebay order-card <order_id>` (Finance Management) posts it on
+  demand - it refuses if that sale is already logged.
 
 Orders that aren't paid (pending, failed, fully refunded) or have a cancel
 request open are left alone. Items are matched by SKU, then confirmed

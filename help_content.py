@@ -162,6 +162,16 @@ ENTRIES = (
         ("expense", "packaging cost", "fees"),
     ),
     HelpEntry(
+        "/finance sales [pallet_name] [platform]",
+        "List logged sales - number, date, platform, amount, items, and whether each reached QuickBooks or was reversed.",
+        ("list sales", "logged sales", "check sale", "was it logged", "yard sale", "sales history", "find sale"),
+    ),
+    HelpEntry(
+        "/ebay order-card <order_id>",
+        "Post the Confirm & log sale card for one eBay order whose card never appeared (refuses if already logged).",
+        ("missing card", "order card", "no confirm button", "log ebay sale", "card didn't post"),
+    ),
+    HelpEntry(
         "/finance reverse-sale",
         "Undo an item's recorded sale (duplicate entry, fell through). For a sale already in QuickBooks: void its Sales Receipt there, then run with quickbooks_voided:True.",
         ("undo sale", "reverse sale", "fix sale", "void sale", "cancelled sale"),

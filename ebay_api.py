@@ -411,7 +411,8 @@ async def get_orders(since: datetime, limit: int = 50) -> list:
     a SKU back to a tracked item and log a sale, not eBay's full raw order
     object: {'order_id', 'sale_date' (YYYY-MM-DD), 'total_price',
     'line_items': [{'sku', 'quantity'}, ...]}. An order missing a usable
-    total or with no SKU-bearing line items is left out entirely - there's
+    total or with no identifiable line items (no SKU and no listing ID) is
+    left out entirely - there's
     nothing useful this bot could do with either.
     """
     access_token = await get_access_token()
@@ -443,7 +444,7 @@ async def get_order(order_id: str) -> dict:
 
     Returns the same shape as one entry from get_orders(), or raises
     EbayAPIError if the order can't be fetched or parsed (e.g. it no
-    longer has a usable total or SKU-bearing line items - vanishingly
+    longer has a usable total or identifiable line items - vanishingly
     unlikely for an order that already passed through get_orders() once,
     but not something to silently paper over on a financial action).
     """
@@ -458,7 +459,7 @@ async def get_order(order_id: str) -> dict:
 
     parsed = _parse_order(body)
     if not parsed:
-        raise EbayAPIError(f"eBay order {order_id!r} has no usable total or SKU-bearing line items: {body}")
+        raise EbayAPIError(f"eBay order {order_id!r} has no usable total or identifiable line items: {body}")
     return parsed
 
 
@@ -472,11 +473,19 @@ def _parse_order(raw_order: dict):
     total = ((raw_order.get("pricingSummary") or {}).get("total") or {}).get("value")
     if total is None:
         return None
-    line_items = [
-        {"sku": li["sku"], "quantity": li.get("quantity") or 1}
-        for li in (raw_order.get("lineItems") or [])
-        if li.get("sku")
-    ]
+    # A line is usable if it has this bot's SKU OR an eBay listing ID - a
+    # listing created/edited by hand in Seller Hub may carry no SKU, and
+    # used to make the whole order unreadable here, so its Confirm & log
+    # sale card could never be posted. cogs/ebay.py's
+    # _match_order_line_items matches by SKU first, then by listing ID.
+    line_items = []
+    for li in raw_order.get("lineItems") or []:
+        if not (li.get("sku") or li.get("legacyItemId")):
+            continue
+        line = {"sku": li.get("sku") or "", "quantity": li.get("quantity") or 1}
+        if li.get("legacyItemId"):
+            line["legacy_item_id"] = str(li["legacyItemId"])
+        line_items.append(line)
     if not line_items:
         return None
     creation_date = raw_order.get("creationDate") or ""

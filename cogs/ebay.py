@@ -177,22 +177,26 @@ class EbayOrderConfirmButton(discord.ui.DynamicItem[discord.ui.Button], template
 
 def _match_order_line_items(order: dict) -> list:
     """
-    Resolves an eBay order's line items back to tracked items by SKU
-    (ebay_listing_rules.parse_custom_label) - a line item with an unparseable SKU
-    (not this bot's format) or no matching item (deleted, or from before
-    this bot tracked it) is silently skipped, not an error: an order can
-    still be worth confirming for whichever of its items DO match. Used by
-    both the poll loop (to decide whether to post a card at all) and
-    EbayOrderConfirmButton (to re-resolve fresh on click).
+    Resolves an eBay order's line items back to tracked items - by this
+    bot's SKU (ebay_listing_rules.parse_custom_label) first, then by the
+    item's confirmed eBay listing ID (a listing created/edited by hand in
+    Seller Hub may carry no SKU - the same fallback the order automation
+    uses). A line that matches neither is silently skipped, not an error:
+    an order can still be worth confirming for whichever of its items DO
+    match. Used by the poll loop (whether to post a card), _ensure_order_card,
+    /ebay order-card, and EbayOrderConfirmButton (re-resolved fresh on click).
     """
-    matched = []
+    matched, seen_ids = [], set()
     for line_item in order["line_items"]:
-        parsed = ebay_listing_rules.parse_custom_label(line_item["sku"])
-        if not parsed:
-            continue
-        item = db.get_item_by_pallet_and_number(*parsed)
-        if item:
+        item = None
+        parsed = ebay_listing_rules.parse_custom_label(line_item.get("sku") or "")
+        if parsed:
+            item = db.get_item_by_pallet_and_number(*parsed)
+        if not item and line_item.get("legacy_item_id"):
+            item = db.get_item_by_ebay_listing_id(line_item["legacy_item_id"])
+        if item and item["id"] not in seen_ids:
             matched.append(item)
+            seen_ids.add(item["id"])
     return matched
 
 
@@ -802,6 +806,56 @@ class Ebay(commands.Cog):
             return
         lines = "\n".join(f"`{category_id}` - {path}" for category_id, path in matches)
         await interaction.followup.send(f"Categories matching `{query}`:\n{lines}", ephemeral=True)
+
+    @ebay_group.command(
+        name="order-card",
+        description="Post the Confirm & log sale card for one eBay order (if its card never appeared).",
+    )
+    @app_commands.describe(order_id="The eBay order number, e.g. 11-15276-35371")
+    async def order_card(self, interaction: discord.Interaction, order_id: str):
+        """Posts the same #ebay-orders card the order sync would have, for
+        an order whose card never appeared. Nothing is logged until someone
+        clicks the card. Refuses if any matched item's sale is already
+        logged, so it can't lead to logging a sale twice."""
+        if not await _require_finance_role(interaction):
+            return
+        if not config.EBAY_ENABLED:
+            await interaction.response.send_message("The eBay API isn't configured.", ephemeral=True)
+            return
+        order_id = order_id.strip()
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            order = await ebay_api.get_order(order_id)
+        except ebay_api.EbayAPIError as e:
+            await interaction.followup.send(f"Couldn't get eBay order `{order_id}`: {str(e)[:1500]}", ephemeral=True)
+            return
+        matched = _match_order_line_items(order)
+        if not matched:
+            await interaction.followup.send(
+                f"None of eBay order `{order_id}`'s items match a tracked item (by SKU or eBay listing ID).",
+                ephemeral=True,
+            )
+            return
+        logged = [i for i in matched if db.get_item_sale(i["id"])]
+        if logged:
+            names = ", ".join(_item_label(i) for i in logged)
+            await interaction.followup.send(
+                f"{names} already has a logged sale - no card posted. See `/finance sales` "
+                f"(and `/finance reverse-sale` if that logged sale is wrong).",
+                ephemeral=True,
+            )
+            return
+        channel_id = db.get_shared_channel_id("ebay-orders")
+        if not channel_id or self.bot.get_channel(channel_id) is None:
+            await interaction.followup.send("#ebay-orders isn't set up - run `/setup shared-channels`.", ephemeral=True)
+            return
+        await _post_ebay_order_match(self.bot, order, matched)
+        db.mark_ebay_order_seen(order_id)
+        await interaction.followup.send(
+            f"Posted the Confirm & log sale card for order `{order_id}` "
+            f"({', '.join(_item_label(i) for i in matched)}, ${order['total_price']:.2f}) in <#{channel_id}>.",
+            ephemeral=True,
+        )
 
     @ebay_group.command(
         name="fee-cards",

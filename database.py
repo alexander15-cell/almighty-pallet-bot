@@ -1697,6 +1697,44 @@ def get_sale_items(sale_id: int):
         return [dict(r) for r in rows]
 
 
+def list_logged_sales(limit: int = 20, platform: str = None, pallet_id: int = None) -> list:
+    """
+    Logged sales (sales rows - /finance log-sale and the eBay order card),
+    newest first, for /finance sales. Each: the sales row plus 'items'
+    ([{'pallet_name', 'item_number', 'allocated_price'}]) and 'voided'
+    (the voided_sales row, or None). A reversed sale's items come from
+    voided_sale_items, so it still lists what it covered. `platform`
+    matches case-insensitively; `pallet_id` keeps sales that include at
+    least one item from that pallet. Read-only. (`platform` matches by
+    prefix too, so "Other" finds "Other: Mercari".)
+    """
+    with get_conn() as conn:
+        query = "SELECT * FROM sales"
+        params = []
+        if platform:
+            query += " WHERE platform LIKE ?"  # SQLite LIKE is case-insensitive for ASCII
+            params.append(f"{platform}%")
+        query += " ORDER BY id DESC"
+        results = []
+        for sale in conn.execute(query, params).fetchall():
+            item_rows = conn.execute(
+                """SELECT x.allocated_price, i.item_number, i.pallet_id, p.name AS pallet_name FROM (
+                       SELECT item_id, allocated_price, id FROM sale_items WHERE sale_id = ?
+                       UNION ALL
+                       SELECT item_id, allocated_price, id FROM voided_sale_items WHERE sale_id = ?
+                   ) x JOIN items i ON i.id = x.item_id JOIN pallets p ON p.id = i.pallet_id ORDER BY x.id""",
+                (sale["id"], sale["id"]),
+            ).fetchall()
+            items = [dict(r) for r in item_rows]
+            if pallet_id is not None and not any(i["pallet_id"] == pallet_id for i in items):
+                continue
+            voided = conn.execute("SELECT * FROM voided_sales WHERE sale_id = ?", (sale["id"],)).fetchone()
+            results.append({**dict(sale), "items": items, "voided": dict(voided) if voided else None})
+            if len(results) >= limit:
+                break
+        return results
+
+
 def set_sale_receipt_id(sale_id: int, sales_receipt_id: str):
     """
     Saved the moment the Sales Receipt is created - on a cash basis this is

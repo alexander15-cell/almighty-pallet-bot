@@ -821,6 +821,39 @@ async def _finalize_log_sale(interaction: discord.Interaction, resolved_items: l
     await interaction.followup.send(message, ephemeral=True)
 
 
+def format_sales_list(rows: list, pallet: dict = None, platform: str = None, limit_chars: int = 1900) -> str:
+    """/finance sales' reply: one line per logged sale - number, date,
+    platform, amount, items, and its QuickBooks state (Sales Receipt,
+    QuickBooks failed, or reversed)."""
+    scope = " for **" + pallet["name"] + "**" if pallet else ""
+    scope += f" on **{platform.strip()}**" if platform and platform.strip() else ""
+    if not rows:
+        return f"No logged sales{scope}."
+    lines = [f"Logged sales{scope}, newest first:"]
+    for sale in rows:
+        items = ", ".join(f"{i['pallet_name']}#{i['item_number']}" for i in sale["items"]) or "(no items)"
+        if sale["voided"]:
+            state = f"reversed: {sale['voided']['reason']}"
+        elif sale["quickbooks_sales_receipt_id"]:
+            state = f"Sales Receipt `{sale['quickbooks_sales_receipt_id']}`"
+        else:
+            state = f"⚠️ not in QuickBooks yet - `/finance retry-sale sale_id:{sale['id']}`"
+        line = f"`#{sale['id']}` {sale['sale_date']} · **{sale['platform']}** · ${sale['total_price']:.2f} · {items} · {state}"
+        lines.append(f"~~`#{sale['id']}` {sale['sale_date']} · {sale['platform']} · ${sale['total_price']:.2f} · {items}~~ ({state})"
+                     if sale["voided"] else line)
+    lines.append("To undo one: void its Sales Receipt in QuickBooks, then `/finance reverse-sale` (quickbooks_voided:True) "
+                 "on any of its items, inside that pallet's channels.")
+    text = "\n".join(lines)
+    if len(text) > limit_chars:
+        kept = []
+        for line in lines:
+            if len("\n".join(kept + [line, "…"])) > limit_chars:
+                break
+            kept.append(line)
+        text = "\n".join(kept + ["… (more - narrow it with `pallet_name`/`platform`, or a smaller `limit`)"])
+    return text
+
+
 class Finance(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -1065,6 +1098,31 @@ class Finance(commands.Cog):
         await _show_log_sale_confirmation(
             interaction, resolved_items, platform, total_price, already_deposited, sale_date
         )
+
+    @finance_group.command(
+        name="sales",
+        description="List logged sales (newest first) - items, platform, amount, Sales Receipt.",
+    )
+    @app_commands.describe(
+        pallet_name="Only sales including this pallet (default: the pallet whose channel you're in, else all)",
+        platform="Only this platform, e.g. In Person, eBay, Other",
+        limit="How many to show (default 15, max 50)",
+    )
+    async def sales(self, interaction: discord.Interaction, pallet_name: str = None, platform: str = None,
+                    limit: int = 15):
+        if not await _require_any_role(interaction, [config.ROLE_FINANCE_MGMT]):
+            return
+        pallet = None
+        if pallet_name:
+            pallet = db.get_pallet_by_name(pallet_name.strip())
+            if not pallet:
+                await interaction.response.send_message(f"No pallet named `{pallet_name}` found.", ephemeral=True)
+                return
+        else:
+            pallet = _get_pallet_or_none(interaction)
+        rows = db.list_logged_sales(limit=max(1, min(limit, 50)), platform=(platform or "").strip() or None,
+                                    pallet_id=pallet["id"] if pallet else None)
+        await interaction.response.send_message(format_sales_list(rows, pallet, platform), ephemeral=True)
 
     @finance_group.command(
         name="retry-sale",
