@@ -796,6 +796,9 @@ async def _finalize_log_sale(interaction: discord.Interaction, resolved_items: l
         await finance_utils.refresh_finance_message(interaction.client, pallet_id)
 
     result = await finance_utils.post_sale_to_quickbooks(sale_id, platform, total_price, already_deposited, sale_date)
+    await finance_utils.update_accounting_entries(
+        interaction.client, sale_id, receipt_doc=result.get("sales_receipt_doc"), error=result.get("error"),
+    )
     item_list = ", ".join(
         f"{db.get_pallet(item['pallet_id'])['name']}#{item['item_number']}" for item in resolved_items
     )
@@ -1085,6 +1088,9 @@ class Finance(commands.Cog):
             sale_id, sale["platform"], sale["total_price"], bool(sale["already_deposited"]), sale["sale_date"],
         )
         if result["ok"]:
+            await finance_utils.update_accounting_entries(
+                interaction.client, sale_id, receipt_doc=result["sales_receipt_doc"],
+            )
             await interaction.followup.send(
                 f"✅ Sale #{sale_id} logged. Sales Receipt: `{result['sales_receipt_doc']}`.",
                 ephemeral=True,

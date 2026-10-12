@@ -642,6 +642,24 @@ def init_db():
                 id          INTEGER PRIMARY KEY CHECK (id = 1),
                 start_date  TEXT NOT NULL
             );
+
+            -- The #accounting worklist: which #accounting message belongs to
+            -- which sold item (ItemFlow._post_to_accounting_channel), so it
+            -- can be edited to "✅ logged" once the sale is booked to
+            -- QuickBooks (finance_utils.update_accounting_entries). One row
+            -- per item - a re-sold item's newer post replaces the old row.
+            -- item_created_at guards against a re-issued item ID after
+            -- /admin db-wipe (no foreign keys, like the eBay tables).
+            CREATE TABLE IF NOT EXISTS accounting_worklist (
+                item_id          INTEGER PRIMARY KEY,
+                item_created_at  TEXT NOT NULL,
+                channel_id       INTEGER NOT NULL,
+                message_id       INTEGER NOT NULL,
+                platform         TEXT,
+                posted_at        TEXT NOT NULL,
+                sale_id          INTEGER,
+                logged_at        TEXT
+            );
             """
         )
         _migrate_add_columns(conn)
@@ -2340,6 +2358,42 @@ def sum_pallet_costs_from_source(pallet_id: int, source: str) -> float:
             "SELECT COALESCE(SUM(amount), 0) AS total FROM pallet_costs WHERE pallet_id = ? AND source = ?",
             (pallet_id, source),
         ).fetchone()["total"] or 0.0
+
+
+# ---------------------------------------------------- #accounting worklist --
+
+def save_accounting_entry(item_id: int, channel_id: int, message_id: int, platform: str):
+    item = get_item(item_id)
+    if not item:
+        return
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO accounting_worklist "
+            "(item_id, item_created_at, channel_id, message_id, platform, posted_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (item_id, item["created_at"], channel_id, message_id, platform, _now()),
+        )
+
+
+def get_accounting_entry(item_id: int):
+    """This exact item's #accounting worklist row, or None (never a row
+    left from a different item that once had the same ID)."""
+    item = get_item(item_id)
+    if not item:
+        return None
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM accounting_worklist WHERE item_id = ? AND item_created_at = ?",
+            (item_id, item["created_at"]),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def mark_accounting_entry_logged(item_id: int, sale_id: int):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE accounting_worklist SET sale_id = ?, logged_at = ? WHERE item_id = ?",
+            (sale_id, _now(), item_id),
+        )
 
 
 def count_item_refunds_and_expenses(item_ids: list) -> int:

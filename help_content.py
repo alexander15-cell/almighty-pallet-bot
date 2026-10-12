@@ -178,7 +178,7 @@ ENTRIES = (
     ),
     HelpEntry(
         "#accounting",
-        "Sold items land here for Finance Management to log with /finance log-sale.",
+        "Sold items land here as a to-do list for Finance Management - eBay sales via Confirm & log sale in #ebay-orders, others via /finance log-sale. Each turns ✅ once logged.",
         ("accounting channel", "log sale"),
     ),
     HelpEntry(

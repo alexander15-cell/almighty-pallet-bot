@@ -334,7 +334,13 @@ itself.
   this matters for sales tax, not just record-keeping: eBay already
   collects and remits it as a marketplace facilitator, the others don't.
   The item then posts to **`#accounting`** (Finance Management) as a
-  worklist entry.
+  to-do entry saying how to log it - **Confirm & log sale** on its
+  `#ebay-orders` card for eBay, `/finance log-sale` for anything else.
+  Once the sale is booked (by either, or `/finance retry-sale`), the entry
+  is edited to **✅ logged** with its Sales Receipt number - or **⚠️** with
+  the retry command if QuickBooks failed - so anything without a ✅ still
+  needs doing. (Entries posted before this existed aren't tracked and stay
+  as they are.)
 - **`/finance log-sale`** (Finance Management) takes the item(s) - one
   reference like `Pallet-2026-014#3`, or several comma-separated for a
   bundle sold together, even across different pallets - the total sale

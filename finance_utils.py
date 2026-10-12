@@ -275,6 +275,71 @@ async def post_to_finance_audit_log(bot: discord.Client, text: str):
         print(f"[finance_utils] Could not post to finance-audit-log: {e}")
 
 
+def _is_ebay(platform: str) -> bool:
+    return (platform or "").strip().lower() == "ebay"
+
+
+def accounting_entry_text(item: dict, platform: str, sale_id: int = None, receipt_doc: str = None,
+                          error: str = None) -> str:
+    """
+    The #accounting worklist line for one sold item, in one of three states:
+    still to log (says HOW for that platform - the #ebay-orders card for
+    eBay, /finance log-sale otherwise), logged ("✅" + Sales Receipt), or
+    saved-but-QuickBooks-failed ("⚠️" + the retry command). Cash basis:
+    logging a sale is only ever the Sales Receipt - no cost or COGS entry -
+    so nothing here asks for one.
+    """
+    pallet = db.get_pallet(item["pallet_id"])
+    pallet_name = pallet["name"] if pallet else f"pallet {item['pallet_id']}"
+    title = item.get("ai_title") or item.get("raw_description") or "(no title)"
+    head = f"**{pallet_name}** item #{item['item_number']} sold via **{platform}** - \"{title}\""
+    if sale_id is not None and error:
+        return (f"⚠️ {head} - saved as sale #{sale_id}, but QuickBooks failed. "
+                f"Run `/finance retry-sale sale_id:{sale_id}`.")
+    if sale_id is not None:
+        receipt = f" (Sales Receipt `{receipt_doc}`)" if receipt_doc else ""
+        return f"✅ {head} - logged as sale #{sale_id}{receipt}."
+    if _is_ebay(platform):
+        orders_id = db.get_shared_channel_id("ebay-orders")
+        where = f"<#{orders_id}>" if orders_id else "#ebay-orders"
+        return f"💵 {head} - log the sale with **Confirm & log sale** on its {where} card."
+    return f"💵 {head} - log the sale price with `/finance log-sale`."
+
+
+async def update_accounting_entries(bot: discord.Client, sale_id: int, receipt_doc: str = None,
+                                    error: str = None):
+    """
+    Edits each item's #accounting worklist post (see
+    ItemFlow._post_to_accounting_channel) for a sale that was just booked -
+    "✅ logged" with its Sales Receipt, or "⚠️" with the retry command if
+    QuickBooks failed. Called by every path that books a sale: /finance
+    log-sale, /finance retry-sale, and the #ebay-orders Confirm & log sale
+    button. Best-effort and never raises - an item sold before this
+    existed (no worklist row) or a deleted post is just skipped. Left alone
+    in PRESERVE_DISCORD_HISTORY mode, which never edits old messages.
+    """
+    if config.PRESERVE_DISCORD_HISTORY:
+        return
+    for sale_item in db.get_sale_items(sale_id):
+        entry = db.get_accounting_entry(sale_item["item_id"])
+        if not entry:
+            continue
+        item = db.get_item(sale_item["item_id"])
+        sale = db.get_sale(sale_id)
+        text = accounting_entry_text(item, sale["platform"], sale_id=sale_id, receipt_doc=receipt_doc, error=error)
+        channel = bot.get_channel(entry["channel_id"])
+        if channel is None:
+            continue
+        try:
+            message = await channel.fetch_message(entry["message_id"])
+            await message.edit(content=text)
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
+            print(f"[finance_utils] Could not update #accounting entry for item {sale_item['item_id']}: {e}")
+            continue
+        if not error:
+            db.mark_accounting_entry_logged(sale_item["item_id"], sale_id)
+
+
 async def _post_pallet_warnings(channel: discord.TextChannel, pallet: dict, fin: dict):
     """
     Simple early-warning checks (see config.QUICKBOOKS_MARGIN_WARNING_THRESHOLD_PCT)

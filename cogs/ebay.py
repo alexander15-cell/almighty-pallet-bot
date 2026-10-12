@@ -239,6 +239,9 @@ class EbayOrderConfirmButton(discord.ui.DynamicItem[discord.ui.Button], template
         result = await finance_utils.post_sale_to_quickbooks(
             sale_id, "eBay", order["total_price"], False, order["sale_date"],
         )
+        await finance_utils.update_accounting_entries(
+            interaction.client, sale_id, receipt_doc=result.get("sales_receipt_doc"), error=result.get("error"),
+        )
         item_list = ", ".join(
             f"{db.get_pallet(item['pallet_id'])['name']}#{item['item_number']}" for item in matched_items
         )

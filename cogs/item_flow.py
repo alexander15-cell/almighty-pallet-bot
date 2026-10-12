@@ -2205,20 +2205,27 @@ class ItemFlow(commands.Cog):
         db.update_status(item_id, db.STATUS_SOLD, actor_id=interaction.user.id, new_message_id=msg.id)
         await self._clear_old_card(source_message, item_id, "mark sold")
         await self._post_to_accounting_channel(item_id, platform)
+        how = (
+            "log the sale with **Confirm & log sale** on its #ebay-orders card"
+            if platform.strip().lower() == "ebay" else "log the sale price with `/finance log-sale`"
+        )
         await interaction.followup.send(
-            f"Marked sold via **{platform}**. 🎉 See <#{channel.id}>. It's now in the accounting "
-            f"channel for Finance Management to log COGS with `/finance log-sale`.",
+            f"Marked sold via **{platform}**. 🎉 See <#{channel.id}>. It's now on the #accounting "
+            f"list for Finance Management to {how}.",
             ephemeral=True,
         )
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
 
     async def _post_to_accounting_channel(self, item_id: int, platform: str):
         """
-        Best-effort worklist entry for Finance Management - just enough to
-        find it and know it needs COGS entered via /finance log-sale.
-        Never blocks the sale itself if the channel isn't set up yet or a
-        transient error hits (same "log it, don't crash the pipeline"
-        posture as every other best-effort Discord call in this cog).
+        Best-effort #accounting worklist entry for Finance Management - says
+        how to log this sale for its platform (finance_utils.
+        accounting_entry_text), and is remembered (accounting_worklist) so
+        it can be edited to "✅ logged" once the sale is booked
+        (finance_utils.update_accounting_entries). Never blocks the sale
+        itself if the channel isn't set up yet or a transient error hits
+        (same "log it, don't crash the pipeline" posture as every other
+        best-effort Discord call in this cog).
         """
         channel_id = db.get_shared_channel_id("accounting")
         if not channel_id:
@@ -2227,15 +2234,13 @@ class ItemFlow(commands.Cog):
         if not channel:
             return
         item = db.get_item(item_id)
-        pallet = db.get_pallet(item["pallet_id"])
-        title = item.get("ai_title") or item.get("raw_description") or "(no title)"
         try:
-            await channel.send(
-                f"💵 **{pallet['name']}** item #{item['item_number']} sold via **{platform}** - "
-                f"\"{title}\" - needs COGS entered with `/finance log-sale`."
-            )
+            message = await channel.send(finance_utils.accounting_entry_text(item, platform))
         except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
             print(f"[item_flow] Could not post to accounting channel for item {item_id}: {e}")
+            return
+        if message is not None and getattr(message, "id", None) is not None:
+            db.save_accounting_entry(item_id, channel_id, message.id, platform)
 
     async def mark_shipped(self, interaction: discord.Interaction, item_id: int):
         if not await self._require_role(interaction, config.ROLE_LISTING_MGMT):

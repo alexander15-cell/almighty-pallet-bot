@@ -136,7 +136,8 @@ def test_paid_order_moves_listed_item_to_sold(fresh_db, env):
     assert card.deleted  # old #listed card cleared
     sold_cards = bot.channels[SOLD].sent
     assert len(sold_cards) == 1 and after["current_message_id"] == bot.channels[SOLD]._next_id
-    assert any("needs COGS" in m["content"] for m in bot.channels[ACCOUNTING].sent)
+    assert any("Confirm & log sale" in m["content"] for m in bot.channels[ACCOUNTING].sent)
+    assert not any("COGS" in m["content"] for m in bot.channels[ACCOUNTING].sent)
     assert any("moved to Sold" in a for a in _order_alerts(bot))
     with fresh_db.get_conn() as conn:
         event = conn.execute(

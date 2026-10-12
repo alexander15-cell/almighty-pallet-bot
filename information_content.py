@@ -227,9 +227,11 @@ def _finance_channels_embed() -> discord.Embed:
         value=(
             "**Finance Management role.** An item lands here as soon as it's marked sold, with the "
             "platform picked at that moment (Mark as Sold now asks - eBay already collects/remits "
-            "sales tax, Facebook/In Person/Other don't). Use `/finance log-sale` to book a Sales "
-            "Receipt to QuickBooks - no cost/COGS entry here at all; a pallet's purchase cost was "
-            "already expensed in full back when it was claimed."
+            "sales tax, Facebook/In Person/Other don't). It's a to-do list: log eBay sales with "
+            "**Confirm & log sale** on the #ebay-orders card, anything else with `/finance log-sale` - "
+            "either books a Sales Receipt to QuickBooks, and the entry here turns ✅ with its receipt "
+            "number (⚠️ with the retry command if QuickBooks failed). No cost/COGS entry at all - a "
+            "pallet's purchase cost was already expensed in full when it was claimed."
         ),
         inline=False,
     )
