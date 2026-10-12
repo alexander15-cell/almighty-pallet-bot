@@ -160,6 +160,7 @@ def _ebay_commands_embed() -> discord.Embed:
     embed.add_field(name="confirm-listed [item_number]", value="Manually confirm an item is live on eBay (or tap **Confirm Listed** right on its card in #pending-ebay-upload).", inline=False)
     embed.add_field(name="sync-finances [days_back]", value="Pull eBay's own fees, buyer-paid shipping, labels, refunds, and payouts (up to 5 years). Read-only - changes no recorded number, card, or QuickBooks entry.", inline=False)
     embed.add_field(name="net-report [pallet_name]", value="Recorded eBay revenue vs. eBay's real net payout, per pallet or business-wide, with a per-item CSV. Finance Management or Pallet Admin.", inline=False)
+    embed.add_field(name="fee-cards since:<YYYY-MM-DD>", value="Post **💸 eBay fees to log** cards for older orders. New orders get one automatically in #ebay-orders - **Confirm & log fees** books eBay's fees/labels/ads to QuickBooks and the pallet's cost.", inline=False)
     return embed
 
 

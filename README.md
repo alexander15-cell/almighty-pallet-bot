@@ -785,6 +785,56 @@ replace `EBAY_REFRESH_TOKEN` in `.env`, and restart. Until then,
 `/ebay sync-finances` stops with a permissions error that says so - nothing
 else is affected.
 
+### eBay fee expenses (`💸 eBay fees` cards)
+
+An eBay sale's **Confirm & log sale** books the buyer's full order total
+into Undeposited Funds - but eBay deposits less: it keeps its selling fees,
+the cost of any shipping label bought through eBay, and promoted-listing ad
+fees. These cards book that difference, so QuickBooks matches the real
+payout and each pallet's profit is real:
+
+- Every `EBAY_FEE_SYNC_MINUTES` (default 60) the bot refreshes the last 14
+  days of eBay's fee data, then posts a **💸 eBay fees to log** card to
+  `#ebay-orders` for each order whose sale is already logged, once its
+  items are Shipped (labels are bought by then) or
+  `EBAY_FEE_CARD_DELAY_DAYS` (default 5) have passed.
+- **Confirm & log fees** (Finance Management) re-pulls that order's charges
+  from eBay, then posts **one QuickBooks Journal Entry** - debit eBay fees
+  (and shipping / ads, if you set separate accounts), credit Undeposited
+  Funds - and adds the same amounts to the pallet's cost (`/finance
+  pallet-summary` shows them as eBay Fees, Shipping, eBay Ad/Listing Fees).
+  The line goes in `#finance-audit-log`.
+- Every eBay charge is recorded in `ebay_fee_postings` by eBay's own
+  transaction ID, so the same charge can never be booked twice. A charge
+  that shows up later (a label bought afterwards, a voided label credited
+  back) gets its own follow-up card.
+- What counts: a SALE's fees (final value fee, per-order fee, ...), eBay
+  shipping labels, and listing-level charges (ad fees, insertion fees).
+  **Refunds aren't included** - those change the sale itself (`/finance
+  refund`).
+- Nothing reaches QuickBooks without the click. If QuickBooks rejects the
+  entry, nothing is recorded and the button stays.
+
+**Setup (required before anything posts):**
+1. `/finance list-accounts account_type:All account types` and note the ID
+   of the expense account eBay fees should go to (create one in QuickBooks,
+   e.g. "eBay Fees", if you don't have one). Optionally separate accounts
+   for shipping labels and ad fees.
+2. In `.env`: `QUICKBOOKS_EBAY_FEES_ACCOUNT_ID=<id>` (and optionally
+   `QUICKBOOKS_EBAY_SHIPPING_ACCOUNT_ID`, `QUICKBOOKS_EBAY_ADS_ACCOUNT_ID`).
+   There's deliberately no default. Restart.
+3. `EBAY_REFRESH_TOKEN` needs the `sell.finances` scope (see "eBay fee &
+   payout sync" above).
+
+Cards are only posted automatically for orders placed on/after the day this
+first runs (or `EBAY_FEE_CARDS_START_DATE`), so past orders don't flood the
+channel. For older ones: `/ebay sync-finances`, then `/ebay fee-cards
+since:YYYY-MM-DD`. **If you've already entered eBay fees by hand** (in
+QuickBooks or with `/finance expense`) for an order, don't confirm its card
+- that would count them twice. Set `EBAY_FEE_CARDS=false` to turn the cards
+off entirely. `/ebay net-report` accounts for fees booked this way, so its
+"profit using eBay net" doesn't subtract them twice.
+
 ### Item specifics from eBay's own category list
 
 eBay ranks listings with complete item specifics (Brand, Type, Color,

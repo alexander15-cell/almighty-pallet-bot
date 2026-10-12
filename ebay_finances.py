@@ -242,6 +242,29 @@ async def fetch_transactions(since: datetime, until: datetime) -> list:
     return results
 
 
+async def refresh_order_transactions(order_id: str) -> int:
+    """Re-pulls just this order's Finances transactions (orderId filter)
+    into the mirror table - used right before a "Confirm & log fees" click
+    books anything, so it acts on eBay's latest numbers rather than the
+    last background sync. Returns how many were refreshed; raises
+    ebay_api.EbayAPIError on failure."""
+    filter_value = urllib.parse.quote(f"orderId:{{{order_id}}}")
+    count, offset = 0, 0
+    while True:
+        url = (f"{_finances_base_url()}/transaction?filter={filter_value}"
+               f"&limit={_TRANSACTIONS_PAGE_LIMIT}&offset={offset}")
+        body = await _get(url, "getTransactions (order)")
+        page = body.get("transactions") or []
+        for raw in page:
+            txn = parse_transaction(raw)
+            if txn:
+                db.upsert_ebay_fin_transaction(txn)
+                count += 1
+        offset += len(page)
+        if not page or offset >= (body.get("total") or 0):
+            return count
+
+
 async def fetch_orders(since: datetime, until: datetime) -> list:
     """Every Fulfillment API order created between since and until (raw
     dicts), paginated."""
@@ -548,9 +571,15 @@ def build_pallet_report(pallet_id: int, line_data: dict = None) -> dict:
     missing = [i for i in db.get_ebay_platform_items_with_sale_price(pallet_id) if i["id"] not in matched_ids]
 
     financials = db.get_pallet_financials(pallet_id)
+    # eBay fees already booked onto this pallet's cost by "Confirm & log
+    # fees" (ebay_fee_expenses.py, pallet_costs source 'ebay') are already
+    # inside eBay's net payout - added back so they aren't subtracted twice.
+    booked_ebay_costs = db.sum_pallet_costs_from_source(pallet_id, "ebay")
     profit_with_ebay_net = None
     if financials["profit_so_far"] is not None:
-        profit_with_ebay_net = round(financials["profit_so_far"] - recorded_for_matched + totals["net_payout"], 2)
+        profit_with_ebay_net = round(
+            financials["profit_so_far"] + booked_ebay_costs - recorded_for_matched + totals["net_payout"], 2
+        )
 
     manual_entries = db.count_item_refunds_and_expenses(list(matched_ids))
 

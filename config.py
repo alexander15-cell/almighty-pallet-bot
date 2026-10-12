@@ -789,6 +789,34 @@ QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID = os.getenv("QUICKBOOKS_UNDEPOSITED_FUND
 # connected instead.
 QUICKBOOKS_BANK_ACCOUNT_ID = os.getenv("QUICKBOOKS_BANK_ACCOUNT_ID", "8")
 
+# ---- eBay fee expenses (see ebay_fee_expenses.py) ----
+# An eBay sale's Sales Receipt books the buyer's full order total into
+# Undeposited Funds, but eBay deposits less - it keeps its selling fees,
+# eBay-bought shipping labels, and ad fees. Each "Confirm & log fees" card
+# in #ebay-orders posts a Journal Entry: debit these expense accounts,
+# credit QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID, so what's left matches the
+# real payout. Deliberately NO default for the fees account - this is real
+# money, and the right account only exists in your own QuickBooks company.
+# Find IDs with /finance list-accounts account_type:"All account types".
+# Until QUICKBOOKS_EBAY_FEES_ACCOUNT_ID is set, the button refuses to post.
+QUICKBOOKS_EBAY_FEES_ACCOUNT_ID = os.getenv("QUICKBOOKS_EBAY_FEES_ACCOUNT_ID", "").strip()
+# Optional - eBay shipping labels / promoted-listing ad fees go to the fees
+# account above unless these name a separate account.
+QUICKBOOKS_EBAY_SHIPPING_ACCOUNT_ID = os.getenv("QUICKBOOKS_EBAY_SHIPPING_ACCOUNT_ID", "").strip()
+QUICKBOOKS_EBAY_ADS_ACCOUNT_ID = os.getenv("QUICKBOOKS_EBAY_ADS_ACCOUNT_ID", "").strip()
+# Background job that refreshes eBay's fee data and posts the cards. Needs
+# the sell.finances scope on EBAY_REFRESH_TOKEN (same as /ebay sync-finances).
+EBAY_FEE_CARDS = os.getenv("EBAY_FEE_CARDS", "true").strip().lower() == "true"
+EBAY_FEE_SYNC_MINUTES = int(os.getenv("EBAY_FEE_SYNC_MINUTES") or "60")
+# A card waits until the order's items are Shipped (labels are usually
+# bought by then) or this many days have passed, so one card covers the
+# fees AND the label instead of two cards per order.
+EBAY_FEE_CARD_DELAY_DAYS = int(os.getenv("EBAY_FEE_CARD_DELAY_DAYS") or "5")
+# Cards are only posted automatically for orders placed on/after this date
+# (YYYY-MM-DD). Blank = the day the feature first runs, so past orders don't
+# flood #ebay-orders - use /ebay fee-cards since:<date> for those.
+EBAY_FEE_CARDS_START_DATE = os.getenv("EBAY_FEE_CARDS_START_DATE", "").strip()
+
 # ---- Cloudflare R2 image hosting (optional, see r2_storage.py) ----
 # Gives each Data Entry photo a durable public URL for the eBay CSV batch's
 # PicURL column and anything else that needs to stay valid long-term -

@@ -83,6 +83,7 @@ import discord_resilience
 import ebay_api
 import ebay_aspects
 import ebay_csv
+import ebay_fee_expenses
 import ebay_finances
 import ebay_recommendations
 import ebay_results
@@ -311,6 +312,124 @@ async def _post_ebay_order_match(bot: discord.Client, order: dict, matched_items
     view = discord.ui.View(timeout=None)
     view.add_item(EbayOrderConfirmButton(order["order_id"]))
     await channel.send(embed=embed, view=view)
+
+
+# ------------------------------------------------------ eBay fee cards --
+
+def build_fee_card_embed(breakdown: dict) -> discord.Embed:
+    """The "💸 eBay fees" card for one order - what Confirm & log fees will
+    book. See ebay_fee_expenses.py."""
+    totals = breakdown["totals"]
+    items = ", ".join(_item_label(i) for i in breakdown["items"]) or "(no tracked items)"
+    embed = discord.Embed(
+        title="💸 eBay fees to log",
+        description=f"Order `{breakdown['order_id']}` - {items}",
+        color=discord.Color.orange(),
+    )
+    lines = [f"{label}: {_money(totals[cat])}" for cat, label in ebay_fee_expenses.CATEGORY_LABELS.items()
+             if totals[cat]]
+    embed.add_field(name="What eBay kept", value="\n".join(lines) or "-", inline=True)
+    embed.add_field(name="Total", value=f"**{_money(totals['total'])}**", inline=True)
+    embed.add_field(
+        name="Confirm will",
+        value=(
+            "• post a QuickBooks Journal Entry - debit these expenses, credit Undeposited Funds "
+            "(so it matches eBay's real payout)\n"
+            "• add these to the pallet's cost, so its profit is real"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Nothing is sent to QuickBooks until you confirm.")
+    return embed
+
+
+class EbayFeeConfirmButton(discord.ui.DynamicItem[discord.ui.Button], template=r"ebay_fees_confirm:(?P<order_id>.+)"):
+    """The button on a "💸 eBay fees" card - a DynamicItem like
+    EbayOrderConfirmButton, so it survives restarts. Re-reads everything
+    fresh on click (ebay_fee_expenses.confirm_order_fees) rather than
+    trusting the card's numbers."""
+
+    def __init__(self, order_id: str):
+        super().__init__(discord.ui.Button(
+            label="Confirm & log fees", style=discord.ButtonStyle.success, emoji="💸",
+            custom_id=f"ebay_fees_confirm:{order_id}",
+        ))
+        self.order_id = order_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: dict):
+        return cls(match["order_id"])
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await _require_finance_role(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        result = await ebay_fee_expenses.confirm_order_fees(self.order_id, actor_id=interaction.user.id)
+        if not result["ok"]:
+            await interaction.followup.send(result["message"], ephemeral=True)
+            return
+
+        try:
+            await interaction.message.edit(view=None)
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+            pass
+        for pallet_id in result["pallet_ids"]:
+            await finance_utils.refresh_finance_message(interaction.client, pallet_id)
+
+        breakdown = result["breakdown"]
+        totals = breakdown["totals"]
+        items = ", ".join(_item_label(i) for i in breakdown["items"])
+        await finance_utils.post_to_finance_audit_log(
+            interaction.client,
+            f"💸 **eBay fees** for order `{self.order_id}` ({items}) - {_money(totals['total'])} "
+            f"(Journal Entry `{result['je_doc']}`: fees {_money(totals['fees'])}, labels {_money(totals['shipping'])}, "
+            f"ads {_money(totals['ads'])}; credited Undeposited Funds)",
+        )
+        await interaction.followup.send(
+            f"✅ Logged {_money(totals['total'])} of eBay fees for order `{self.order_id}` - QuickBooks Journal Entry "
+            f"`{result['je_doc']}`, and added to the pallet's cost. Pinned card updated.",
+            ephemeral=True,
+        )
+
+
+async def _post_fee_card(bot: discord.Client, breakdown: dict) -> bool:
+    channel_id = db.get_shared_channel_id("ebay-orders")
+    channel = bot.get_channel(channel_id) if channel_id else None
+    if channel is None:
+        log.warning("eBay fee card for order %s not posted - #ebay-orders isn't set up.", breakdown["order_id"])
+        return False
+    view = discord.ui.View(timeout=None)
+    view.add_item(EbayFeeConfirmButton(breakdown["order_id"]))
+    try:
+        await channel.send(embed=build_fee_card_embed(breakdown), view=view)
+    except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+        log.exception("Couldn't post eBay fee card for order %s - will retry next run", breakdown["order_id"])
+        return False
+    db.mark_ebay_fee_txns_carded(
+        breakdown["order_id"], [(c["transaction_id"], c["transaction_type"]) for c in breakdown["charges"]]
+    )
+    return True
+
+
+async def _run_fee_cards(bot: discord.Client, since_date: str = None, sync: bool = True) -> int:
+    """One pass: refresh the last 14 days of eBay fee data (unless `sync`
+    is False), then post a card for every due order placed on/after
+    `since_date` (default: EBAY_FEE_CARDS_START_DATE, or the day this first
+    ran). Returns how many cards were posted."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    since_date = since_date or config.EBAY_FEE_CARDS_START_DATE or db.get_ebay_fee_card_start_date(today)
+    if sync:
+        try:
+            await ebay_finances.sync(14)
+        except ebay_api.EbayAPIError:
+            log.exception("eBay fee data sync failed - posting cards from the last good sync")
+    posted = 0
+    for breakdown in ebay_fee_expenses.orders_needing_cards(since_date):
+        if await _post_fee_card(bot, breakdown):
+            posted += 1
+    if posted:
+        log.info("Posted %d eBay fee card(s)", posted)
+    return posted
 
 
 # ----------------------------------------------- /ebay category-aspects --
@@ -627,17 +746,33 @@ class Ebay(commands.Cog):
         self.bot = bot
         if not config.PRESERVE_DISCORD_HISTORY:
             self.order_poll_loop.start()
+            self.fee_card_loop.start()
 
     async def cog_load(self):
         # Registers the (order_id -> button) template once so every
         # #ebay-orders card's Confirm button keeps working across bot
         # restarts, not just the ones posted during this process's
-        # lifetime - see EbayOrderConfirmButton.
+        # lifetime - see EbayOrderConfirmButton. Same for the fee cards'
+        # Confirm & log fees button.
         if not config.PRESERVE_DISCORD_HISTORY:
-            self.bot.add_dynamic_items(EbayOrderConfirmButton)
+            self.bot.add_dynamic_items(EbayOrderConfirmButton, EbayFeeConfirmButton)
 
     def cog_unload(self):
         self.order_poll_loop.cancel()
+        self.fee_card_loop.cancel()
+
+    @tasks.loop(minutes=config.EBAY_FEE_SYNC_MINUTES)
+    async def fee_card_loop(self):
+        """Refreshes eBay's fee data and posts any due "💸 eBay fees" cards
+        (see _run_fee_cards / ebay_fee_expenses.py). Needs the sell.finances
+        scope - without it each run just logs the error and tries again."""
+        if config.PRESERVE_DISCORD_HISTORY or not (config.EBAY_ENABLED and config.EBAY_FEE_CARDS):
+            return
+        await _run_fee_cards(self.bot)
+
+    @fee_card_loop.before_loop
+    async def _before_fee_card_loop(self):
+        await self.bot.wait_until_ready()
 
     @tasks.loop(minutes=config.EBAY_ORDER_POLL_MINUTES)
     async def order_poll_loop(self):
@@ -964,6 +1099,28 @@ class Ebay(commands.Cog):
             return
         lines = "\n".join(f"`{category_id}` - {path}" for category_id, path in matches)
         await interaction.followup.send(f"Categories matching `{query}`:\n{lines}", ephemeral=True)
+
+    @ebay_group.command(
+        name="fee-cards",
+        description="Post 'eBay fees to log' cards for older eBay orders (from a date). Books nothing itself.",
+    )
+    @app_commands.describe(since="Orders placed on/after this date, as YYYY-MM-DD (run /ebay sync-finances first)")
+    async def fee_cards(self, interaction: discord.Interaction, since: str):
+        if not await _require_admin(interaction):
+            return
+        try:
+            datetime.strptime(since.strip(), "%Y-%m-%d")
+        except ValueError:
+            await interaction.response.send_message("`since` must be a date like `2026-01-31`.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        posted = await _run_fee_cards(self.bot, since_date=since.strip(), sync=False)
+        await interaction.followup.send(
+            f"Posted **{posted}** eBay fee card(s) to #ebay-orders for orders since {since.strip()}. "
+            "Only orders whose sale is already logged get one; nothing is booked until someone confirms. "
+            "(Uses the last `/ebay sync-finances` data - run that first for older orders.)",
+            ephemeral=True,
+        )
 
     @ebay_group.command(
         name="category-aspects",

@@ -604,6 +604,44 @@ def init_db():
                 specifics_json   TEXT NOT NULL,
                 created_at       TEXT NOT NULL
             );
+
+            -- The eBay fee expense ledger (ebay_fee_expenses.py): one row
+            -- per eBay Finances transaction (same key as
+            -- ebay_fin_transactions) that's been booked to QuickBooks by a
+            -- "Confirm & log fees" click. The primary key is what makes it
+            -- impossible to book the same eBay charge twice. amount is the
+            -- cost booked (negative for a credit back, e.g. a voided label).
+            CREATE TABLE IF NOT EXISTS ebay_fee_postings (
+                transaction_id     TEXT NOT NULL,
+                transaction_type   TEXT NOT NULL,
+                ebay_order_id      TEXT NOT NULL,
+                category           TEXT NOT NULL,   -- 'fees', 'shipping', 'ads'
+                amount             REAL NOT NULL,
+                quickbooks_je_id   TEXT,
+                posted_by          INTEGER,
+                posted_at          TEXT NOT NULL,
+                PRIMARY KEY (transaction_id, transaction_type)
+            );
+
+            -- Which eBay transactions already appear on a posted fee card,
+            -- so the background job posts a card once, not every run. A
+            -- charge arriving later (a label bought after the first card)
+            -- isn't in here yet, so it gets its own follow-up card.
+            CREATE TABLE IF NOT EXISTS ebay_fee_card_txns (
+                transaction_id     TEXT NOT NULL,
+                transaction_type   TEXT NOT NULL,
+                ebay_order_id      TEXT NOT NULL,
+                carded_at          TEXT NOT NULL,
+                PRIMARY KEY (transaction_id, transaction_type)
+            );
+
+            -- Single row: the first day fee cards were posted automatically
+            -- (see config.EBAY_FEE_CARDS_START_DATE) - so turning the
+            -- feature on doesn't flood #ebay-orders with every past order.
+            CREATE TABLE IF NOT EXISTS ebay_fee_card_state (
+                id          INTEGER PRIMARY KEY CHECK (id = 1),
+                start_date  TEXT NOT NULL
+            );
             """
         )
         _migrate_add_columns(conn)
@@ -2197,6 +2235,111 @@ def has_ebay_order_automation(ebay_order_id: str, item_id: int, action: str) -> 
             "SELECT 1 FROM ebay_order_automation_log WHERE ebay_order_id = ? AND item_id = ? AND action = ?",
             (ebay_order_id, item_id, action),
         ).fetchone() is not None
+
+
+# ------------------------------------------------------ eBay fee expenses --
+# See ebay_fee_expenses.py. Reads the eBay mirror tables; writes only the
+# fee tables above plus pallet_costs (via add_pallet_cost) on a confirmed
+# posting.
+
+def get_ebay_order_lines_for_order(ebay_order_id: str) -> list:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT l.*, o.order_date FROM ebay_order_lines l
+               JOIN ebay_order_breakdowns o ON o.ebay_order_id = l.ebay_order_id
+               WHERE l.ebay_order_id = ? ORDER BY l.line_item_id""",
+            (ebay_order_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_ebay_order_ids_since(order_date_from: str) -> list:
+    """eBay order IDs (from synced order breakdowns) placed on/after the
+    given YYYY-MM-DD, oldest first."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT ebay_order_id FROM ebay_order_breakdowns WHERE substr(order_date, 1, 10) >= ? ORDER BY order_date",
+            (order_date_from,),
+        ).fetchall()
+        return [r["ebay_order_id"] for r in rows]
+
+
+def get_ebay_fee_source_transactions(ebay_order_id: str, listing_ids: list) -> list:
+    """Every synced eBay transaction tied to this order - by orderId, or an
+    ORDER_ID reference - plus listing-level charges (an ITEM_ID reference)
+    for any of `listing_ids`. Same shape as get_all_ebay_fin_transactions."""
+    found = {}
+    for txn in get_all_ebay_fin_transactions():
+        refs = txn.get("references") or []
+        if txn.get("order_id") == ebay_order_id or any(
+            r["type"] == "ORDER_ID" and r["id"] == ebay_order_id for r in refs
+        ) or (not txn.get("order_id") and any(r["type"] == "ITEM_ID" and r["id"] in listing_ids for r in refs)):
+            found[(txn["transaction_id"], txn["transaction_type"])] = txn
+    return list(found.values())
+
+
+def get_posted_ebay_fee_keys() -> set:
+    with get_conn() as conn:
+        return {(r["transaction_id"], r["transaction_type"])
+                for r in conn.execute("SELECT transaction_id, transaction_type FROM ebay_fee_postings")}
+
+
+def get_carded_ebay_fee_keys() -> set:
+    with get_conn() as conn:
+        return {(r["transaction_id"], r["transaction_type"])
+                for r in conn.execute("SELECT transaction_id, transaction_type FROM ebay_fee_card_txns")}
+
+
+def mark_ebay_fee_txns_carded(ebay_order_id: str, keys: list):
+    now = _now()
+    with get_conn() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO ebay_fee_card_txns (transaction_id, transaction_type, ebay_order_id, carded_at) "
+            "VALUES (?, ?, ?, ?)",
+            [(tid, ttype, ebay_order_id, now) for tid, ttype in keys],
+        )
+
+
+def record_ebay_fee_posting(ebay_order_id: str, charges: list, quickbooks_je_id: str, actor_id: int,
+                            pallet_costs: list):
+    """
+    One confirmed "Confirm & log fees" click, in a single database
+    transaction: a ledger row per eBay charge (`charges`: dicts with
+    transaction_id/transaction_type/category/amount) plus the matching
+    pallet_costs rows (`pallet_costs`: dicts with pallet_id/item_id/
+    cost_type/amount/description) - all or nothing. Raises
+    sqlite3.IntegrityError if any charge was already posted.
+    """
+    now = _now()
+    with get_conn() as conn:
+        conn.executemany(
+            "INSERT INTO ebay_fee_postings (transaction_id, transaction_type, ebay_order_id, category, amount, "
+            "quickbooks_je_id, posted_by, posted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [(c["transaction_id"], c["transaction_type"], ebay_order_id, c["category"], c["amount"],
+              quickbooks_je_id, actor_id, now) for c in charges],
+        )
+        conn.executemany(
+            "INSERT INTO pallet_costs (pallet_id, item_id, cost_type, amount, description, source, "
+            "quickbooks_txn_id, created_by, created_at) VALUES (?, ?, ?, ?, ?, 'ebay', ?, ?, ?)",
+            [(p["pallet_id"], p["item_id"], p["cost_type"], p["amount"], p["description"],
+              quickbooks_je_id, actor_id, now) for p in pallet_costs],
+        )
+
+
+def get_ebay_fee_card_start_date(today: str) -> str:
+    """The first day fee cards were posted automatically - set to `today`
+    the first time this is asked, unchanged after."""
+    with get_conn() as conn:
+        conn.execute("INSERT OR IGNORE INTO ebay_fee_card_state (id, start_date) VALUES (1, ?)", (today,))
+        return conn.execute("SELECT start_date FROM ebay_fee_card_state WHERE id = 1").fetchone()["start_date"]
+
+
+def sum_pallet_costs_from_source(pallet_id: int, source: str) -> float:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS total FROM pallet_costs WHERE pallet_id = ? AND source = ?",
+            (pallet_id, source),
+        ).fetchone()["total"] or 0.0
 
 
 def count_item_refunds_and_expenses(item_ids: list) -> int:

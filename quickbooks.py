@@ -440,3 +440,54 @@ async def create_journal_entry(debit_account_id: str, credit_account_id: str,
     result = await _request("POST", "journalentry", json_body=payload)
     je = result.get("JournalEntry", {})
     return {"id": je.get("Id"), "doc_number": je.get("DocNumber")}
+
+
+async def create_balanced_journal_entry(expense_lines: list, offset_account_id: str, date: str, memo: str) -> dict:
+    """
+    A Journal Entry with one line per entry in `expense_lines`
+    (`{'account_id', 'amount', 'description'}`), balanced by a single line
+    against `offset_account_id` - used by the eBay fee expense feature
+    (ebay_fee_expenses.py): debit eBay fees / shipping / ads, credit
+    Undeposited Funds, so the funds a Sales Receipt left waiting to be
+    deposited shrink to what eBay actually pays out.
+
+    A positive `amount` is a debit to that account; a negative one (e.g. a
+    voided eBay shipping label credited back) is posted as a credit -
+    QuickBooks only accepts positive line amounts, so the sign becomes the
+    PostingType. The offset line takes whatever side balances the entry.
+    Zero-amount lines are dropped; raises QuickBooksError if nothing's left.
+
+    Returns {'id': <new JournalEntry id>, 'doc_number': <DocNumber>}.
+    """
+    je_lines = []
+    total = 0.0
+    for entry in expense_lines:
+        amount = round(float(entry["amount"]), 2)
+        if amount == 0:
+            continue
+        total += amount
+        je_lines.append({
+            "Amount": abs(amount),
+            "DetailType": "JournalEntryLineDetail",
+            "Description": entry.get("description") or memo,
+            "JournalEntryLineDetail": {
+                "PostingType": "Debit" if amount > 0 else "Credit",
+                "AccountRef": {"value": entry["account_id"]},
+            },
+        })
+    total = round(total, 2)
+    if not je_lines or total == 0:
+        raise QuickBooksError("Nothing to post - every line nets to $0.00.")
+    je_lines.append({
+        "Amount": abs(total),
+        "DetailType": "JournalEntryLineDetail",
+        "Description": memo,
+        "JournalEntryLineDetail": {
+            "PostingType": "Credit" if total > 0 else "Debit",
+            "AccountRef": {"value": offset_account_id},
+        },
+    })
+    payload = {"TxnDate": date, "PrivateNote": memo, "Line": je_lines}
+    result = await _request("POST", "journalentry", json_body=payload)
+    je = result.get("JournalEntry", {})
+    return {"id": je.get("Id"), "doc_number": je.get("DocNumber")}

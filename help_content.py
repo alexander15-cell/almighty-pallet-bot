@@ -112,6 +112,11 @@ ENTRIES = (
         ("net profit", "ebay net", "profit after fees", "real profit", "net report", "fees report"),
     ),
     HelpEntry(
+        "💸 eBay fees cards / /ebay fee-cards since:<date>",
+        "Book eBay's fees, labels and ad fees to QuickBooks and the pallet's cost - Confirm & log fees in #ebay-orders.",
+        ("log ebay fees", "ebay fee expense", "final value fee", "shipping label cost", "fee cards", "undeposited funds"),
+    ),
+    HelpEntry(
         "/ebay import-results <batch_id> <csv>",
         "Reconcile a batch against a results CSV downloaded from Seller Hub.",
         ("ebay results", "reconcile", "seller hub"),

@@ -1348,7 +1348,7 @@ class Finance(commands.Cog):
         cost_lines = []
         if fin["manual_pallet_cost"] is not None:
             cost_lines.append(f"Purchase (`/finance setprice`): ${fin['manual_pallet_cost']:.2f}")
-        cost_type_labels = {"credit_card": "Credit Card", "invoice": "Purchase Invoice", "shipping": "Shipping", "supplies": "Supplies", "misc": "Misc"}
+        cost_type_labels = {"credit_card": "Credit Card", "invoice": "Purchase Invoice", "shipping": "Shipping", "ebay_fees": "eBay Fees", "ebay_ads": "eBay Ad/Listing Fees", "supplies": "Supplies", "misc": "Misc"}
         for cost_type, label in cost_type_labels.items():
             if breakdown.get(cost_type):
                 cost_lines.append(f"{label}: ${breakdown[cost_type]:.2f}")
