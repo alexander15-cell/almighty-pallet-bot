@@ -516,6 +516,20 @@ EBAY_ENABLED = bool(EBAY_APP_ID and EBAY_CERT_ID and EBAY_REFRESH_TOKEN)
 # without it, same as the credit-card poller without a configured account.
 EBAY_ORDER_POLL_MINUTES = int(os.getenv("EBAY_ORDER_POLL_MINUTES") or "20")
 
+# eBay order automation (cogs/ebay.py's _reconcile_ebay_order_statuses,
+# run on every order poll above): moves a tracked item to Sold when its
+# eBay order comes in, and to Shipped once eBay shows that line shipped -
+# no Mark as Sold / Mark as Shipped clicks needed for eBay sales. A
+# cancelled order, or a sale of an item that's on hold, only ever posts a
+# one-time alert to #ebay-orders - nothing is reversed automatically, and
+# logging the sale to QuickBooks always stays the human "Confirm & log
+# sale" click. Set false to go back to the fully manual buttons.
+EBAY_ORDER_AUTOMATION = os.getenv("EBAY_ORDER_AUTOMATION", "true").strip().lower() == "true"
+# How far back each poll looks for orders eBay has changed (paid,
+# shipped, cancelled) - re-checking an order is harmless, since every
+# automatic move first checks the item's current status.
+EBAY_ORDER_AUTOMATION_LOOKBACK_DAYS = int(os.getenv("EBAY_ORDER_AUTOMATION_LOOKBACK_DAYS") or "3")
+
 # eBay's Condition ID values (https://developer.ebay.com - ConditionEnum),
 # narrowed to the ones that actually come up in liquidation/overstock resale.
 # Shown as a Discord select menu when approving an item in Queue Review, with

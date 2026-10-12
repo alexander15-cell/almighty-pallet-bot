@@ -548,6 +548,22 @@ def init_db():
                 last_synced_at   TEXT NOT NULL
             );
 
+            -- One row per automatic action/alert the eBay order automation
+            -- (cogs/ebay.py's _reconcile_ebay_order_statuses) has taken for
+            -- an order + item - 'sold', 'shipped', 'cancel_alert',
+            -- 'hold_alert'. The UNIQUE key is the dedup ledger (an alert is
+            -- posted once, not every poll) and the table doubles as an
+            -- audit trail. No foreign keys, same reasoning as the eBay
+            -- finance mirror tables: it must never block /pallet delete.
+            CREATE TABLE IF NOT EXISTS ebay_order_automation_log (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                ebay_order_id  TEXT NOT NULL,
+                item_id        INTEGER NOT NULL,
+                action         TEXT NOT NULL,
+                created_at     TEXT NOT NULL,
+                UNIQUE (ebay_order_id, item_id, action)
+            );
+
             -- One row per /ebay sync-finances run, so the report can say
             -- how current its eBay numbers are.
             CREATE TABLE IF NOT EXISTS ebay_finance_sync_log (
@@ -2090,6 +2106,27 @@ def get_ebay_platform_items_with_sale_price(pallet_id: int = None) -> list:
             query += " AND pallet_id = ?"
             params.append(pallet_id)
         return [dict(r) for r in conn.execute(query + " ORDER BY pallet_id, item_number", params).fetchall()]
+
+
+def record_ebay_order_automation(ebay_order_id: str, item_id: int, action: str) -> bool:
+    """Records that the order automation took `action` for this order +
+    item. Returns True if this is the first time (go ahead), False if it
+    was already recorded (skip - e.g. don't re-post the same alert)."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO ebay_order_automation_log (ebay_order_id, item_id, action, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (ebay_order_id, item_id, action, _now()),
+        )
+        return cur.rowcount == 1
+
+
+def has_ebay_order_automation(ebay_order_id: str, item_id: int, action: str) -> bool:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT 1 FROM ebay_order_automation_log WHERE ebay_order_id = ? AND item_id = ? AND action = ?",
+            (ebay_order_id, item_id, action),
+        ).fetchone() is not None
 
 
 def count_item_refunds_and_expenses(item_ids: list) -> int:

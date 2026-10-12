@@ -312,6 +312,131 @@ async def _post_ebay_order_match(bot: discord.Client, order: dict, matched_items
     await channel.send(embed=embed, view=view)
 
 
+# ---------------------------------------------------- order automation --
+
+# eBay orderPaymentStatus values where the buyer hasn't actually paid (or
+# has been fully refunded) - never auto-mark Sold on these.
+_UNPAID_PAYMENT_STATUSES = {"FAILED", "PENDING", "FULLY_REFUNDED"}
+
+
+def _order_predates_listing(order: dict, item: dict) -> bool:
+    """True if the order was placed before the item's most recent listing -
+    i.e. it belongs to an earlier listing of this item (returned and
+    relisted), so it must not mark the current listing Sold again."""
+    order_dt = ebay_finances._parse_dt(order.get("order_date"))
+    listed_dt = ebay_finances._parse_dt(item.get("listed_at"))
+    return bool(order_dt and listed_dt and order_dt < listed_dt)
+
+
+async def _post_order_alert(bot: discord.Client, text: str):
+    channel_id = db.get_shared_channel_id("ebay-orders")
+    channel = bot.get_channel(channel_id) if channel_id else None
+    if channel is None:
+        log.warning("eBay order alert not posted (#ebay-orders isn't set up): %s", text)
+        return
+    try:
+        await channel.send(text)
+    except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+        log.exception("Could not post eBay order alert: %s", text)
+
+
+async def _reconcile_ebay_order_statuses(bot: discord.Client, orders: list) -> dict:
+    """
+    Moves tracked items along to match what eBay says happened to their
+    orders - see config.EBAY_ORDER_AUTOMATION. Per order line matched to an
+    item (ebay_finances.match_line_to_item: SKU, then listing ID, only items
+    created before the order):
+
+      - paid, not cancelled, item Listed/pending upload -> Sold
+      - eBay shows the line shipped, item Sold -> Shipped
+      - order cancelled, item already Sold/Shipped -> one alert in
+        #ebay-orders (never reversed automatically - a cancelled order may
+        already have a QuickBooks Sales Receipt that needs voiding first)
+      - item On Hold -> one alert, item left alone
+
+    Guards against acting twice: an order that predates the item's latest
+    listing is ignored (returned + relisted), and each order+item is only
+    ever auto-sold/auto-shipped once (ebay_order_automation_log, recorded
+    only after the move succeeds, so a transient failure retries next poll
+    while a human moving an item back afterwards sticks). Returns counts.
+    """
+    cog = bot.get_cog("ItemFlow")
+    counts = {"sold": 0, "shipped": 0, "alerts": 0}
+    if cog is None:
+        return counts
+
+    for order in orders:
+        order_id = order["order_id"]
+        cancel_state = order.get("cancel_state") or "NONE_REQUESTED"
+        cancelled = cancel_state == "CANCELED"
+        cancel_requested = cancel_state not in ("NONE_REQUESTED", "CANCELED")
+        paid = order.get("payment_status") not in _UNPAID_PAYMENT_STATUSES
+
+        for line in order["line_items"]:
+            item = ebay_finances.match_line_to_item({**line, "order_date": order.get("order_date")})
+            if not item:
+                continue
+            label = _item_label(item)
+            try:
+                if cancelled:
+                    if item["status"] in (db.STATUS_SOLD, db.STATUS_SHIPPED) and \
+                            db.record_ebay_order_automation(order_id, item["id"], "cancel_alert"):
+                        await _post_order_alert(
+                            bot,
+                            f"⚠️ eBay order `{order_id}` was **cancelled**, but **{label}** is marked "
+                            f"**{item['status']}** here. If it's back on the shelf, use `/item move-back` to "
+                            f"return it to Listed (void its QuickBooks Sales Receipt first if the sale was logged).",
+                        )
+                        counts["alerts"] += 1
+                    continue
+
+                if item["status"] == db.STATUS_ON_HOLD:
+                    if db.record_ebay_order_automation(order_id, item["id"], "hold_alert"):
+                        await _post_order_alert(
+                            bot,
+                            f"⚠️ **{label}** sold on eBay (order `{order_id}`) but is **on hold** here - "
+                            f"resolve the hold, then mark it sold. Nothing was changed automatically.",
+                        )
+                        counts["alerts"] += 1
+                    continue
+
+                if paid and not cancel_requested \
+                        and item["status"] in (db.STATUS_LISTED, db.STATUS_PENDING_EBAY_UPLOAD) \
+                        and not _order_predates_listing(order, item) \
+                        and not db.has_ebay_order_automation(order_id, item["id"], "sold"):
+                    if await cog.auto_mark_sold_from_ebay(item, order_id, ebay_item_id=line.get("legacy_item_id")):
+                        db.record_ebay_order_automation(order_id, item["id"], "sold")
+                        counts["sold"] += 1
+                        await _post_order_alert(bot, f"🤖 **{label}** sold on eBay (order `{order_id}`) - moved to Sold.")
+                    item = db.get_item(item["id"])
+
+                if line.get("fulfillment_status") == "FULFILLED" and item["status"] == db.STATUS_SOLD \
+                        and not db.has_ebay_order_automation(order_id, item["id"], "shipped"):
+                    if await cog.auto_mark_shipped_from_ebay(item, order_id):
+                        db.record_ebay_order_automation(order_id, item["id"], "shipped")
+                        counts["shipped"] += 1
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                log.exception("eBay order automation failed for %s (order %s) - will retry next poll", label, order_id)
+    return counts
+
+
+async def _run_order_automation(bot: discord.Client) -> dict:
+    """One pass of the order automation over every order eBay changed in the
+    last EBAY_ORDER_AUTOMATION_LOOKBACK_DAYS - called at the end of each
+    order_poll_loop run. A failed eBay call is logged and retried next poll,
+    same as the new-order check."""
+    since = datetime.now(timezone.utc) - timedelta(days=config.EBAY_ORDER_AUTOMATION_LOOKBACK_DAYS)
+    try:
+        orders = await ebay_api.get_recently_modified_orders(since)
+    except ebay_api.EbayAPIError:
+        log.exception("eBay order automation poll failed")
+        return {}
+    counts = await _reconcile_ebay_order_statuses(bot, orders)
+    if any(counts.values()):
+        log.info("eBay order automation: %s", counts)
+    return counts
+
+
 # ------------------------------------------------------ /ebay net-report --
 
 def _money(value) -> str:
@@ -517,7 +642,7 @@ class Ebay(commands.Cog):
             orders = await ebay_api.get_orders(since)
         except ebay_api.EbayAPIError:
             log.exception("eBay order poll failed")
-            return
+            orders = []
 
         for order in orders:
             if db.has_seen_ebay_order(order["order_id"]):
@@ -532,6 +657,9 @@ class Ebay(commands.Cog):
                 log.exception("Failed to post eBay order %s - will retry next poll", order["order_id"])
                 continue
             db.mark_ebay_order_seen(order["order_id"])
+
+        if config.EBAY_ORDER_AUTOMATION:
+            await _run_order_automation(self.bot)
 
     @order_poll_loop.before_loop
     async def _before_order_poll_loop(self):
