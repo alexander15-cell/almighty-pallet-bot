@@ -428,6 +428,40 @@ def split_evenly(total: float, n: int) -> list:
     return [s / 100 for s in shares]
 
 
+def sales_channel(platform: str) -> str:
+    """'ebay', 'in_person' or 'other' - the P&L line a sale belongs on.
+    Anything that isn't eBay or In Person (Other: Mercari, the legacy
+    Facebook Marketplace, ...) is 'other'."""
+    p = (platform or "").strip().lower()
+    if p == "ebay":
+        return "ebay"
+    if p == "in person":
+        return "in_person"
+    return "other"
+
+
+def sales_item_for_platform(platform: str) -> tuple:
+    """
+    (item_id, income_account_id) for a sale's Sales Receipt line. When the
+    channel's own Item is configured (QUICKBOOKS_*_SALES_ITEM_ID), that Item
+    alone decides the income account, so no account override is sent
+    (None). Otherwise the old behavior, unchanged: the shared cash-sales
+    Item, with eBay Sales / Sales as the override.
+    """
+    channel = sales_channel(platform)
+    item_id = {
+        "ebay": config.QUICKBOOKS_EBAY_SALES_ITEM_ID,
+        "in_person": config.QUICKBOOKS_IN_PERSON_SALES_ITEM_ID,
+        "other": config.QUICKBOOKS_OTHER_SALES_ITEM_ID,
+    }[channel]
+    if item_id:
+        return item_id, None
+    fallback_account = (
+        config.QUICKBOOKS_EBAY_SALES_ACCOUNT_ID if channel == "ebay" else config.QUICKBOOKS_SALES_INCOME_ACCOUNT_ID
+    )
+    return config.QUICKBOOKS_CASH_SALES_ITEM_ID, fallback_account
+
+
 async def post_sale_to_quickbooks(sale_id: int, platform: str, total_price: float, already_deposited: bool,
                                    sale_date: str) -> dict:
     """
@@ -456,7 +490,7 @@ async def post_sale_to_quickbooks(sale_id: int, platform: str, total_price: floa
     if sale["quickbooks_sales_receipt_id"]:
         return {"ok": True, "sales_receipt_doc": "(already created)"}
 
-    income_account = config.QUICKBOOKS_EBAY_SALES_ACCOUNT_ID if is_ebay else config.QUICKBOOKS_SALES_INCOME_ACCOUNT_ID
+    item_id, income_account = sales_item_for_platform(platform)
     deposit_account = (
         config.QUICKBOOKS_BANK_ACCOUNT_ID if already_deposited else config.QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID
     )
@@ -464,7 +498,7 @@ async def post_sale_to_quickbooks(sale_id: int, platform: str, total_price: floa
     try:
         receipt = await quickbooks.create_sales_receipt(
             customer_id=config.QUICKBOOKS_CASH_SALES_CUSTOMER_ID,
-            item_id=config.QUICKBOOKS_CASH_SALES_ITEM_ID,
+            item_id=item_id,
             income_account_id=income_account,
             deposit_account_id=deposit_account,
             amount=total_price, date=sale_date, memo=memo,

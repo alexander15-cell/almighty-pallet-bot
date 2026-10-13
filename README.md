@@ -377,6 +377,14 @@ itself.
   documented in `config.py` and default to the real values already set up
   in the connected company - override in `.env` only if that QuickBooks
   setup changes.
+- **Sales by channel:** set `QUICKBOOKS_EBAY_SALES_ITEM_ID`,
+  `QUICKBOOKS_IN_PERSON_SALES_ITEM_ID` and `QUICKBOOKS_OTHER_SALES_ITEM_ID`
+  to one Non-inventory Product/Service per channel (each with its own
+  income account - eBay Sales, In-Person Sales, Other Sales) and the P&L
+  splits Sales into those lines. QuickBooks books a receipt to its Item's
+  income account, so this is what actually separates them. Blank = the
+  shared `QUICKBOOKS_CASH_SALES_ITEM_ID`, as before. Receipts already in
+  QuickBooks aren't changed - edit their product there to move them.
 
 ### `#finance-audit-log` and `#finance-dashboard` - visible to everyone
 

@@ -394,11 +394,12 @@ async def create_sales_receipt(customer_id: str, item_id: str, income_account_id
             "ItemRef": {"value": item_id},
             "UnitPrice": round(float(amount), 2),
             "Qty": 1,
-            "ItemAccountRef": {"value": income_account_id},
             "TaxCodeRef": {"value": "TAX" if taxable else "NON"},
         },
         "Description": memo,
     }
+    if income_account_id:  # None = let the Item's own income account decide
+        line["SalesItemLineDetail"]["ItemAccountRef"] = {"value": income_account_id}
     payload = {
         "CustomerRef": {"value": customer_id},
         "TxnDate": date,

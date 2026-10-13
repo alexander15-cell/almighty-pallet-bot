@@ -695,6 +695,17 @@ QUICKBOOKS_CASH_SALES_ITEM_ID = os.getenv("QUICKBOOKS_CASH_SALES_ITEM_ID", "2")
 QUICKBOOKS_CASH_SALES_CUSTOMER_ID = os.getenv("QUICKBOOKS_CASH_SALES_CUSTOMER_ID", "1")
 QUICKBOOKS_SALES_INCOME_ACCOUNT_ID = os.getenv("QUICKBOOKS_SALES_INCOME_ACCOUNT_ID", "7")
 QUICKBOOKS_EBAY_SALES_ACCOUNT_ID = os.getenv("QUICKBOOKS_EBAY_SALES_ACCOUNT_ID", "98")
+# One Product/Service per sales channel, so the P&L splits Sales into eBay
+# Sales / In-Person Sales / Other Sales. Needed because QuickBooks books a
+# Sales Receipt line to its Item's own income account and ignores the
+# per-line account override above. Each Item's income account is set in
+# QuickBooks (eBay Sale -> eBay Sales 98, In-Person Sale -> In-Person Sales
+# 114, Other Sale -> Other Sales 115). Blank = keep using
+# QUICKBOOKS_CASH_SALES_ITEM_ID for that channel, exactly as before.
+# "Other" covers every platform that isn't eBay or In Person.
+QUICKBOOKS_EBAY_SALES_ITEM_ID = os.getenv("QUICKBOOKS_EBAY_SALES_ITEM_ID", "").strip()
+QUICKBOOKS_IN_PERSON_SALES_ITEM_ID = os.getenv("QUICKBOOKS_IN_PERSON_SALES_ITEM_ID", "").strip()
+QUICKBOOKS_OTHER_SALES_ITEM_ID = os.getenv("QUICKBOOKS_OTHER_SALES_ITEM_ID", "").strip()
 QUICKBOOKS_COGS_ACCOUNT_ID = os.getenv("QUICKBOOKS_COGS_ACCOUNT_ID", "48")
 QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID = os.getenv("QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID", "24")
 # Only used when a sale is logged as already_deposited=True (cash already
