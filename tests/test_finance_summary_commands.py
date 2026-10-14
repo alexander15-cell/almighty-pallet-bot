@@ -193,3 +193,52 @@ def test_overview_shows_pallet_progress_and_mtd(fresh_db, cog):
     embed = interaction.followup.sent_embed
     assert _field(embed, "Month-to-Date Revenue") == "$40.00"
     assert "1 in progress, 1 fully sold out" == _field(embed, "Pallets")
+
+
+def test_overview_shows_bank_and_undeposited_when_connected_without_a_card(fresh_db, cog, monkeypatch):
+    # Connected, but no credit card account - used to say "Not connected".
+    monkeypatch.setattr(config, "QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID", "")
+    monkeypatch.setattr(config, "QUICKBOOKS_BANK_ACCOUNT_ID", "120")
+    monkeypatch.setattr(config, "QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID", "24")
+    fresh_db.save_quickbooks_connection(
+        realm_id="1", access_token="a", refresh_token="r",
+        access_token_expires_at="2099-01-01T00:00:00+00:00",
+    )
+    names = {"120": ("Old National Checking", 500.0), "24": ("Undeposited funds", 61.05)}
+
+    async def fake_get_account_balance(account_id):
+        name, bal = names[account_id]
+        return {"id": account_id, "name": name, "balance": bal}
+    monkeypatch.setattr(qb, "get_account_balance", fake_get_account_balance)
+
+    cog.bot = _FakeBot()
+    interaction = _FakeInteraction()
+    asyncio.run(Finance.overview.callback(cog, interaction))
+
+    value = _field(interaction.followup.sent_embed, "QuickBooks Balance")
+    assert "Not connected" not in value
+    assert "**Old National Checking**: $500.00" in value
+    assert "**Undeposited funds**: $61.05" in value
+
+
+def test_overview_one_failed_account_does_not_hide_the_others(fresh_db, cog, monkeypatch):
+    monkeypatch.setattr(config, "QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID", "")
+    monkeypatch.setattr(config, "QUICKBOOKS_BANK_ACCOUNT_ID", "120")
+    monkeypatch.setattr(config, "QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID", "24")
+    fresh_db.save_quickbooks_connection(
+        realm_id="1", access_token="a", refresh_token="r",
+        access_token_expires_at="2099-01-01T00:00:00+00:00",
+    )
+
+    async def fake_get_account_balance(account_id):
+        if account_id == "120":
+            raise qb.QuickBooksError("boom")
+        return {"id": account_id, "name": "Undeposited funds", "balance": 61.05}
+    monkeypatch.setattr(qb, "get_account_balance", fake_get_account_balance)
+
+    cog.bot = _FakeBot()
+    interaction = _FakeInteraction()
+    asyncio.run(Finance.overview.callback(cog, interaction))
+
+    value = _field(interaction.followup.sent_embed, "QuickBooks Balance")
+    assert "couldn't fetch" in value and "$61.05" in value

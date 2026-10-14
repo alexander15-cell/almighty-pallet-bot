@@ -1515,14 +1515,21 @@ class Finance(commands.Cog):
 
         embed = discord.Embed(title="📈 Business Overview", color=discord.Color.blurple())
 
-        if quickbooks.is_connected() and config.QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID:
-            try:
-                balance = await quickbooks.get_account_balance(config.QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID)
-                embed.add_field(
-                    name="QuickBooks Balance", value=f"**{balance['name']}**: ${balance['balance']:.2f}", inline=False
-                )
-            except quickbooks.QuickBooksError as e:
-                embed.add_field(name="QuickBooks Balance", value=f"⚠️ Couldn't fetch: {e}", inline=False)
+        if quickbooks.is_connected():
+            # Bank, Undeposited Funds, then the watched card if one is set -
+            # a connected company with no card account (the common case
+            # here) used to show "Not connected" because only the card was
+            # ever looked up.
+            account_ids = [config.QUICKBOOKS_BANK_ACCOUNT_ID, config.QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID,
+                           config.QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID]
+            lines = []
+            for account_id in dict.fromkeys(a for a in account_ids if a):
+                try:
+                    balance = await quickbooks.get_account_balance(account_id)
+                    lines.append(f"**{balance['name']}**: ${balance['balance']:.2f}")
+                except quickbooks.QuickBooksError as e:
+                    lines.append(f"⚠️ Account {account_id}: couldn't fetch ({e})")
+            embed.add_field(name="QuickBooks Balance", value="\n".join(lines) or "No accounts configured", inline=False)
         else:
             embed.add_field(
                 name="QuickBooks Balance",
