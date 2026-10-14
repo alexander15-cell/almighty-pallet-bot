@@ -128,7 +128,7 @@ ENTRIES = (
     ),
     HelpEntry(
         "Mark as Sold platform picker",
-        "Choosing where an item sold (eBay/Facebook/In Person/Other) right when it's marked sold - needed for sales tax, and posts it to #accounting for Finance Management to log with /finance log-sale.",
+        "Choosing where an item sold (eBay/In Person/Other) right when it's marked sold - needed for sales tax, and posts it to #accounting for Finance Management to log with /finance log-sale.",
         ("mark sold platform", "where did it sell", "sales tax platform"),
     ),
     HelpEntry(
@@ -143,12 +143,12 @@ ENTRIES = (
     ),
     HelpEntry(
         "#finance-dashboard",
-        "Read-only, visible to everyone: a pinned message with live account balances and business position, updated automatically.",
-        ("dashboard", "business position", "account balances", "our position", "financial summary"),
+        "Read-only, visible to everyone: a pinned message with the bank and Undeposited Funds balances, this year's sales/costs/net income from QuickBooks, and pallet progress - refreshes after every sale/expense and every 20 minutes (admins: /finance refresh-dashboard).",
+        ("dashboard", "business position", "account balances", "our position", "financial summary", "bank balance", "net income"),
     ),
     HelpEntry(
         "Categorize credit-card expense",
-        "After allocating a credit-card charge to a pallet, an optional second dropdown lets you pick a specific QuickBooks expense/COGS account for it.",
+        "Only if a credit card account is set up (QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID - there isn't one now): after allocating a card charge to a pallet, an optional second dropdown picks its QuickBooks expense/COGS account.",
         ("categorize expense", "expense account", "assign account", "credit card category"),
     ),
     HelpEntry(
@@ -207,29 +207,34 @@ ENTRIES = (
         ("finance summary", "pallet financials", "cost card"),
     ),
     HelpEntry(
+        "/finance refresh-dashboard",
+        "Admin: update the pinned #finance-dashboard right now (re-posts and pins it if it was deleted).",
+        ("refresh dashboard", "update dashboard", "dashboard out of date", "repin dashboard"),
+    ),
+    HelpEntry(
         "/finance refresh-card",
         "Force-refresh the pinned finance card in place right now, without waiting for an item to move.",
         ("refresh card", "update card"),
     ),
     HelpEntry(
         "/finance pallet-summary [pallet_name]",
-        "Full cost breakdown by type (purchase/credit card/shipping/etc), revenue, and margin for a pallet.",
+        "Full cost breakdown by type (purchase/invoice/shipping/eBay fees/etc), revenue, and margin for a pallet.",
         ("cost breakdown", "margin", "profit"),
     ),
     HelpEntry(
         "/finance overview",
-        "Business-wide snapshot: QuickBooks balance, month-to-date spend/revenue, pallet counts.",
-        ("business overview", "quickbooks balance", "month to date"),
+        "Business-wide snapshot: bank and Undeposited Funds balances (plus a card if set), month-to-date spend/revenue, pallet counts.",
+        ("business overview", "quickbooks balance", "bank balance", "month to date"),
     ),
     HelpEntry(
         "/finance connect-quickbooks",
-        "Admin: link QuickBooks Online for automatic credit-card charge tracking.",
+        "Admin: link QuickBooks Online - sales receipts, eBay fee entries, pallet purchase expenses and balances.",
         ("connect quickbooks", "link quickbooks", "quickbooks setup"),
     ),
     HelpEntry(
         "/finance list-accounts",
-        "Admin: list QuickBooks accounts and their IDs, for setting QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID.",
-        ("quickbooks account id", "find account id", "list quickbooks accounts", "credit card account id"),
+        "Admin: list QuickBooks accounts and their IDs, for the QUICKBOOKS_* settings in .env (e.g. QUICKBOOKS_BANK_ACCOUNT_ID). Use account_type:All account types for income/expense accounts.",
+        ("quickbooks account id", "find account id", "list quickbooks accounts", "bank account id", "expense account id", "credit card account id"),
     ),
     HelpEntry(
         "/finance import-pirateship <csv>",
@@ -248,7 +253,7 @@ ENTRIES = (
     ),
     HelpEntry(
         "#awaiting-pallet-charges",
-        "Unclaimed invoices/credit-card charges for a pallet that hasn't been created yet wait here - Start New Pallet offers to attach any to the new pallet.",
+        "Unclaimed invoices for a pallet that hasn't been created yet wait here - Start New Pallet offers to attach any to the new pallet.",
         ("unclaimed charge", "attach charge", "awaiting charge"),
     ),
     HelpEntry(
@@ -315,6 +320,11 @@ ENTRIES = (
         "/setup rebind-channel <stage> <channel>",
         "Point a shared channel at a different Discord channel - for after accidentally deleting and recreating one.",
         ("rebind channel", "deleted channel", "recreate channel", "fix channel"),
+    ),
+    HelpEntry(
+        "/setup refresh-channel-info",
+        "Admin: update every shared channel's topic and pinned ℹ️ guide to the bot's current text (they're otherwise only written when a channel is first created).",
+        ("channel info", "pinned message", "channel topic", "update pinned", "outdated pin"),
     ),
 )
 

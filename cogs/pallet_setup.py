@@ -351,6 +351,35 @@ class NewPalletModal(discord.ui.Modal, title="New Pallet"):
             )
 
 
+async def refresh_channel_info_message(client: discord.Client, channel: discord.TextChannel, text: str) -> str:
+    """
+    Brings one channel's topic and its pinned "ℹ️ ..." guide (the bot's own
+    pinned message, posted when /setup shared-channels created the channel)
+    up to date with `text`. Edits the existing pinned message in place, or
+    posts and pins a new one if it's gone. Returns 'updated', 'posted' or
+    'unchanged'.
+    """
+    new_content = f"ℹ️ {text}"
+    topic = text[:1024]  # Discord's channel topic limit
+    if (channel.topic or "") != topic:
+        await channel.edit(topic=topic, reason="Refresh channel info")
+        topic_changed = True
+    else:
+        topic_changed = False
+    for msg in await channel.pins():
+        if msg.author == client.user and msg.content.startswith("ℹ️"):
+            if msg.content == new_content:
+                return "updated" if topic_changed else "unchanged"
+            await msg.edit(content=new_content)
+            return "updated"
+    info_msg = await channel.send(new_content)
+    try:
+        await info_msg.pin(reason="Channel usage info")
+    except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+        pass
+    return "posted"
+
+
 class PalletSetup(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -503,6 +532,33 @@ class PalletSetup(commands.Cog):
             await channel.send(embed=embed)
 
         await interaction.followup.send(f"✅ Posted the bot guide in {channel.mention}.", ephemeral=True)
+
+    @setup_group.command(
+        name="refresh-channel-info",
+        description="Update every shared channel's topic and pinned ℹ️ guide to the bot's current text.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def refresh_channel_info(self, interaction: discord.Interaction):
+        # The topic and pinned guide are only written when /setup
+        # shared-channels first creates a channel, so a channel that already
+        # existed keeps whatever text it was created with. This brings them
+        # up to date with config.CHANNEL_INFO without touching anything else.
+        if await recovery_safety.block_destructive(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        results = []
+        for stage, channel_id in sorted(db.get_all_shared_channels().items()):
+            text = config.CHANNEL_INFO.get(stage)
+            channel = interaction.client.get_channel(channel_id)
+            if not text or channel is None:
+                continue
+            try:
+                outcome = await refresh_channel_info_message(interaction.client, channel, text)
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
+                outcome = f"failed ({e.__class__.__name__})"
+            results.append(f"#{channel.name}: {outcome}")
+        summary = "\n".join(results) or "No shared channels found - run `/setup shared-channels` first."
+        await interaction.followup.send(f"Channel info refreshed:\n{summary}", ephemeral=True)
 
     @setup_group.command(
         name="rebind-channel",

@@ -790,7 +790,7 @@ class Ebay(commands.Cog):
 
     @ebay_group.command(
         name="category-search",
-        description="Search eBay's real category list by keyword - IDs for /ebay retry-item's category_id.",
+        description="Search eBay's real category list by keyword (for Edit Details' category).",
     )
     @app_commands.describe(query="A few words describing the item type, e.g. 'cordless drill'")
     async def category_search(self, interaction: discord.Interaction, query: str):

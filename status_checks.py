@@ -153,6 +153,12 @@ async def quickbooks_checks() -> list:
     checks = [Check("QuickBooks", True, "connected")]
     checks.append(await _account_check("Undeposited Funds", config.QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID,
                                        UNDEPOSITED_TYPES, "Undeposited Funds"))
+    bank = await _account_check("Bank account", config.QUICKBOOKS_BANK_ACCOUNT_ID, {"Bank"}, "the bank account")
+    if bank.state and "\"cash\"" in bank.detail.lower():
+        # Still the default 8 - the placeholder "Cash" account, not the real bank.
+        bank = Check(bank.label, False, f"{bank.detail} - set QUICKBOOKS_BANK_ACCOUNT_ID to your real "
+                                        "bank account's ID (/finance list-accounts)")
+    checks.append(bank)
     if not config.QUICKBOOKS_EBAY_FEES_ACCOUNT_ID:
         checks.append(Check("eBay fees account", False, "QUICKBOOKS_EBAY_FEES_ACCOUNT_ID isn't set - fee cards can't post"))
     else:

@@ -260,6 +260,45 @@ async def get_account_balance(account_id: str) -> dict:
     return {"id": account["Id"], "name": account.get("Name"), "balance": account.get("CurrentBalance", 0.0)}
 
 
+# ProfitAndLoss report row groups -> the keys get_profit_and_loss returns.
+_PL_GROUPS = {
+    "Income": "income",
+    "COGS": "cogs",
+    "GrossProfit": "gross_profit",
+    "Expenses": "expenses",
+    "OtherIncome": "other_income",
+    "OtherExpenses": "other_expenses",
+    "NetIncome": "net_income",
+}
+
+
+async def get_profit_and_loss(start_date: str, end_date: str, accounting_method: str = "Cash") -> dict:
+    """
+    Totals from QuickBooks' own Profit and Loss report for a date range
+    (YYYY-MM-DD) - {'income', 'cogs', 'gross_profit', 'expenses',
+    'other_income', 'other_expenses', 'net_income'}, 0.0 for any section
+    the report leaves out. Needed because an income/expense account's
+    CurrentBalance (get_account_balance) is always 0 - QuickBooks only
+    keeps running balances for balance-sheet accounts.
+    """
+    report = await _request("GET", "reports/ProfitAndLoss", params={
+        "start_date": start_date, "end_date": end_date, "accounting_method": accounting_method,
+    })
+    totals = {key: 0.0 for key in _PL_GROUPS.values()}
+    for row in ((report.get("Rows") or {}).get("Row") or []):
+        key = _PL_GROUPS.get(row.get("group"))
+        if not key:
+            continue
+        cols = ((row.get("Summary") or {}).get("ColData") or [])
+        if len(cols) < 2:
+            continue
+        try:
+            totals[key] = round(float(cols[-1].get("value") or 0), 2)
+        except (TypeError, ValueError):
+            pass
+    return totals
+
+
 async def get_account(account_id: str) -> dict:
     """One account's {'id', 'name', 'type', 'active'} - used by /ebay status
     to check the configured account IDs exist and are the right kind.

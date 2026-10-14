@@ -76,8 +76,8 @@ if not exist ".env" (
         echo ------------------------------------------------------------------
         echo  Optional feature: QuickBooks Online integration
         echo ------------------------------------------------------------------
-        echo  Tracks credit-card charges and Pirate Ship shipping costs against
-        echo  your pallets automatically. Needs a free app registered at
+        echo  Books sales, eBay fees and pallet purchases to QuickBooks and
+        echo  shows your balances. Needs a free app registered at
         echo  https://developer.intuit.com. It's OFF by default - safe to skip
         echo  for now and turn on later by filling in the QUICKBOOKS_* settings
         echo  in .env and restarting the bot.
@@ -94,8 +94,8 @@ if not exist ".env" (
             echo      and QUICKBOOKS_CLIENT_SECRET from that app's Keys ^& OAuth page.
             echo   3. Once the bot is running, a Pallet Admin runs
             echo      /finance connect-quickbooks in Discord to finish connecting.
-            echo   4. Set QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID in .env to the ONE card
-            echo      account to watch ^(see the comment above it for where to find its ID^).
+            echo   4. Set QUICKBOOKS_BANK_ACCOUNT_ID in .env to your bank account's ID
+            echo      ^(/finance list-accounts shows it^).
             echo Opening .env now so you can fill these in - and DISCORD_BOT_TOKEN/
             echo DISCORD_GUILD_ID below, if you haven't yet...
             notepad ".env"

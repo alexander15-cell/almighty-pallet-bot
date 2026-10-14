@@ -925,7 +925,7 @@ class ShippedView(discord.ui.View):
         await cog.mark_shipped(interaction, self.item_id)
 
 
-SALE_PLATFORM_OPTIONS = ["eBay", "Facebook Marketplace", "In Person", "Other"]
+SALE_PLATFORM_OPTIONS = ["eBay", "In Person", "Other"]
 
 
 class SalePlatformSelectView(discord.ui.View):
@@ -935,7 +935,7 @@ class SalePlatformSelectView(discord.ui.View):
     same constraint as EbayConditionSelectView above), so this ephemeral
     select asks which platform it sold on before the item actually moves.
     This matters for sales tax: eBay already collects/remits it, but
-    Facebook/in-person/other sales don't, which is what /finance log-sale
+    in-person/other sales don't, which is what /finance log-sale
     later uses to decide whether to create a taxable QuickBooks Sales
     Receipt. "Other" opens a short modal for free text (a platform this
     list doesn't name, e.g. Mercari).
@@ -962,7 +962,7 @@ class SalePlatformSelectView(discord.ui.View):
 
 class OtherSalePlatformModal(discord.ui.Modal, title="Where did this sell?"):
     platform = discord.ui.TextInput(
-        label="Platform", placeholder="e.g. Mercari, OfferUp, local pickup app...", max_length=100,
+        label="Platform", placeholder="e.g. Facebook, Mercari, OfferUp...", max_length=100,
     )
 
     def __init__(self, item_id: int, source_message: discord.Message):

@@ -239,14 +239,11 @@ class QuickBooksRedirectModal(discord.ui.Modal, title="Connect QuickBooks"):
             await interaction.followup.send(f"❌ Couldn't connect: {e}", ephemeral=True)
             return
 
-        note = ""
-        if not config.QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID:
-            note = (
-                "\n\n⚠️ `QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID` isn't set yet, so the credit-card "
-                "poller won't watch anything until it is - set it to the account you want "
-                "watched (Accounting → Chart of Accounts → open the card → the `id=` in the "
-                "URL) in `.env` and restart the bot."
-            )
+        note = (
+            "\n\nNext: make sure `QUICKBOOKS_BANK_ACCOUNT_ID` in `.env` is your bank account's ID "
+            "(`/finance list-accounts`). `QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID` is only needed if "
+            "the business has a credit card account to watch."
+        )
         await interaction.followup.send(
             f"✅ Connected to QuickBooks (company/realm `{connection['realm_id']}`, "
             f"**{config.QUICKBOOKS_ENVIRONMENT}** environment)." + note,
@@ -859,6 +856,7 @@ class Finance(commands.Cog):
         self.bot = bot
         if not config.PRESERVE_DISCORD_HISTORY:
             self.credit_card_poll_loop.start()
+            self.dashboard_refresh_loop.start()
 
     async def cog_load(self):
         # Registers the (txn_id -> button) template once so every
@@ -871,6 +869,7 @@ class Finance(commands.Cog):
 
     def cog_unload(self):
         self.credit_card_poll_loop.cancel()
+        self.dashboard_refresh_loop.cancel()
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -985,6 +984,22 @@ class Finance(commands.Cog):
     async def _before_credit_card_poll_loop(self):
         await self.bot.wait_until_ready()
 
+    @tasks.loop(minutes=config.QUICKBOOKS_POLL_MINUTES)
+    async def dashboard_refresh_loop(self):
+        """Keeps the pinned #finance-dashboard current even when nothing
+        changes in the bot - bank deposits, payouts and anything entered
+        straight into QuickBooks move those balances too."""
+        if not quickbooks.is_connected():
+            return
+        try:
+            await finance_utils.refresh_dashboard_message(self.bot)
+        except quickbooks.QuickBooksError:
+            log.exception("Scheduled #finance-dashboard refresh failed")
+
+    @dashboard_refresh_loop.before_loop
+    async def _before_dashboard_refresh_loop(self):
+        await self.bot.wait_until_ready()
+
     @finance_group.command(name="setprice", description="Set this pallet's total cost. Run inside that pallet's category.")
     @app_commands.describe(cost="Total amount paid for the pallet")
     async def setprice(self, interaction: discord.Interaction, cost: float):
@@ -1012,7 +1027,7 @@ class Finance(commands.Cog):
     @app_commands.describe(
         item_number="The item's number shown on its card (e.g. 3)",
         price="Actual sale price",
-        platform="Where it sold (eBay, Facebook Marketplace, Website, Other)",
+        platform="Where it sold (eBay, In Person, Other: <name>)",
     )
     async def record_sale(self, interaction: discord.Interaction, item_number: int, price: float, platform: str):
         if not await _require_any_role(interaction, [config.ROLE_FINANCE_MGMT]):
@@ -1509,7 +1524,7 @@ class Finance(commands.Cog):
 
         await interaction.response.send_message(embed=embed)
 
-    @finance_group.command(name="overview", description="Business-wide snapshot: QuickBooks balance, month-to-date spend/revenue, pallet counts.")
+    @finance_group.command(name="overview", description="Business-wide snapshot: bank/Undeposited Funds balances, month-to-date spend/revenue, pallet counts.")
     async def overview(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
 
@@ -1553,7 +1568,7 @@ class Finance(commands.Cog):
 
     @finance_group.command(
         name="connect-quickbooks",
-        description="Admin: connect this bot to QuickBooks Online for credit-card/expense tracking.",
+        description="Admin: connect this bot to QuickBooks Online (sales, eBay fees, pallet expenses, balances).",
     )
     async def connect_quickbooks(self, interaction: discord.Interaction):
         if not _is_admin(interaction):
@@ -1594,10 +1609,32 @@ class Finance(commands.Cog):
             await interaction.response.send_message(message, view=view, ephemeral=True)
 
     @finance_group.command(
-        name="list-accounts",
-        description="Admin: list QuickBooks accounts and their IDs, for QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID.",
+        name="refresh-dashboard",
+        description="Admin: update the pinned #finance-dashboard now (re-posts and pins it if it was deleted).",
     )
-    @app_commands.describe(account_type="Which account types to show (default: Bank and Credit Card - the only types this bot watches)")
+    async def refresh_dashboard(self, interaction: discord.Interaction):
+        if not _is_admin(interaction):
+            await interaction.response.send_message("You need **Pallet Admin** to do that.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            result = await finance_utils.refresh_dashboard_message(self.bot, repost_if_missing=True)
+        except quickbooks.QuickBooksError as e:
+            await interaction.followup.send(f"⚠️ QuickBooks error: {e}", ephemeral=True)
+            return
+        messages = {
+            "updated": "✅ #finance-dashboard updated.",
+            "reposted": "✅ The old dashboard message was gone - posted and pinned a new one in #finance-dashboard.",
+            "no-channel": "#finance-dashboard isn't set up - run `/setup shared-channels` first.",
+            "failed": "⚠️ Couldn't update #finance-dashboard (Discord error) - try again in a minute.",
+        }
+        await interaction.followup.send(messages.get(result, f"Result: {result}"), ephemeral=True)
+
+    @finance_group.command(
+        name="list-accounts",
+        description="Admin: list QuickBooks accounts and their IDs, for the QUICKBOOKS_* settings in .env.",
+    )
+    @app_commands.describe(account_type="Which account types to show (default: Bank and Credit Card)")
     @app_commands.choices(account_type=[
         app_commands.Choice(name="Bank and Credit Card (default)", value="bank_and_credit_card"),
         app_commands.Choice(name="All account types", value="all"),
@@ -1639,7 +1676,7 @@ class Finance(commands.Cog):
             description=description,
             color=discord.Color.blurple(),
         )
-        embed.set_footer(text="Copy the ID of the account you want watched into QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID in .env, then restart the bot.")
+        embed.set_footer(text="Copy an ID into the matching QUICKBOOKS_* setting in .env (e.g. QUICKBOOKS_BANK_ACCOUNT_ID for the bank account), then restart the bot.")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @finance_group.command(

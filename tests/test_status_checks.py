@@ -123,7 +123,8 @@ def test_ebay_not_configured(monkeypatch):
 @pytest.fixture
 def qb(monkeypatch):
     accounts = {"24": ("Undeposited Funds", "Other Current Asset"), "53": ("eBay Fees", "Expense"),
-                "99": ("Shipping", "Expense"), "49": ("Sales", "Income")}
+                "99": ("Shipping", "Expense"), "49": ("Sales", "Income"),
+                "8": ("Cash", "Bank"), "120": ("Old National Checking", "Bank")}
 
     async def fake_request(method, path, *, params=None, json_body=None):
         assert method == "GET"
@@ -136,7 +137,7 @@ def qb(monkeypatch):
     monkeypatch.setattr(quickbooks, "is_connected", lambda: True)
     for key, value in {"QUICKBOOKS_ENABLED": True, "QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID": "24",
                        "QUICKBOOKS_EBAY_FEES_ACCOUNT_ID": "53", "QUICKBOOKS_EBAY_SHIPPING_ACCOUNT_ID": "99",
-                       "QUICKBOOKS_EBAY_ADS_ACCOUNT_ID": "49"}.items():
+                       "QUICKBOOKS_EBAY_ADS_ACCOUNT_ID": "49", "QUICKBOOKS_BANK_ACCOUNT_ID": "120"}.items():
         monkeypatch.setattr(config, key, value)
 
 
@@ -146,6 +147,19 @@ def test_quickbooks_accounts_checked_by_type(qb):
     assert checks["eBay fees account"].state is True and '"eBay Fees"' in checks["eBay fees account"].detail
     ads = checks["eBay ads account"]
     assert ads.state is False and "**Income**" in ads.detail  # an income account would mis-book fees
+
+
+def test_bank_account_check(qb, monkeypatch):
+    checks = _by_label(asyncio.run(status_checks.quickbooks_checks()))
+    assert checks["Bank account"].state is True and "Old National Checking" in checks["Bank account"].detail
+
+    monkeypatch.setattr(config, "QUICKBOOKS_BANK_ACCOUNT_ID", "8")  # the old placeholder "Cash" account
+    checks = _by_label(asyncio.run(status_checks.quickbooks_checks()))
+    assert checks["Bank account"].state is False and "QUICKBOOKS_BANK_ACCOUNT_ID" in checks["Bank account"].detail
+
+    monkeypatch.setattr(config, "QUICKBOOKS_BANK_ACCOUNT_ID", "24")  # not a Bank-type account
+    checks = _by_label(asyncio.run(status_checks.quickbooks_checks()))
+    assert checks["Bank account"].state is False and "**Other Current Asset**" in checks["Bank account"].detail
 
 
 def test_missing_or_unknown_fee_accounts(qb, monkeypatch):

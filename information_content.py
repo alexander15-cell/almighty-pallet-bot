@@ -184,10 +184,11 @@ def _finance_commands_embed() -> discord.Embed:
     embed.add_field(name="override-count / clear-count-override", value="Manually correct the \"items received\" figure, or revert to automatic.", inline=False)
     embed.add_field(name="summary", value="Post a fresh copy of a pallet's financial/status card.", inline=False)
     embed.add_field(name="refresh-card", value="Force-refresh the pinned card in place right now, without waiting for an item to move.", inline=False)
-    embed.add_field(name="pallet-summary [pallet_name]", value="Full cost breakdown by type (purchase/credit card/shipping/etc), revenue, and margin for a pallet.", inline=False)
-    embed.add_field(name="overview", value="Business-wide snapshot: QuickBooks balance, month-to-date spend/revenue, pallets in progress vs sold out.", inline=False)
-    embed.add_field(name="connect-quickbooks", value="Admin: link QuickBooks Online for automatic credit-card charge tracking. See #credit-card-charges.", inline=False)
-    embed.add_field(name="list-accounts", value="Admin: list QuickBooks accounts and their IDs, for setting QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID.", inline=False)
+    embed.add_field(name="refresh-dashboard", value="Admin: update the pinned #finance-dashboard now (re-posts and pins it if it was deleted).", inline=False)
+    embed.add_field(name="pallet-summary [pallet_name]", value="Full cost breakdown by type (purchase/invoice/shipping/eBay fees/etc), revenue, and margin for a pallet.", inline=False)
+    embed.add_field(name="overview", value="Business-wide snapshot: bank and Undeposited Funds balances (plus a card if set), month-to-date spend/revenue, pallets in progress vs sold out.", inline=False)
+    embed.add_field(name="connect-quickbooks", value="Admin: link QuickBooks Online - sales receipts, eBay fee entries, pallet purchase expenses and balances.", inline=False)
+    embed.add_field(name="list-accounts", value="Admin: list QuickBooks accounts and their IDs, for the QUICKBOOKS_* settings in .env (e.g. QUICKBOOKS_BANK_ACCOUNT_ID).", inline=False)
     embed.add_field(name="import-pirateship <csv>", value="Admin: import a Pirate Ship shipping export and allocate its costs to pallets/items.", inline=False)
     return embed
 
@@ -203,22 +204,20 @@ def _finance_channels_embed() -> discord.Embed:
         value=(
             "**Purchase Management role** posts here. One message per invoice: attach the invoice "
             "(photo or PDF) and type just the dollar amount (e.g. \"125.50\") in the same message, "
-            "then send. The bot logs it and removes the message - the practical way to track a "
-            "purchase when there's no direct QuickBooks connection. When the matching pallet is "
+            "then send. The bot logs it and removes the message. When the matching pallet is "
             "created (or claimed onto an existing one), the full amount is expensed immediately to "
-            "Cost of Goods Sold via a QuickBooks Journal Entry - cash basis, no per-item breakdown."
+            "Cost of Goods Sold via a QuickBooks Journal Entry, paid from the bank account - cash "
+            "basis, no per-item breakdown."
         ),
         inline=False,
     )
     embed.add_field(
         name="#awaiting-pallet-charges",
         value=(
-            "Submitted invoices and QuickBooks credit-card charges allocated to \"New Pallet (not "
-            "arrived yet)\" sit here until a matching pallet is created - Start New Pallet then "
-            "offers to attach any unclaimed ones to it. A submitted invoice's card has a **Confirm "
-            "logged in QuickBooks** button (**Finance Management role**) - click it once you've "
-            "entered it into QuickBooks by hand to remove the card; it can still be attached to a "
-            "pallet later either way."
+            "Submitted invoices sit here until a matching pallet is created - Start New Pallet then "
+            "offers to attach any unclaimed ones to it, which expenses them in QuickBooks "
+            "automatically. The **Confirm logged in QuickBooks** button (**Finance Management "
+            "role**) just clears a card you've already handled by hand."
         ),
         inline=False,
     )
@@ -227,7 +226,7 @@ def _finance_channels_embed() -> discord.Embed:
         value=(
             "**Finance Management role.** An item lands here as soon as it's marked sold, with the "
             "platform picked at that moment (Mark as Sold now asks - eBay already collects/remits "
-            "sales tax, Facebook/In Person/Other don't). It's a to-do list: log eBay sales with "
+            "sales tax, In Person/Other don't). It's a to-do list: log eBay sales with "
             "**Confirm & log sale** on the #ebay-orders card, anything else with `/finance log-sale` - "
             "either books a Sales Receipt to QuickBooks, and the entry here turns ✅ with its receipt "
             "number (⚠️ with the retry command if QuickBooks failed). No cost/COGS entry at all - a "
@@ -237,16 +236,17 @@ def _finance_channels_embed() -> discord.Embed:
     )
     embed.add_field(
         name="#credit-card-charges",
-        value="New QuickBooks credit-card charges show up here automatically, if QuickBooks is connected (`/finance connect-quickbooks`).",
+        value="Inactive - only used if a credit card account is set up in QuickBooks (`QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID`). There isn't one right now.",
         inline=False,
     )
     embed.add_field(
         name="#ebay-orders",
         value=(
-            "New eBay orders show up here automatically once matched to a tracked item by SKU, "
-            "if the direct eBay API is set up with order-sync access. **Confirm & log sale** "
-            "pre-fills the same thing `/finance log-sale` does - nothing is sent to QuickBooks "
-            "until you click it."
+            "New eBay orders show up here automatically once matched to a tracked item by SKU or "
+            "eBay listing ID. **Confirm & log sale** pre-fills the same thing `/finance log-sale` "
+            "does - nothing is sent to QuickBooks until you click it. After the order ships, an "
+            "**eBay fees** card books eBay's fees and shipping label so QuickBooks matches the payout. "
+            "Missing a card? `/ebay order-card order_id:<id>`."
         ),
         inline=False,
     )
@@ -254,16 +254,17 @@ def _finance_channels_embed() -> discord.Embed:
         name="#finance-audit-log (everyone can see)",
         value=(
             "Read-only permanent record of every completed QuickBooks transaction this bot has posted - "
-            "logged sales, allocated credit-card charges, claimed charges. Only the bot posts here."
+            "logged sales, eBay fee entries, claimed invoices, and reversals. Only the bot posts here."
         ),
         inline=False,
     )
     embed.add_field(
         name="#finance-dashboard (everyone can see)",
         value=(
-            "A single pinned message the bot keeps updated automatically - live account balances, "
-            "month-to-date revenue/spend, and pallet progress. Refreshes itself whenever a sale, "
-            "expense, or cost changes anywhere."
+            "A single pinned message the bot keeps updated - bank and Undeposited Funds balances, "
+            "this year's sales/costs/net income from QuickBooks, month-to-date revenue/spend, and "
+            "pallet progress. Refreshes after every sale/expense/cost change and every 20 minutes; "
+            "admins can force it with `/finance refresh-dashboard`."
         ),
         inline=False,
     )
@@ -363,5 +364,6 @@ def _admin_setup_commands_embed() -> discord.Embed:
         value="Point a shared channel (e.g. #awaiting-pallet-charges) at a different Discord channel - for after accidentally deleting and recreating one, since a same-named replacement doesn't fix itself.",
         inline=False,
     )
+    embed.add_field(name="/setup refresh-channel-info", value="Update every shared channel's topic and pinned ℹ️ guide to the current text.", inline=False)
     embed.set_footer(text="All /admin and /pallet, /setup commands (and /item delete, /item duplicate, /item move-back) require the Pallet Admin role - /item hold is one exception (Queue Review/Listing Management), and /list items is open to everyone, see Pallets & Items.")
     return embed

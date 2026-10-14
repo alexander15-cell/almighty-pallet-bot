@@ -315,54 +315,56 @@ CHANNEL_INFO = {
         "pallet, as a nudge to consider a price drop or refreshed photos."
     ),
     "credit-card-charges": (
-        "New QuickBooks credit card charges show up here automatically (needs "
-        "/finance connect-quickbooks first) with a select menu - pick which pallet "
-        "the charge belongs to, or \"New Pallet (not arrived yet)\" if it hasn't been "
-        "created here yet. Allocating pushes a matching categorized expense back "
-        "into QuickBooks too, so the books and this bot stay in sync."
+        "Only used if the business has a credit card account in QuickBooks "
+        "(QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID) - there isn't one right now, so nothing "
+        "shows up here. When set, each new card charge appears with a select menu to "
+        "pick which pallet it belongs to (or \"New Pallet (not arrived yet)\"), and "
+        "allocating it categorizes the charge in QuickBooks too."
     ),
     "awaiting-pallet-charges": (
-        "Charges allocated to \"New Pallet (not arrived yet)\", and manually-submitted "
-        "invoices from #submit-invoices, sit here until a matching pallet is actually "
-        "created - Start New Pallet will then offer to attach any unclaimed ones shown "
-        "here to it. A submitted invoice's card has a **Confirm logged in QuickBooks** "
-        "button (**Finance Management role**) - once you've entered it into QuickBooks "
-        "by hand, click it to remove the card; it can still be attached to a pallet "
-        "later regardless. QuickBooks-sourced charges don't have this button - those "
-        "get pushed to QuickBooks automatically when claimed."
+        "Invoices from #submit-invoices (and card charges, if a card account is ever "
+        "set up) sit here until a matching pallet is created - Start New Pallet then "
+        "offers to attach any unclaimed ones shown here. Claiming one expenses it in "
+        "QuickBooks automatically (Cost of goods sold, paid from the bank account). The "
+        "**Confirm logged in QuickBooks** button (**Finance Management role**) just "
+        "clears a card you've already handled by hand."
     ),
     "submit-invoices": (
         "**Purchase Management role** posts here. One message per invoice: attach the "
         "invoice (photo or PDF) and type just the dollar amount (e.g. \"125.50\") in the "
         "same message, then send. The bot logs it and removes your message - it then "
         "shows up in #awaiting-pallet-charges until Start New Pallet attaches it to the "
-        "matching pallet, at which point it's ready for the accountant to enter into "
-        "QuickBooks by hand."
+        "matching pallet, which also expenses it in QuickBooks automatically (Cost of "
+        "goods sold, paid from the bank account)."
     ),
     "accounting": (
         "**Finance Management role.** Items land here as soon as they're marked sold, "
-        "with the platform picked at that time. Use `/finance log-sale` to enter the "
-        "purchase price and COGS (single item or a bundle across pallets) and book it to "
-        "QuickBooks - a Sales Receipt for Facebook/in-person/other sales (QuickBooks' own "
-        "Automated Sales Tax adds the tax), plus a Cost of Goods Sold journal entry either "
-        "way."
+        "with the platform picked at that time - a to-do list. eBay sales are logged with "
+        "**Confirm & log sale** on their #ebay-orders card; everything else with "
+        "`/finance log-sale` (single item or a bundle across pallets). Either way it books "
+        "one QuickBooks Sales Receipt (eBay Sales / In-Person Sales / Other Sales) and the "
+        "entry here turns ✅. Cash basis: there's no cost entry at sale time - the "
+        "pallet's cost was already expensed when it was bought."
     ),
     "finance-audit-log": (
-        "Read-only record of every completed QuickBooks transaction this bot has posted - "
-        "logged sales (Sales Receipt + COGS journal entry numbers) and allocated credit-card "
-        "charges. Visible to everyone; only the bot posts here."
+        "Read-only record of every QuickBooks entry this bot has posted - logged sales "
+        "(Sales Receipt numbers), eBay fee entries, claimed invoices, and reversals. "
+        "Visible to everyone; only the bot posts here."
     ),
     "finance-dashboard": (
-        "A single pinned message the bot keeps updated automatically - current account "
-        "balances, month-to-date revenue/spend, and pallets in progress vs. sold out. "
-        "Visible to everyone; refreshes itself whenever a sale, expense, or cost changes."
+        "A single pinned message the bot keeps updated - bank and Undeposited Funds "
+        "balances, this year's sales/costs/net income from QuickBooks, month-to-date "
+        "revenue/spend, and pallets in progress vs. sold out. Visible to everyone; "
+        "refreshes after every sale, expense or cost change and every 20 minutes. "
+        "Admins can force it with `/finance refresh-dashboard`."
     ),
     "ebay-orders": (
-        "New eBay orders show up here automatically (needs the direct eBay API set up - "
-        "see README's eBay API section - with the sell.fulfillment scope added) once they're "
-        "matched to a tracked item by SKU, with a **Confirm & log sale** button. Nothing is "
-        "sent to QuickBooks until you click it - same as /finance log-sale, just pre-filled "
-        "from the real eBay order instead of typed in by hand."
+        "New eBay orders show up here automatically, matched to a tracked item by SKU or "
+        "eBay listing ID, with a **Confirm & log sale** button - nothing is sent to "
+        "QuickBooks until you click it. Once an order has shipped (or is 5 days old), an "
+        "**eBay fees** card follows with eBay's fees and shipping label; confirming it "
+        "books them as expenses so QuickBooks matches eBay's payout. Missing card? "
+        "`/ebay order-card order_id:<id>`."
     ),
 }
 
@@ -708,12 +710,12 @@ QUICKBOOKS_IN_PERSON_SALES_ITEM_ID = os.getenv("QUICKBOOKS_IN_PERSON_SALES_ITEM_
 QUICKBOOKS_OTHER_SALES_ITEM_ID = os.getenv("QUICKBOOKS_OTHER_SALES_ITEM_ID", "").strip()
 QUICKBOOKS_COGS_ACCOUNT_ID = os.getenv("QUICKBOOKS_COGS_ACCOUNT_ID", "48")
 QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID = os.getenv("QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID", "24")
-# Only used when a sale is logged as already_deposited=True (cash already
-# physically deposited by the time it's entered) - the real bank/cash
-# account to deposit to instead of Undeposited Funds. Defaults to "Cash"
-# (id 8), the only Bank-type account that exists in the connected company
-# as of when this was built; update this once a real checking account is
-# connected instead.
+# The business bank account (Old National checking once it's set in .env):
+# deposit target for sales logged as already_deposited=True, the credit side
+# of a claimed invoice's Journal Entry (cogs/pallet_setup.py), and the bank
+# balance on /finance overview and #finance-dashboard. The default 8 is the
+# old "Cash" account - set QUICKBOOKS_BANK_ACCOUNT_ID to the real bank
+# account's ID (/finance list-accounts); /ebay status flags it if not.
 QUICKBOOKS_BANK_ACCOUNT_ID = os.getenv("QUICKBOOKS_BANK_ACCOUNT_ID", "8")
 
 # ---- eBay fee expenses (see ebay_fee_expenses.py) ----

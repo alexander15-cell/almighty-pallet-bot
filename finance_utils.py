@@ -10,6 +10,8 @@ message), item_flow.py (item counts/stages change it), and finance.py
 (cost/price changes it) all need to call the same update logic - putting it
 here avoids three cogs importing each other.
 """
+from datetime import datetime, timezone
+
 import discord
 
 import config
@@ -17,17 +19,17 @@ import database as db
 import discord_resilience
 import quickbooks
 
-# (label, config.py attribute holding the account ID) pairs shown on the
-# #finance-dashboard live balance snapshot - see build_dashboard_embed.
-# The credit card account is handled separately below since it only makes
-# sense to show once QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID is actually set.
-# "Cost of Goods Sold" (not "Inventory") since every pallet purchase is
-# expensed immediately on a cash basis - there's no Inventory asset this
-# bot maintains anymore (see config.py's QUICKBOOKS_COGS_ACCOUNT_ID comment).
+# Balance-sheet accounts shown on the #finance-dashboard snapshot (see
+# build_dashboard_embed): (config.py attribute holding the account ID,
+# fallback label). The bank line is titled with the account's own
+# QuickBooks name (e.g. the real checking account) rather than a fixed
+# label. Income/expense accounts (Sales, Cost of goods sold, fees) aren't
+# here - their CurrentBalance is always 0 in QuickBooks, so they come from
+# the Profit and Loss report instead (quickbooks.get_profit_and_loss).
 DASHBOARD_ACCOUNTS = [
-    ("Cash", "QUICKBOOKS_BANK_ACCOUNT_ID"),
-    ("Undeposited Funds", "QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID"),
-    ("Cost of Goods Sold", "QUICKBOOKS_COGS_ACCOUNT_ID"),
+    ("QUICKBOOKS_BANK_ACCOUNT_ID", "Bank"),
+    ("QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID", "Undeposited Funds"),
+    ("QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID", "Credit Card"),
 ]
 
 
@@ -164,33 +166,48 @@ async def refresh_finance_message(bot: discord.Client, pallet_id: int):
 
 async def build_dashboard_embed() -> discord.Embed:
     """
-    The business-wide "position" snapshot kept in #finance-dashboard - a
-    handful of live QuickBooks account balances (Cash, Undeposited Funds,
-    Cost of Goods Sold, and the configured credit card if any) plus the
-    same month-to-date revenue/spend and pallet-progress figures /finance
-    overview already computes. Refreshed automatically by
-    refresh_dashboard_message every time refresh_finance_message runs for
-    any pallet - i.e. after any cost/sale/expense change anywhere, not
-    just here.
+    The business-wide "position" snapshot kept in #finance-dashboard:
+    live QuickBooks balances (bank, Undeposited Funds, the credit card if
+    one is configured), year-to-date totals from QuickBooks' own cash-basis
+    Profit and Loss report, plus the month-to-date revenue/spend and
+    pallet-progress figures /finance overview also shows. Refreshed by
+    refresh_dashboard_message after any cost/sale/expense change and on a
+    timer (cogs/finance.py's dashboard_refresh_loop), since bank activity
+    in QuickBooks happens without the bot.
     """
-    embed = discord.Embed(title="📈 Business Position", color=discord.Color.blurple())
+    embed = discord.Embed(
+        title="📈 Business Position", color=discord.Color.blurple(), timestamp=datetime.now(timezone.utc),
+    )
 
     if quickbooks.is_connected():
-        for label, config_attr in DASHBOARD_ACCOUNTS:
+        seen = set()
+        for config_attr, label in DASHBOARD_ACCOUNTS:
             account_id = getattr(config, config_attr, None)
-            if not account_id:
+            if not account_id or account_id in seen:
                 continue
+            seen.add(account_id)
             try:
                 balance = await quickbooks.get_account_balance(account_id)
-                embed.add_field(name=label, value=f"${balance['balance']:.2f}", inline=True)
+                name = (balance.get("name") or label) if config_attr == "QUICKBOOKS_BANK_ACCOUNT_ID" else label
+                embed.add_field(name=name, value=f"${balance['balance']:,.2f}", inline=True)
             except quickbooks.QuickBooksError:
                 embed.add_field(name=label, value="⚠️ Couldn't fetch", inline=True)
-        if config.QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID:
-            try:
-                balance = await quickbooks.get_account_balance(config.QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID)
-                embed.add_field(name="Credit Card Balance", value=f"${balance['balance']:.2f}", inline=True)
-            except quickbooks.QuickBooksError:
-                embed.add_field(name="Credit Card Balance", value="⚠️ Couldn't fetch", inline=True)
+
+        today = datetime.now(timezone.utc).date()
+        try:
+            pl = await quickbooks.get_profit_and_loss(f"{today.year}-01-01", today.isoformat())
+            embed.add_field(
+                name=f"{today.year} Year-to-Date (QuickBooks, cash basis)",
+                value=(
+                    f"Sales: ${pl['income']:,.2f}\n"
+                    f"Pallet purchases (COGS): ${pl['cogs']:,.2f}\n"
+                    f"Fees & other expenses: ${pl['expenses'] + pl['other_expenses']:,.2f}\n"
+                    f"**Net income: ${pl['net_income']:,.2f}**"
+                ),
+                inline=False,
+            )
+        except quickbooks.QuickBooksError:
+            embed.add_field(name="Year-to-Date", value="⚠️ Couldn't fetch the Profit and Loss report", inline=False)
     else:
         embed.add_field(
             name="QuickBooks",
@@ -199,8 +216,8 @@ async def build_dashboard_embed() -> discord.Embed:
         )
 
     mtd = db.get_month_to_date_financials()
-    embed.add_field(name="Month-to-Date Revenue", value=f"${mtd['revenue']:.2f}", inline=True)
-    embed.add_field(name="Month-to-Date Spend", value=f"${mtd['spend']:.2f}", inline=True)
+    embed.add_field(name="Month-to-Date Revenue", value=f"${mtd['revenue']:,.2f}", inline=True)
+    embed.add_field(name="Month-to-Date Spend", value=f"${mtd['spend']:,.2f}", inline=True)
 
     progress = db.get_pallet_progress_counts()
     embed.add_field(
@@ -209,7 +226,8 @@ async def build_dashboard_embed() -> discord.Embed:
         inline=True,
     )
 
-    embed.set_footer(text="Updates automatically whenever a sale, expense, or cost changes.")
+    embed.set_footer(text="Updates after every sale, expense or cost change, and every "
+                          f"{config.QUICKBOOKS_POLL_MINUTES} minutes. Last updated")
     return embed
 
 
@@ -225,34 +243,48 @@ async def post_initial_dashboard_message(bot: discord.Client, channel: discord.T
     db.set_dashboard_message_id(msg.id)
 
 
-async def refresh_dashboard_message(bot: discord.Client):
+async def refresh_dashboard_message(bot: discord.Client, repost_if_missing: bool = False) -> str:
     """
     Best-effort, same shape as refresh_finance_message - silently does
     nothing if #finance-dashboard hasn't been set up yet (run
     /setup shared-channels) or the message/channel has since been deleted,
     since a missing dashboard is never worth crashing whatever action
-    triggered this refresh.
+    triggered this refresh. With repost_if_missing (/finance
+    refresh-dashboard), a deleted or never-posted dashboard message is
+    posted and pinned again instead. Returns what happened: 'updated',
+    'reposted', 'no-channel', 'missing' or 'failed'.
     """
     if config.PRESERVE_DISCORD_HISTORY:
-        return
-    message_id = db.get_dashboard_message_id()
-    if not message_id:
-        return
+        return "failed"
     channel_id = db.get_shared_channel_id("finance-dashboard")
-    if not channel_id:
-        return
-    channel = bot.get_channel(channel_id)
+    channel = bot.get_channel(channel_id) if channel_id else None
     if not channel:
-        return
-    try:
-        msg = await channel.fetch_message(message_id)
-    except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-        return
+        return "no-channel"
+    message_id = db.get_dashboard_message_id()
+    msg = None
+    if message_id:
+        try:
+            msg = await channel.fetch_message(message_id)
+        except discord.NotFound:
+            msg = None
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+            return "failed"
+    if msg is None:
+        if not repost_if_missing:
+            return "missing"
+        try:
+            await post_initial_dashboard_message(bot, channel)
+        except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
+            print(f"[finance_utils] Could not repost dashboard message: {e}")
+            return "failed"
+        return "reposted"
     embed = await build_dashboard_embed()
     try:
         await msg.edit(embed=embed)
     except discord_resilience.TRANSIENT_DISCORD_ERRORS as e:
         print(f"[finance_utils] Could not refresh dashboard message: {e}")
+        return "failed"
+    return "updated"
 
 
 async def post_to_finance_audit_log(bot: discord.Client, text: str):

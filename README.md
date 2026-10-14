@@ -227,8 +227,11 @@ pinned message.
 
 ## QuickBooks Online integration (optional)
 
-Connects the bot to QuickBooks Online for automatic credit-card cost
-tracking and Pirate Ship shipping-cost allocation. Entirely optional -
+Connects the bot to QuickBooks Online: Sales Receipts for logged sales
+(per channel - eBay Sales / In-Person Sales / Other Sales), eBay fee
+Journal Entries, pallet purchase invoices expensed to Cost of goods sold
+(paid from the bank account, `QUICKBOOKS_BANK_ACCOUNT_ID`), and live
+balances on `/finance overview` and `#finance-dashboard`. Entirely optional -
 leave `QUICKBOOKS_CLIENT_ID`/`QUICKBOOKS_CLIENT_SECRET` blank in `.env` to
 run without it, exactly as before this feature existed. **Read/allocate/
 report only, by deliberate design** - nothing here can initiate a payment,
@@ -245,12 +248,15 @@ not built without an explicit spec).
 - **Finding your account ID**: `/finance list-accounts` (Pallet Admin, once
   connected) lists every Bank/Credit Card account in the connected
   QuickBooks company with its name, balance, and numeric ID - the practical
-  way to get the value for `QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID` below without
-  digging through QuickBooks' own Chart of Accounts URL. Pass
+  way to get the values for the `QUICKBOOKS_*` settings (e.g.
+  `QUICKBOOKS_BANK_ACCOUNT_ID`) without digging through QuickBooks' own
+  Chart of Accounts URL. Pass
   `account_type: All account types` to include every account type instead
   of just Bank/Credit Card.
-- **Credit card tracking**: every `QUICKBOOKS_POLL_MINUTES` (default 20),
-  the bot checks the ONE configured `QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID`
+- **Credit card tracking** (dormant unless `QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID`
+  is set - the business has no card account right now): every
+  `QUICKBOOKS_POLL_MINUTES` (default 20), the bot checks the ONE configured
+  `QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID`
   account for new charges and posts each one to `#credit-card-charges`
   with an **Allocate to a pallet** button - pick an active pallet (adds the
   charge to that pallet's cost basis and pushes a matching expense back into
@@ -280,7 +286,8 @@ not built without an explicit spec).
   response instead of being silently dropped or guessed at.
 - **Reporting**: `/finance pallet-summary [pallet_name]` shows one
   pallet's cost basis broken down by type, revenue, and profit/margin.
-  `/finance overview` shows the connected QuickBooks account balance,
+  `/finance overview` shows the bank, Undeposited Funds (and card, if set)
+  balances,
   month-to-date spend/revenue across the whole business, and how many
   pallets are in progress vs. fully sold out. The pallet's own live status
   card also auto-posts a plain warning message (not pinned, not spammy -
@@ -340,7 +347,7 @@ asset to relieve, no manifest to match against, nothing beyond the sale
 itself.
 
 - **Mark as Sold** now asks which platform it sold on first (eBay /
-  Facebook Marketplace / In Person / Other) before the item actually moves -
+  In Person / Other - e.g. "Other: Facebook") before the item actually moves -
   this matters for sales tax, not just record-keeping: eBay already
   collects and remits it as a marketplace facilitator, the others don't.
   The item then posts to **`#accounting`** (Finance Management) as a
@@ -373,7 +380,7 @@ itself.
   only the pre-tax price is ever recorded) and an explicit breakeven line
   against the pallet's cost basis.
 - The QuickBooks account/item/customer IDs this posts against
-  (`QUICKBOOKS_CASH_SALES_ITEM_ID`, `QUICKBOOKS_COGS_ACCOUNT_ID`, etc.) are
+  (`QUICKBOOKS_*_SALES_ITEM_ID`, `QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID`, etc.) are
   documented in `config.py` and default to the real values already set up
   in the connected company - override in `.env` only if that QuickBooks
   setup changes.
@@ -394,19 +401,27 @@ without needing a finance-specific role:
 
 - **`#finance-audit-log`** - a permanent, plain-text line for every
   completed QuickBooks transaction: a logged sale (`/finance log-sale` or
-  `/finance retry-sale`, with its Sales Receipt number), an allocated
-  credit-card charge (including which account it was categorized under, if
-  any), and a charge claimed from `#awaiting-pallet-charges` at pallet
-  creation (an Expense for a credit-card-sourced charge, a Journal Entry
-  for a manually-submitted invoice). Nothing here is ephemeral, unlike the
+  `/finance retry-sale`, with its Sales Receipt number), an eBay fee
+  Journal Entry, a reversal, and a charge claimed from
+  `#awaiting-pallet-charges` at pallet creation (a Journal Entry for a
+  submitted invoice; an Expense for a card charge, if a card account is
+  ever set up). Nothing here is ephemeral, unlike the
   confirmation messages those commands also send to whoever ran them.
-- **`#finance-dashboard`** - a single pinned message the bot keeps updated
-  automatically: live QuickBooks balances (Cash, Undeposited Funds, Cost of
-  Goods Sold, and the configured credit card), month-to-date revenue/spend,
-  and pallets in progress vs. fully sold out. Refreshes itself every time
-  `finance_utils.refresh_finance_message` runs for any pallet - i.e. after
-  any cost/sale/expense/allocation change anywhere, not just here - so
-  there's nothing to run to keep it current.
+- **`#finance-dashboard`** - a single pinned message the bot keeps updated:
+  live QuickBooks balances (the bank account - titled with its own
+  QuickBooks name - Undeposited Funds, and the credit card if one is set),
+  this year's Sales / Cost of goods sold / expenses / net income from
+  QuickBooks' own cash-basis Profit and Loss report (income and expense
+  accounts have no running balance in QuickBooks, so they can't come from
+  account balances), month-to-date revenue/spend, and pallets in progress
+  vs. fully sold out. Refreshes after any cost/sale/expense/allocation
+  change anywhere and every `QUICKBOOKS_POLL_MINUTES`, since bank activity
+  happens in QuickBooks without the bot. `/finance refresh-dashboard`
+  (Pallet Admin) forces it, and re-posts and pins it if the message was
+  deleted.
+- **Channel topics and pinned ℹ️ guides** are written when `/setup
+  shared-channels` creates a channel; `/setup refresh-channel-info` updates
+  existing channels to the current text.
 
 Both are created by `/setup shared-channels` like every other shared
 channel; the dashboard also gets its first pinned snapshot posted
@@ -1373,11 +1388,10 @@ this scale.
   only have the old freeform address blob, which is still split into
   address lines best-effort for
   the CSV (city/state/zip are left blank for those older rows).
-- **QuickBooks watches exactly one credit-card account, by design.** If
-  your QuickBooks company has other connected accounts unrelated to this
-  pallet business, they're never touched - `QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID`
-  is a deliberate single-account scope, not a current limitation to widen
-  later.
+- **QuickBooks watches at most one credit-card account, by design** - and
+  none right now, since the business has no card account
+  (`QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID` blank). Other accounts in the
+  QuickBooks company are never touched.
 - **Pirate Ship CSV matching is flexible/best-guess, not pinned to a known
   column layout.** No real Pirate Ship export sample was available when
   this was built, so `pirate_ship_import.py` scans every column for a
