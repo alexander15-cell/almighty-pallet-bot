@@ -29,6 +29,7 @@ Any change that affects the numbers on a pallet's live finance/status card
 so that card never goes stale.
 """
 import asyncio
+import secrets
 import json
 import os
 import re
@@ -274,11 +275,13 @@ class EditDescriptionModal(discord.ui.Modal, title="Edit Listing Description"):
                 "Description updated on a new card. The earlier card was kept.", ephemeral=True,
             )
             return
-        db.update_description(self.item_id, self.new_description.value)
         await interaction.response.send_message("Description updated. Re-approve when ready.", ephemeral=True)
-        all_embeds = list(interaction.message.embeds)
-        all_embeds[0].description = self.new_description.value
-        await interaction.message.edit(embeds=all_embeds)
+        cog = interaction.client.get_cog("ItemFlow")
+        try:
+            await cog.do_edit_description(self.item_id, self.new_description.value, interaction.user.id,
+                                          old_card=interaction.message)
+        except ActionError:
+            pass
 
 
 class EbayConditionSelectView(discord.ui.View):
@@ -1084,6 +1087,25 @@ class HoldResolvedButton(discord.ui.DynamicItem[discord.ui.Button], template=r"p
         )
 
 
+class ActionError(Exception):
+    """An item action that can't happen right now (wrong status, missing
+    data) - the message is shown as-is to whoever tried, in Discord or on
+    the web dashboard."""
+
+
+_intake_locks = {}
+
+
+def _intake_lock(pallet_id: int) -> asyncio.Lock:
+    """One lock per pallet around item creation - item numbers are
+    MAX(item_number)+1, so two simultaneous submissions (Discord + web)
+    for the same pallet must not interleave."""
+    lock = _intake_locks.get(pallet_id)
+    if lock is None:
+        lock = _intake_locks[pallet_id] = asyncio.Lock()
+    return lock
+
+
 class ItemFlow(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -1155,64 +1177,98 @@ class ItemFlow(commands.Cog):
         # new item row was created AND the old rejected card was left
         # sitting in Data Entry forever with nothing to clean it up).
         resubmit_item = None
-        old_card_channel = None
         if message.reference and message.reference.message_id:
             candidate = db.get_item_by_message(message.channel.id, message.reference.message_id)
             if candidate and candidate["pallet_id"] == pallet_id and candidate["status"] == db.STATUS_REJECTED:
                 resubmit_item = candidate
-                old_card_channel = message.channel  # rejected cards always land back in data-entry
 
-        quantity_clamped = False
         if resubmit_item:
             # A rejected item's redo is always a correction of that ONE
             # existing item, never split - quantity parsing doesn't apply.
-            item_ids = [resubmit_item["id"]]
-            note_text = message.content or ""
-            # Clear out the old photo files before saving new ones, so a
-            # resubmission doesn't end up with a mix of old and new images.
-            if not config.PRESERVE_DISCORD_HISTORY:
-                for old_file in photo_dir_for(item_ids[0]).glob("*"):
-                    old_file.unlink(missing_ok=True)
+            quantity, note_text, quantity_clamped = 1, message.content or "", False
         else:
             quantity, note_text, quantity_clamped = parse_quantity(message.content or "")
-            item_ids = [
-                db.create_item(
-                    pallet_id=pallet_id, raw_description=note_text, photo_urls=[],
-                    submitted_by=message.author.id,
-                )
-                for _ in range(quantity)
-            ]
 
         # Each attachment is only downloaded from Discord once, then written
-        # into every item's own photo folder - identical items still get
-        # fully independent files (and independent R2 uploads below), so
-        # deleting/editing one later can never affect another.
+        # into every item's own photo folder (see ingest_data_entry).
         attachments_data = []
         for attachment in message.attachments:
             ext = Path(attachment.filename).suffix or ".jpg"
             attachments_data.append((ext, await attachment.read()))
 
+        async def delete_submission(item_ids):
+            if not config.PRESERVE_DISCORD_HISTORY:
+                try:
+                    await message.delete()
+                except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                    pass
+
+        await self.ingest_data_entry(
+            pallet_id, note_text, attachments_data, message.author.id, quantity=quantity,
+            quantity_clamped=quantity_clamped, resubmit_item=resubmit_item,
+            submission_tag=str(message.id) if config.PRESERVE_DISCORD_HISTORY else None,
+            before_announce=delete_submission,
+        )
+
+    async def ingest_data_entry(self, pallet_id: int, note_text: str, photos: list, actor_id: int, *,
+                                quantity: int = 1, quantity_clamped: bool = False, resubmit_item: dict = None,
+                                submission_tag: str = None, before_announce=None) -> list:
+        """
+        Logs new item(s) - or a rejected item's resubmission - exactly as a
+        #data-entry post does, then sends them on to Automated Review. Shared
+        by the #data-entry message handler and the web dashboard's phone
+        intake. `photos` is [(file extension, bytes)]; `before_announce` is
+        awaited after everything's saved and before the "✅ Item #N logged"
+        line is posted, with the new item IDs (Discord uses it to delete the
+        submission message; the web dashboard to answer before AI review runs).
+        Item creation is serialized per pallet so two people submitting at
+        once can't race for the same item number. Returns the item IDs.
+        """
+        pallet = db.get_pallet(pallet_id)
+        data_entry_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "data-entry"))
+        async with _intake_lock(pallet_id):
+            if resubmit_item:
+                item_ids = [resubmit_item["id"]]
+                # Clear out the old photo files before saving new ones, so a
+                # resubmission doesn't end up with a mix of old and new images.
+                if not config.PRESERVE_DISCORD_HISTORY:
+                    for old_file in photo_dir_for(item_ids[0]).glob("*"):
+                        old_file.unlink(missing_ok=True)
+            else:
+                item_ids = [
+                    db.create_item(pallet_id=pallet_id, raw_description=note_text, photo_urls=[],
+                                   submitted_by=actor_id)
+                    for _ in range(quantity)
+                ]
+
+        # Identical items still get fully independent files (and independent
+        # R2 uploads below), so deleting/editing one later can never affect
+        # another.
         saved_paths_by_item = {}
         for item_id in item_ids:
             folder = photo_dir_for(item_id)
             if config.PRESERVE_DISCORD_HISTORY:
-                folder = folder / f"submission-{message.id}"
+                folder = folder / f"submission-{submission_tag or secrets.token_hex(6)}"
                 folder.mkdir(parents=True, exist_ok=False)
+            else:
+                folder.mkdir(parents=True, exist_ok=True)
             saved_paths = []
-            for i, (ext, data) in enumerate(attachments_data):
+            for i, (ext, data) in enumerate(photos):
                 dest = folder / f"photo_{i}{ext}"
                 dest.write_bytes(data)
                 saved_paths.append(str(dest))
             saved_paths_by_item[item_id] = saved_paths
 
         if resubmit_item:
-            db.resubmit_item(item_ids[0], note_text, saved_paths_by_item[item_ids[0]], submitted_by=message.author.id)
+            db.resubmit_item(item_ids[0], note_text, saved_paths_by_item[item_ids[0]], submitted_by=actor_id)
             # Delete the old rejected card - it's been superseded by this
             # resubmission, so leaving it around would just be a duplicate.
-            try:
-                old_msg = await old_card_channel.fetch_message(resubmit_item["current_message_id"])
-            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-                old_msg = None
+            old_msg = None
+            if data_entry_channel is not None and resubmit_item.get("current_message_id"):
+                try:
+                    old_msg = await data_entry_channel.fetch_message(resubmit_item["current_message_id"])
+                except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                    old_msg = None
             if old_msg:
                 await self._clear_old_card(old_msg, item_ids[0], "resubmit after rejection")
         else:
@@ -1222,8 +1278,8 @@ class ItemFlow(commands.Cog):
 
         # Local copy above is what Discord item cards render from (send_item_card
         # reads local files). This adds a second, durable copy in R2 so anything
-        # that needs to stay valid long-term (the eBay CSV's PicURL, future item
-        # records) doesn't depend on Discord's attachment links, which expire
+        # that needs to stay valid long-term (List on eBay's photos, the web
+        # dashboard) doesn't depend on Discord's attachment links, which expire
         # once the originating message is gone. Best-effort: one failed upload
         # doesn't block Data Entry, it just leaves that photo's URL empty.
         # boto3 is synchronous, so each upload runs in a thread rather than
@@ -1242,13 +1298,9 @@ class ItemFlow(commands.Cog):
                         public_urls.append(None)
                 db.update_photo_public_urls(item_id, public_urls)
 
-        if not config.PRESERVE_DISCORD_HISTORY:
-            try:
-                await message.delete()
-            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-                pass
+        if before_announce is not None:
+            await before_announce(item_ids)
 
-        pallet = db.get_pallet(pallet_id)
         item_numbers = [db.get_item(i)["item_number"] for i in item_ids]
         numbers_text = ", ".join(f"#{n}" for n in item_numbers)
         resubmit_note = " (resubmitted)" if resubmit_item else ""
@@ -1268,10 +1320,11 @@ class ItemFlow(commands.Cog):
         item_word = "Item" if len(item_ids) == 1 else "Items"
         sticker_line = "write that number on the box" if len(item_ids) == 1 \
             else "write the matching number on each box"
-        await message.channel.send(
-            f"✅ **{item_word} {numbers_text}** logged for **{pallet['name']}**{resubmit_note} - "
-            f"{sticker_line}."
-        )
+        if data_entry_channel is not None:
+            await data_entry_channel.send(
+                f"✅ **{item_word} {numbers_text}** logged for **{pallet['name']}**{resubmit_note} - "
+                f"{sticker_line}."
+            )
 
         # Either new item(s) were received, or a rejected one just got fixed -
         # either way the pallet's stage counts changed, so refresh its card.
@@ -1281,12 +1334,13 @@ class ItemFlow(commands.Cog):
             db.resolve_channel_id(pallet_id, "automated-review")
         )
         if automated_review_channel is None:
-            await message.channel.send(
-                "⚠️ The shared Automated Review channel isn't set up yet - ask a Pallet Admin "
-                "to run `/setup shared-channels`. This item was logged but won't move further "
-                "until that's done.",
-            )
-            return
+            if data_entry_channel is not None:
+                await data_entry_channel.send(
+                    "⚠️ The shared Automated Review channel isn't set up yet - ask a Pallet Admin "
+                    "to run `/setup shared-channels`. This item was logged but won't move further "
+                    "until that's done.",
+                )
+            return item_ids
 
         if not config.AI_ENABLED:
             await automated_review_channel.send(
@@ -1295,12 +1349,13 @@ class ItemFlow(commands.Cog):
             )
             for item_id in item_ids:
                 await self.send_to_queue_review(item_id)
-            return
+            return item_ids
 
         placeholder = await automated_review_channel.send(
             f"🔄 Reviewing **{pallet['name']}** item(s) {numbers_text}{resubmit_note}{quantity_note}...{clamp_note}"
         )
         await self.run_ai_review(item_ids, placeholder)
+        return item_ids
 
     async def send_to_queue_review(self, item_id: int):
         """Moves an item into Queue Review without an AI pass - used both when
@@ -1491,13 +1546,11 @@ class ItemFlow(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await self._clear_old_card(interaction.message, item_id, "send back for AI re-review")
-
-        pallet = db.get_pallet(pallet_id)
-        placeholder = await automated_review_channel.send(
-            f"🔄 Re-reviewing **{pallet['name']}** item #{item['item_number']}..."
-        )
-        await self.run_ai_review([item_id], placeholder)
+        try:
+            await self.do_rereview(item_id, interaction.user.id, old_card=interaction.message)
+        except ActionError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
         await interaction.followup.send(
             f"Sent item #{item['item_number']} back for AI re-review - see the Automated Review channel.",
             ephemeral=True,
@@ -1556,48 +1609,16 @@ class ItemFlow(commands.Cog):
         # response, unlike everything checked above. Defer now, before any
         # of that, and use a followup for the final confirmation instead.
         await interaction.response.defer(ephemeral=True, thinking=True)
-
-        db.save_ebay_listing_data(
-            item_id, ebay_title=title, category_id=category_id, condition_id=condition_id,
-            price=price, item_specifics=specifics, listing_format=listing_format,
-            auction_duration=auction_duration, weight_lb=weight_lb, length_in=length_in,
-            width_in=width_in, height_in=height_in, actor_id=interaction.user.id,
-        )
-        db.record_ebay_category_use(category_id)
-
-        pallet_id = item["pallet_id"]
-        channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "awaiting-listing"))
-        view = AwaitingListingView(item_id)
-        msg = await send_item_card(channel, item, view=view)
-        db.update_status(item_id, db.STATUS_AWAITING_LISTING, actor_id=interaction.user.id, new_message_id=msg.id)
-
-        # The modal's interaction isn't attached to the original queue-review
-        # card message (unlike a direct button click), so that card has to be
-        # fetched and removed explicitly instead of via interaction.message.
-        old_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "queue-review"))
-        if old_channel and item.get("current_message_id"):
-            try:
-                old_msg = await old_channel.fetch_message(item["current_message_id"])
-            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-                old_msg = None
-            if old_msg:
-                await self._clear_old_card(old_msg, item_id, "approve out of Queue Review")
-
-        condition_label = config.EBAY_CONDITION_LABELS.get(condition_id, condition_id)
-        format_note = (
-            f"Auction, {dict(config.EBAY_AUCTION_DURATIONS).get(auction_duration, auction_duration)}, "
-            f"starting bid ${price:.2f}"
-            if listing_format == "Auction" else
-            f"Fixed Price, ${price:.2f}"
-        )
-        specifics_note = await self._missing_specifics_note(category_id, specifics, item["item_number"])
-        await interaction.followup.send(
-            f"Approved. eBay listing data saved (condition: **{condition_label}**, {format_note}, "
-            f"{weight_lb:g} lb, {length_in:g}x{width_in:g}x{height_in:g} in). "
-            f"Moved to <#{channel.id}> for listing.{specifics_note}",
-            ephemeral=True,
-        )
-        await finance_utils.refresh_finance_message(self.bot, pallet_id)
+        try:
+            result = await self.do_approve(
+                item_id, interaction.user.id, condition_id, category_id, title, price, specifics,
+                listing_format=listing_format, auction_duration=auction_duration, weight_lb=weight_lb,
+                length_in=length_in, width_in=width_in, height_in=height_in,
+            )
+        except ActionError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
+        await interaction.followup.send(result["message"], ephemeral=True)
 
     async def _missing_specifics_note(self, category_id: str, specifics: dict, item_number: int) -> str:
         """A warning line naming item specifics eBay REQUIRES for this
@@ -1644,7 +1665,10 @@ class ItemFlow(commands.Cog):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            result = await ebay_api.create_listing(item, listing)
+            result = await self.do_list_on_ebay(item_id, interaction.user.id, old_card=interaction.message)
+        except ActionError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
         except NotImplementedError as e:
             await interaction.followup.send(f"⚠️ {e}", ephemeral=True)
             return
@@ -1656,25 +1680,7 @@ class ItemFlow(commands.Cog):
                 ephemeral=True,
             )
             return
-
-        if result.get("ebay_item_id"):
-            db.set_ebay_item_id(item_id, result["ebay_item_id"])
-        # A real, live listing - so the category picker can trust this
-        # category as "proven to work on eBay" and sort it first.
-        db.record_ebay_category_confirmed(listing["category_id"])
-
-        pallet_id = item["pallet_id"]
-        channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
-        view = ListedView(item_id)
-        msg = await send_item_card(
-            channel, item, view=view,
-            extra_text=f"✅ Listed live on eBay (item ID: {result.get('ebay_item_id', '?')}).",
-            destination_status=db.STATUS_LISTED,
-        )
-        db.update_status(item_id, db.STATUS_LISTED, actor_id=interaction.user.id, new_message_id=msg.id)
-        await self._clear_old_card(interaction.message, item_id, "list on eBay (API)")
-        await interaction.followup.send(f"Listed live on eBay. See <#{channel.id}>.", ephemeral=True)
-        await finance_utils.refresh_finance_message(self.bot, pallet_id)
+        await interaction.followup.send(f"Listed live on eBay. See <#{result['channel_id']}>.", ephemeral=True)
 
     async def open_edit_listing_details(self, interaction: discord.Interaction, item_id: int):
         """'Edit Details' on an Awaiting Listing card - reopens the Approve
@@ -1716,19 +1722,17 @@ class ItemFlow(commands.Cog):
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        db.save_ebay_listing_data(
-            item_id, ebay_title=title, category_id=listing["category_id"], condition_id=listing["condition_id"],
-            price=price, item_specifics=specifics, listing_format=listing["listing_format"],
-            auction_duration=listing["auction_duration"], weight_lb=weight_lb, length_in=length_in,
-            width_in=width_in, height_in=height_in, actor_id=interaction.user.id,
-        )
-        note = await self._missing_specifics_note(listing["category_id"], specifics, item["item_number"])
+        try:
+            note = await self.do_save_listing_details(item_id, interaction.user.id, title, price, specifics,
+                                                      weight_lb, length_in, width_in, height_in)
+        except ActionError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
         await interaction.followup.send(
             f"✏️ Saved item #{item['item_number']}'s listing details (${price:.2f}). "
             f"Tap **List on eBay** when ready.{note}",
             ephemeral=True,
         )
-        await finance_utils.refresh_finance_message(self.bot, item["pallet_id"])
 
     async def place_item_on_hold(self, item: dict, reason: str, note: str, actor_id: int) -> bool:
         """
@@ -1833,17 +1837,230 @@ class ItemFlow(commands.Cog):
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await self.do_reject(item_id, interaction.user.id, old_card=interaction.message)
+        except ActionError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
+        await interaction.followup.send("Sent back to Data Entry.", ephemeral=True)
+
+    # ------------------------------------------------------ shared actions --
+    # One function per pipeline action, used by BOTH the Discord buttons
+    # (which pass the card they were clicked on as old_card) and the web
+    # dashboard (old_card=None -> the item's current card is looked up).
+    # Each re-checks the item's status and raises ActionError if it moved
+    # on, so a click on one side after the other already acted is harmless.
+
+    def _expect_status(self, item_id: int, status: str) -> dict:
+        item = db.get_item(item_id)
+        if not item:
+            raise ActionError("That item doesn't exist.")
+        if item["status"] != status:
+            raise ActionError(f"This item was already moved on (current status: {item['status']}). "
+                              f"Someone likely acted on it at the same time as you.")
+        return item
+
+    async def _old_card(self, item: dict, stage: str, old_card):
+        return old_card if old_card is not None else await self._fetch_current_card(item, stage)
+
+    async def do_approve(self, item_id: int, actor_id: int, condition_id: str, category_id: str, title: str,
+                         price: float, specifics: dict, listing_format: str = "FixedPrice",
+                         auction_duration: str = None, weight_lb: float = None, length_in: float = None,
+                         width_in: float = None, height_in: float = None) -> dict:
+        """Approve out of Queue Review: saves the eBay listing data and moves
+        the item to Awaiting Listing. Returns {'channel_id', 'message'}."""
+        item = self._expect_status(item_id, db.STATUS_QUEUE_REVIEW)
+        db.save_ebay_listing_data(
+            item_id, ebay_title=title, category_id=category_id, condition_id=condition_id,
+            price=price, item_specifics=specifics, listing_format=listing_format,
+            auction_duration=auction_duration, weight_lb=weight_lb, length_in=length_in,
+            width_in=width_in, height_in=height_in, actor_id=actor_id,
+        )
+        db.record_ebay_category_use(category_id)
+
+        pallet_id = item["pallet_id"]
+        channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "awaiting-listing"))
+        msg = await send_item_card(channel, item, view=AwaitingListingView(item_id))
+        db.update_status(item_id, db.STATUS_AWAITING_LISTING, actor_id=actor_id, new_message_id=msg.id)
+
+        # The approve form isn't attached to the original queue-review card
+        # message, so that card is always fetched and removed explicitly.
+        old_msg = await self._fetch_current_card(item, "queue-review")
+        if old_msg:
+            await self._clear_old_card(old_msg, item_id, "approve out of Queue Review")
+
+        condition_label = config.EBAY_CONDITION_LABELS.get(condition_id, condition_id)
+        format_note = (
+            f"Auction, {dict(config.EBAY_AUCTION_DURATIONS).get(auction_duration, auction_duration)}, "
+            f"starting bid ${price:.2f}"
+            if listing_format == "Auction" else
+            f"Fixed Price, ${price:.2f}"
+        )
+        specifics_note = await self._missing_specifics_note(category_id, specifics, item["item_number"])
+        size = ""
+        if weight_lb is not None and None not in (length_in, width_in, height_in):
+            size = f", {weight_lb:g} lb, {length_in:g}x{width_in:g}x{height_in:g} in"
+        await finance_utils.refresh_finance_message(self.bot, pallet_id)
+        return {
+            "channel_id": channel.id,
+            "message": (f"Approved. eBay listing data saved (condition: **{condition_label}**, {format_note}{size}). "
+                        f"Moved to <#{channel.id}> for listing.{specifics_note}"),
+            "specifics_note": specifics_note,
+        }
+
+    async def do_edit_description(self, item_id: int, text: str, actor_id: int, old_card=None):
+        """Queue Review's Edit description - saves it and updates the card."""
+        item = self._expect_status(item_id, db.STATUS_QUEUE_REVIEW)
+        if config.PRESERVE_DISCORD_HISTORY:
+            channel = self.bot.get_channel(db.resolve_channel_id(item["pallet_id"], "queue-review"))
+            updated = {**item, "ai_description": text}
+            msg = await send_item_card(channel, updated, view=QueueReviewView(item_id),
+                                       destination_status=db.STATUS_QUEUE_REVIEW)
+            db.update_description(item_id, text)
+            db.update_status(item_id, db.STATUS_QUEUE_REVIEW, actor_id=actor_id, new_message_id=msg.id,
+                             note="Description edited; previous Discord card preserved")
+            return
+        db.update_description(item_id, text)
+        card = await self._old_card(item, "queue-review", old_card)
+        if card is not None:
+            try:
+                all_embeds = list(card.embeds)
+                all_embeds[0].description = text
+                await card.edit(embeds=all_embeds)
+            except (*discord_resilience.TRANSIENT_DISCORD_ERRORS, IndexError):
+                pass
+
+    async def do_rereview(self, item_id: int, actor_id: int, old_card=None):
+        """Queue Review's Re-review (AI) - sends the item back through AI review."""
+        if not config.AI_ENABLED:
+            raise ActionError("AI review isn't configured, so there's nothing to re-run.")
+        item = self._expect_status(item_id, db.STATUS_QUEUE_REVIEW)
+        pallet_id = item["pallet_id"]
+        automated_review_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "automated-review"))
+        if automated_review_channel is None:
+            raise ActionError("The shared Automated Review channel isn't set up - ask a Pallet Admin to run "
+                              "`/setup shared-channels`.")
+        card = await self._old_card(item, "queue-review", old_card)
+        if card is not None:
+            await self._clear_old_card(card, item_id, "send back for AI re-review")
+        pallet = db.get_pallet(pallet_id)
+        placeholder = await automated_review_channel.send(
+            f"🔄 Re-reviewing **{pallet['name']}** item #{item['item_number']}..."
+        )
+        await self.run_ai_review([item_id], placeholder)
+
+    async def do_reject(self, item_id: int, actor_id: int, reason: str = None, old_card=None):
+        """Queue Review's Reject - back to the pallet's Data Entry channel."""
+        item = self._expect_status(item_id, db.STATUS_QUEUE_REVIEW)
         pallet_id = item["pallet_id"]
         channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "data-entry"))
+        why = f"Reason: {reason.strip()}\n" if reason and reason.strip() else ""
         msg = await send_item_card(
             channel, item,
-            extra_text="⬅️ Sent back for redo - REPLY to this message with corrected photo(s)/note to resubmit "
-                       "(don't post a fresh message, or it'll be logged as a separate item).",
+            extra_text=f"{why}⬅️ Sent back for redo - REPLY to this message with corrected photo(s)/note to "
+                       "resubmit (don't post a fresh message, or it'll be logged as a separate item).",
         )
-        db.update_status(item_id, db.STATUS_REJECTED, actor_id=interaction.user.id, new_message_id=msg.id)
-        await self._clear_old_card(interaction.message, item_id, "reject to Data Entry")
-        await interaction.followup.send("Sent back to Data Entry.", ephemeral=True)
+        db.update_status(item_id, db.STATUS_REJECTED, actor_id=actor_id, new_message_id=msg.id,
+                         note=f"Rejected: {reason.strip()}" if reason and reason.strip() else None)
+        card = await self._old_card(item, "queue-review", old_card)
+        if card is not None:
+            await self._clear_old_card(card, item_id, "reject to Data Entry")
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
+
+    async def do_list_on_ebay(self, item_id: int, actor_id: int, old_card=None) -> dict:
+        """Awaiting Listing's List on eBay. Lets eBay's own errors
+        (ebay_api.EbayAPIError, NotImplementedError) propagate."""
+        if not config.EBAY_ENABLED:
+            raise ActionError("Direct eBay API listing isn't enabled.")
+        item = self._expect_status(item_id, db.STATUS_AWAITING_LISTING)
+        listing = db.get_ebay_listing_data(item_id)
+        if not listing:
+            raise ActionError("No eBay listing data was captured for this item during Queue Review.")
+        result = await ebay_api.create_listing(item, listing)
+        if result.get("ebay_item_id"):
+            db.set_ebay_item_id(item_id, result["ebay_item_id"])
+        # A real, live listing - so the category picker can trust this
+        # category as "proven to work on eBay" and sort it first.
+        db.record_ebay_category_confirmed(listing["category_id"])
+
+        pallet_id = item["pallet_id"]
+        channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
+        msg = await send_item_card(
+            channel, item, view=ListedView(item_id),
+            extra_text=f"✅ Listed live on eBay (item ID: {result.get('ebay_item_id', '?')}).",
+            destination_status=db.STATUS_LISTED,
+        )
+        db.update_status(item_id, db.STATUS_LISTED, actor_id=actor_id, new_message_id=msg.id)
+        card = await self._old_card(item, "awaiting-listing", old_card)
+        if card is not None:
+            await self._clear_old_card(card, item_id, "list on eBay (API)")
+        await finance_utils.refresh_finance_message(self.bot, pallet_id)
+        return {"channel_id": channel.id, "ebay_item_id": result.get("ebay_item_id")}
+
+    async def do_save_listing_details(self, item_id: int, actor_id: int, title: str, price: float, specifics: dict,
+                                      weight_lb: float, length_in: float, width_in: float, height_in: float) -> str:
+        """Awaiting Listing's Edit Details - only the fields that form shows;
+        condition/category/format stay as approved. Returns any
+        missing-item-specifics warning."""
+        item = db.get_item(item_id)
+        listing = db.get_ebay_listing_data(item_id)
+        if not item or item["status"] != db.STATUS_AWAITING_LISTING or not listing:
+            raise ActionError("This item isn't waiting to be listed anymore - nothing was changed.")
+        db.save_ebay_listing_data(
+            item_id, ebay_title=title, category_id=listing["category_id"], condition_id=listing["condition_id"],
+            price=price, item_specifics=specifics, listing_format=listing["listing_format"],
+            auction_duration=listing["auction_duration"], weight_lb=weight_lb, length_in=length_in,
+            width_in=width_in, height_in=height_in, actor_id=actor_id,
+        )
+        note = await self._missing_specifics_note(listing["category_id"], specifics, item["item_number"])
+        await finance_utils.refresh_finance_message(self.bot, item["pallet_id"])
+        return note
+
+    async def do_mark_listed(self, item_id: int, actor_id: int, old_card=None) -> int:
+        """Awaiting Listing's Mark Listed (Other). Returns the #listed channel ID."""
+        item = self._expect_status(item_id, db.STATUS_AWAITING_LISTING)
+        pallet_id = item["pallet_id"]
+        channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
+        msg = await send_item_card(channel, item, view=ListedView(item_id), destination_status=db.STATUS_LISTED)
+        db.update_status(item_id, db.STATUS_LISTED, actor_id=actor_id, new_message_id=msg.id)
+        card = await self._old_card(item, "awaiting-listing", old_card)
+        if card is not None:
+            await self._clear_old_card(card, item_id, "mark listed (other)")
+        await finance_utils.refresh_finance_message(self.bot, pallet_id)
+        return channel.id
+
+    async def do_mark_sold(self, item_id: int, platform: str, actor_id: int, old_card=None) -> int:
+        """Listed's Mark as Sold, once a platform's been picked. Returns the #sold channel ID."""
+        item = self._expect_status(item_id, db.STATUS_LISTED)
+        pallet_id = item["pallet_id"]
+        db.record_sale_platform(item_id, platform, actor_id=actor_id)
+        channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "sold"))
+        msg = await send_item_card(channel, item, view=ShippedView(item_id), destination_status=db.STATUS_SOLD)
+        db.update_status(item_id, db.STATUS_SOLD, actor_id=actor_id, new_message_id=msg.id)
+        card = await self._old_card(item, "listed", old_card)
+        if card is not None:
+            await self._clear_old_card(card, item_id, "mark sold")
+        await self._post_to_accounting_channel(item_id, platform)
+        await finance_utils.refresh_finance_message(self.bot, pallet_id)
+        return channel.id
+
+    async def do_mark_shipped(self, item_id: int, actor_id: int, old_card=None):
+        """Sold's Mark as Shipped."""
+        item = db.get_item(item_id)
+        if not item or item["status"] != db.STATUS_SOLD:
+            raise ActionError(f"This item isn't in Sold-awaiting-shipment (current status: "
+                              f"{item['status'] if item else 'missing'}).")
+        if config.PRESERVE_DISCORD_HISTORY:
+            channel = self.bot.get_channel(db.resolve_channel_id(item["pallet_id"], "sold"))
+            msg = await send_item_card(channel, item, destination_status=db.STATUS_SHIPPED,
+                                       extra_text="Shipped; previous card preserved")
+            db.update_status(item_id, db.STATUS_SHIPPED, actor_id=actor_id, new_message_id=msg.id)
+            return
+        db.update_status(item_id, db.STATUS_SHIPPED, actor_id=actor_id)
+        card = await self._old_card(item, "sold", old_card)
+        if card is not None:
+            await self._show_card_as_shipped(card, item)
+        await finance_utils.refresh_finance_message(self.bot, item["pallet_id"])
 
     # ------------------------------------------------------ admin move-back --
 
@@ -1949,14 +2166,12 @@ class ItemFlow(commands.Cog):
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        pallet_id = item["pallet_id"]
-        channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "listed"))
-        view = ListedView(item_id)
-        msg = await send_item_card(channel, item, view=view, destination_status=db.STATUS_LISTED)
-        db.update_status(item_id, db.STATUS_LISTED, actor_id=interaction.user.id, new_message_id=msg.id)
-        await self._clear_old_card(interaction.message, item_id, "mark listed (other)")
-        await interaction.followup.send(f"Marked listed. See <#{channel.id}>.", ephemeral=True)
-        await finance_utils.refresh_finance_message(self.bot, pallet_id)
+        try:
+            channel_id = await self.do_mark_listed(item_id, interaction.user.id, old_card=interaction.message)
+        except ActionError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
+        await interaction.followup.send(f"Marked listed. See <#{channel_id}>.", ephemeral=True)
 
     async def move_to_sold(self, interaction: discord.Interaction, item_id: int):
         if not await self._require_role(interaction, config.ROLE_LISTING_MGMT):
@@ -1993,24 +2208,20 @@ class ItemFlow(commands.Cog):
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        pallet_id = item["pallet_id"]
-        db.record_sale_platform(item_id, platform, actor_id=interaction.user.id)
-        channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "sold"))
-        view = ShippedView(item_id)
-        msg = await send_item_card(channel, item, view=view, destination_status=db.STATUS_SOLD)
-        db.update_status(item_id, db.STATUS_SOLD, actor_id=interaction.user.id, new_message_id=msg.id)
-        await self._clear_old_card(source_message, item_id, "mark sold")
-        await self._post_to_accounting_channel(item_id, platform)
+        try:
+            channel_id = await self.do_mark_sold(item_id, platform, interaction.user.id, old_card=source_message)
+        except ActionError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
         how = (
             "log the sale with **Confirm & log sale** on its #ebay-orders card"
             if platform.strip().lower() == "ebay" else "log the sale price with `/finance log-sale`"
         )
         await interaction.followup.send(
-            f"Marked sold via **{platform}**. 🎉 See <#{channel.id}>. It's now on the #accounting "
+            f"Marked sold via **{platform}**. 🎉 See <#{channel_id}>. It's now on the #accounting "
             f"list for Finance Management to {how}.",
             ephemeral=True,
         )
-        await finance_utils.refresh_finance_message(self.bot, pallet_id)
 
     async def _post_to_accounting_channel(self, item_id: int, platform: str):
         """
@@ -2051,18 +2262,15 @@ class ItemFlow(commands.Cog):
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await self.do_mark_shipped(item_id, interaction.user.id, old_card=interaction.message)
+        except ActionError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
         if config.PRESERVE_DISCORD_HISTORY:
-            channel = self.bot.get_channel(db.resolve_channel_id(item["pallet_id"], "sold"))
-            msg = await send_item_card(channel, item, destination_status=db.STATUS_SHIPPED,
-                                       extra_text="Shipped; previous card preserved")
-            db.update_status(item_id, db.STATUS_SHIPPED, actor_id=interaction.user.id,
-                             new_message_id=msg.id)
             await interaction.followup.send("Marked shipped. The earlier card was kept.", ephemeral=True)
             return
-        db.update_status(item_id, db.STATUS_SHIPPED, actor_id=interaction.user.id)
-        await self._show_card_as_shipped(interaction.message, item)
         await interaction.followup.send("Marked shipped.", ephemeral=True)
-        await finance_utils.refresh_finance_message(self.bot, item["pallet_id"])
 
     async def _show_card_as_shipped(self, message: discord.Message, item: dict, footer_note: str = ""):
         """Edits an item's #sold card in place to its Shipped look and removes

@@ -33,6 +33,9 @@ COGS = [
     "cogs.partners",
     "cogs.help",
 ]
+if config.WEB_DASHBOARD_ENABLED:
+    # Off by default - the web dashboard (webapp/), served from this process.
+    COGS.append("cogs.web_dashboard")
 if config.WEBSITE_SHOP_ENABLED:
     # Off by default (see config.WEBSITE_SHOP_ENABLED) - the module isn't
     # even imported unless this is explicitly turned on.

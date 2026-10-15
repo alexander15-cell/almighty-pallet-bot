@@ -678,6 +678,17 @@ def init_db():
             -- have a card in #ebay-orders, so the background job posts each
             -- once. kind: 'payout', 'refund' (key = order id + txn) or
             -- 'account' (key = YYYY-MM + txn).
+            -- Web dashboard sign-ins (webapp/auth.py). token_hash is the
+            -- SHA-256 of the session cookie, never the cookie itself.
+            CREATE TABLE IF NOT EXISTS web_sessions (
+                token_hash        TEXT PRIMARY KEY,
+                discord_user_id   INTEGER NOT NULL,
+                display_name      TEXT,
+                csrf_token        TEXT NOT NULL,
+                created_at        TEXT NOT NULL,
+                expires_at        TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS ebay_book_cards (
                 kind       TEXT NOT NULL,
                 card_key   TEXT NOT NULL,
@@ -2593,6 +2604,69 @@ def get_pallet_profit_inputs(pallet_id: int) -> dict:
             (pallet_id, STATUS_DELETED),
         )]
     return {"costs_by_type": costs, "items": items}
+
+
+# ------------------------------------------------------- web dashboard reads --
+
+def web_status_counts() -> dict:
+    """{status: n} across every pallet (deleted items left out)."""
+    with get_conn() as conn:
+        return {r["status"]: r["n"] for r in conn.execute(
+            "SELECT status, COUNT(*) AS n FROM items WHERE status != ? GROUP BY status", (STATUS_DELETED,))}
+
+
+def web_search_items(statuses: list = None, pallet_id: int = None, q: str = None, limit: int = 60,
+                     offset: int = 0) -> list:
+    """Items for the web inventory/review/listing lists, newest first, with
+    their pallet name and listing title/price. Read-only."""
+    where, params = ["i.status != ?"], [STATUS_DELETED]
+    if statuses:
+        where.append(f"i.status IN ({','.join('?' * len(statuses))})")
+        params += list(statuses)
+    if pallet_id:
+        where.append("i.pallet_id = ?")
+        params.append(pallet_id)
+    if q:
+        like = f"%{q.strip()}%"
+        where.append("(i.raw_description LIKE ? OR i.ai_title LIKE ? OR eld.ebay_title LIKE ? "
+                     "OR CAST(i.item_number AS TEXT) = ?)")
+        params += [like, like, like, q.strip().lstrip("#")]
+    sql = (f"""SELECT i.*, p.name AS pallet_name, eld.ebay_title, eld.price AS list_price, eld.ebay_item_id
+               FROM items i JOIN pallets p ON p.id = i.pallet_id
+               LEFT JOIN ebay_listing_data eld ON eld.item_id = i.id
+               WHERE {' AND '.join(where)} ORDER BY i.updated_at DESC, i.id DESC LIMIT ? OFFSET ?""")
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(sql, params + [limit, offset])]
+
+
+def get_item_events(item_id: int, limit: int = 50) -> list:
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM item_events WHERE item_id = ? ORDER BY id DESC LIMIT ?", (item_id, limit))]
+
+
+# ---------------------------------------------------------- web sessions --
+
+def create_web_session(token_hash: str, discord_user_id: int, display_name: str, csrf_token: str,
+                       expires_at: str):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM web_sessions WHERE expires_at < ?", (_now(),))
+        conn.execute(
+            "INSERT INTO web_sessions (token_hash, discord_user_id, display_name, csrf_token, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (token_hash, discord_user_id, display_name, csrf_token, _now(), expires_at),
+        )
+
+
+def get_web_session(token_hash: str):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM web_sessions WHERE token_hash = ?", (token_hash,)).fetchone()
+        return dict(row) if row else None
+
+
+def delete_web_session(token_hash: str):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM web_sessions WHERE token_hash = ?", (token_hash,))
 
 
 # ---------------------------------------------------- #accounting worklist --

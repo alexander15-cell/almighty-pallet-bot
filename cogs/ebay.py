@@ -79,6 +79,73 @@ async def _require_finance_role(interaction: discord.Interaction) -> bool:
     return False
 
 
+async def log_ebay_order_sale(bot, order_id: str, actor_id: int) -> dict:
+    """
+    The "Confirm & log sale" action for one eBay order - shared by the
+    #ebay-orders button and the web dashboard. Re-fetches the order from
+    eBay, refuses if an item was already logged, saves the sale, posts the
+    Sales Receipt and updates #accounting. Returns {'ok', 'message'} (plus
+    'sale_id' once a sale was saved).
+    """
+    try:
+        order = await ebay_api.get_order(order_id)
+    except ebay_api.EbayAPIError as e:
+        return {"ok": False, "message": f"Couldn't re-fetch this order from eBay: {e}"}
+
+    matched_items = _match_order_line_items(order)
+    if not matched_items:
+        return {"ok": False, "message": "None of this order's items match a tracked item anymore - nothing was submitted."}
+
+    # Re-checked here, not just when the poll loop first matched this
+    # order - the card can sit for a while, and another sale could
+    # have claimed one of these items in the meantime, same reasoning
+    # as /finance log-sale's own confirmation step.
+    already_sold = [item for item in matched_items if db.get_item_sale(item["id"])]
+    if already_sold:
+        names = ", ".join(f"#{item['item_number']}" for item in already_sold)
+        return {"ok": False, "message": f"Item(s) {names} were already logged in another sale - nothing was submitted."}
+
+    n = len(matched_items)
+    allocated_shares = finance_utils.split_evenly(order["total_price"], n)
+    sale_id = db.create_sale("eBay", order["sale_date"], order["total_price"], False, created_by=actor_id)
+
+    affected_pallets = set()
+    for i, item in enumerate(matched_items):
+        db.add_sale_item(sale_id, item["id"], allocated_shares[i])
+        db.record_item_sale(item["id"], allocated_shares[i], "eBay", actor_id=actor_id)
+        affected_pallets.add(item["pallet_id"])
+
+    for pallet_id in affected_pallets:
+        await finance_utils.refresh_finance_message(bot, pallet_id)
+
+    result = await finance_utils.post_sale_to_quickbooks(
+        sale_id, "eBay", order["total_price"], False, order["sale_date"],
+    )
+    await finance_utils.update_accounting_entries(
+        bot, sale_id, receipt_doc=result.get("sales_receipt_doc"), error=result.get("error"),
+    )
+    item_list = ", ".join(
+        f"{db.get_pallet(item['pallet_id'])['name']}#{item['item_number']}" for item in matched_items
+    )
+
+    if result["ok"]:
+        message = (
+            f"✅ Logged sale #{sale_id} ({item_list}) via **eBay** (order `{order_id}`).\n"
+            f"Sales Receipt: `{result['sales_receipt_doc']}`"
+        )
+        await finance_utils.post_to_finance_audit_log(
+            bot,
+            f"💰 **Sale #{sale_id}** ({item_list}) via **eBay** - ${order['total_price']:.2f} "
+            f"(Sales Receipt `{result['sales_receipt_doc']}`) - via eBay order auto-sync",
+        )
+    else:
+        message = (
+            f"⚠️ Sale #{sale_id} saved, but QuickBooks failed: {result['error']}\n"
+            f"Run `/finance retry-sale sale_id:{sale_id}` once it's fixed - nothing was lost."
+        )
+    return {"ok": True, "message": message, "sale_id": sale_id}
+
+
 class EbayOrderConfirmButton(discord.ui.DynamicItem[discord.ui.Button], template=r"ebay_order_confirm:(?P<order_id>.+)"):
     """
     The button on every posted #ebay-orders card. A DynamicItem (same as
@@ -104,78 +171,13 @@ class EbayOrderConfirmButton(discord.ui.DynamicItem[discord.ui.Button], template
         if not await _require_finance_role(interaction):
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-
-        try:
-            order = await ebay_api.get_order(self.order_id)
-        except ebay_api.EbayAPIError as e:
-            await interaction.followup.send(f"Couldn't re-fetch this order from eBay: {e}", ephemeral=True)
-            return
-
-        matched_items = _match_order_line_items(order)
-        if not matched_items:
-            await interaction.followup.send(
-                "None of this order's items match a tracked item anymore - nothing was submitted.",
-                ephemeral=True,
-            )
-            return
-
-        # Re-checked here, not just when the poll loop first matched this
-        # order - the card can sit for a while, and another sale could
-        # have claimed one of these items in the meantime, same reasoning
-        # as /finance log-sale's own confirmation step.
-        already_sold = [item for item in matched_items if db.get_item_sale(item["id"])]
-        if already_sold:
-            names = ", ".join(f"#{item['item_number']}" for item in already_sold)
-            await interaction.followup.send(
-                f"Item(s) {names} were already logged in another sale - nothing was submitted.",
-                ephemeral=True,
-            )
-            return
-
-        try:
-            await interaction.message.edit(view=None)
-        except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-            pass
-
-        n = len(matched_items)
-        allocated_shares = finance_utils.split_evenly(order["total_price"], n)
-        sale_id = db.create_sale("eBay", order["sale_date"], order["total_price"], False, created_by=interaction.user.id)
-
-        affected_pallets = set()
-        for i, item in enumerate(matched_items):
-            db.add_sale_item(sale_id, item["id"], allocated_shares[i])
-            db.record_item_sale(item["id"], allocated_shares[i], "eBay", actor_id=interaction.user.id)
-            affected_pallets.add(item["pallet_id"])
-
-        for pallet_id in affected_pallets:
-            await finance_utils.refresh_finance_message(interaction.client, pallet_id)
-
-        result = await finance_utils.post_sale_to_quickbooks(
-            sale_id, "eBay", order["total_price"], False, order["sale_date"],
-        )
-        await finance_utils.update_accounting_entries(
-            interaction.client, sale_id, receipt_doc=result.get("sales_receipt_doc"), error=result.get("error"),
-        )
-        item_list = ", ".join(
-            f"{db.get_pallet(item['pallet_id'])['name']}#{item['item_number']}" for item in matched_items
-        )
-
-        if result["ok"]:
-            message = (
-                f"✅ Logged sale #{sale_id} ({item_list}) via **eBay** (order `{self.order_id}`).\n"
-                f"Sales Receipt: `{result['sales_receipt_doc']}`"
-            )
-            await finance_utils.post_to_finance_audit_log(
-                interaction.client,
-                f"💰 **Sale #{sale_id}** ({item_list}) via **eBay** - ${order['total_price']:.2f} "
-                f"(Sales Receipt `{result['sales_receipt_doc']}`) - via eBay order auto-sync",
-            )
-        else:
-            message = (
-                f"⚠️ Sale #{sale_id} saved, but QuickBooks failed: {result['error']}\n"
-                f"Run `/finance retry-sale sale_id:{sale_id}` once it's fixed - nothing was lost."
-            )
-        await interaction.followup.send(message, ephemeral=True)
+        result = await log_ebay_order_sale(interaction.client, self.order_id, interaction.user.id)
+        if result.get("sale_id"):
+            try:
+                await interaction.message.edit(view=None)
+            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                pass
+        await interaction.followup.send(result["message"], ephemeral=True)
 
 
 def _match_order_line_items(order: dict) -> list:

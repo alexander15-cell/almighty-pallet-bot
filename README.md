@@ -922,6 +922,52 @@ QuickBooks or with `/finance expense`) for an order, don't confirm its card
 off entirely. `/ebay net-report` accounts for fees booked this way, so its
 "profit using eBay net" doesn't subtract them twice.
 
+### Web dashboard
+
+The same bot as a website, alongside Discord - nothing in Discord changes,
+and anyone can use whichever they prefer. It runs inside the bot's own
+process on the bot's own database (`webapp/`, started by
+`cogs/web_dashboard.py`), and every action calls the same function its
+Discord button does (`ItemFlow.ingest_data_entry`, `do_approve`,
+`do_reject`, `do_list_on_ebay`, `do_mark_sold`, ..., `cogs.ebay.
+log_ebay_order_sale`, the fee/refund/payout confirms) - so the Discord cards
+move exactly as if someone had clicked there.
+
+- **Sign in with Discord.** Only members of the server holding one of the
+  bot's roles can sign in, and permissions come live from their Discord
+  roles on every page (Pallet Admin can do everything) - take a role away
+  in Discord and the website follows immediately. Sessions are 30 days;
+  only a SHA-256 of the cookie is stored.
+- **Pages:** 📷 phone intake (camera, up to 10 photos shrunk on the phone,
+  quantity, note; plus "sent back for redo" resubmits) · Queue review
+  (approve with condition / eBay category search / format / title / price /
+  weight / size / item specifics, edit description, reject with a reason,
+  AI re-review) · Listing (List on eBay, Edit details, Mark listed, Mark
+  sold with platform, Mark shipped, hold / resolve) · Inventory (search and
+  filter every item, photos, history) · Finance (everything waiting to be
+  confirmed - eBay sales, fees, refunds, account charges, payout deposits -
+  plus pallet profit, logged sales and payouts).
+- **Security:** every POST needs the session's CSRF token and a same-site
+  origin; strict content policy (no inline scripts), no framing; photos are
+  served only from paths recorded on the item and inside `PHOTO_DIR`;
+  uploads are re-checked as real images.
+
+**Turning it on (bot on a PC):**
+1. Discord Developer Portal → your bot's application → **OAuth2**: copy the
+   Client ID and reset/copy the Client Secret; under **Redirects** add
+   `https://<your dashboard address>/oauth/callback`.
+2. Cloudflare Zero Trust → Networks → **Tunnels** → create a tunnel, install
+   `cloudflared` on the bot's PC with the command it shows, and add a public
+   hostname (e.g. `dash.4guys1palletoverstock.com`) pointing to
+   `http://localhost:8080`. No router ports are opened, and you get https
+   (phone cameras need it).
+3. In `.env`: `WEB_DASHBOARD_ENABLED=true`, `WEB_BASE_URL=https://dash...`,
+   `DISCORD_CLIENT_ID=...`, `DISCORD_CLIENT_SECRET=...` (optionally
+   `WEB_PORT`). Restart the bot.
+
+Not on the website yet (use Discord): `/finance log-sale` for non-eBay
+sales, `/finance reverse-sale`, Start New Pallet, and admin commands.
+
 ### Refunds, account charges, payouts, and true pallet profit
 
 The rest of the eBay money trail, same rules as the fee cards (nothing

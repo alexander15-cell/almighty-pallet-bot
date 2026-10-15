@@ -81,6 +81,23 @@ WEBSITE_SECRET = os.getenv("WEBSITE_SECRET", "")
 WEBSITE_PUBLISH_ENABLED = os.getenv("WEBSITE_PUBLISH_ENABLED", "false").strip().lower() == "true"
 WEBSITE_SHOP_POLL_SECONDS = int(os.getenv("WEBSITE_SHOP_POLL_SECONDS") or "30")
 
+# ---- Web dashboard (webapp/, cogs/web_dashboard.py) ----
+# A website alongside Discord, on the same database - sign in with Discord,
+# same roles. Off unless WEB_DASHBOARD_ENABLED=true. Serve it to the internet
+# through a Cloudflare Tunnel pointed at http://WEB_HOST:WEB_PORT, and set
+# WEB_BASE_URL to the public https address (e.g. https://dash.example.com).
+WEB_DASHBOARD_ENABLED = os.getenv("WEB_DASHBOARD_ENABLED", "false").strip().lower() == "true"
+WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1").strip()
+WEB_PORT = int(os.getenv("WEB_PORT") or "8080")
+WEB_BASE_URL = os.getenv("WEB_BASE_URL", "http://localhost:8080").strip()
+# Discord Developer Portal -> your bot's application -> OAuth2: the Client
+# ID (same as the application ID) and Client Secret, and add
+# WEB_BASE_URL + "/oauth/callback" under Redirects.
+DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "").strip()
+DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "").strip()
+# Largest single photo upload accepted from the phone intake page (MB).
+WEB_MAX_UPLOAD_MB = int(os.getenv("WEB_MAX_UPLOAD_MB") or "15")
+
 # ---- Automated Review (AI) backend ----
 # "anthropic" (default) - Claude's cloud vision API, requires ANTHROPIC_API_KEY.
 # "ollama"    - a local Ollama server (https://ollama.com), no API key or

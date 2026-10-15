@@ -177,6 +177,11 @@ ENTRIES = (
         ("refund", "return", "store subscription", "listing fee", "insertion fee", "account charges"),
     ),
     HelpEntry(
+        "Web dashboard",
+        "The same bot as a website (if a Pallet Admin turned it on): sign in with Discord - your Discord roles decide what you can do. Phone intake with the camera, Queue Review and approving, listing/sold/shipped, inventory search, and Finance confirms. Everything stays in sync with Discord - use whichever you prefer.",
+        ("website", "web dashboard", "phone intake", "use on phone", "browser", "dashboard site"),
+    ),
+    HelpEntry(
         "/ebay order-card <order_id>",
         "Post the Confirm & log sale card for one eBay order whose card never appeared (refuses if already logged).",
         ("missing card", "order card", "no confirm button", "log ebay sale", "card didn't post"),
