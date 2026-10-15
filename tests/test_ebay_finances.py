@@ -24,7 +24,8 @@ import config
 import ebay_api
 import ebay_finances
 
-MIRROR_TABLES = {"ebay_fin_transactions", "ebay_order_breakdowns", "ebay_order_lines", "ebay_finance_sync_log"}
+MIRROR_TABLES = {"ebay_fin_transactions", "ebay_order_breakdowns", "ebay_order_lines", "ebay_finance_sync_log",
+                 "ebay_payouts"}
 PAST = "2025-01-01T00:00:00+00:00"
 
 
@@ -184,6 +185,8 @@ def _sync_responder(orders, txns):
             return 200, {"orders": orders, "total": len(orders)}
         if "/sell/finances/v1/transaction" in url:
             return 200, {"transactions": txns, "total": len(txns)}
+        if "/sell/finances/v1/payout" in url:
+            return 200, {"payouts": [], "total": 0}
         raise AssertionError(f"unexpected URL {url}")
     return responder
 

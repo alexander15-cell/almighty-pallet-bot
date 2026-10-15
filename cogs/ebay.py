@@ -39,6 +39,7 @@ import database as db
 import discord_resilience
 import ebay_api
 import ebay_aspects
+import ebay_books
 import ebay_fee_expenses
 import ebay_finances
 import ebay_listing_rules
@@ -47,6 +48,8 @@ import runtime_settings
 import status_checks
 
 log = logging.getLogger(__name__)
+
+NL = chr(10)
 
 
 def _is_pallet_admin(interaction: discord.Interaction) -> bool:
@@ -703,6 +706,237 @@ def build_net_report_csv(reports: list) -> bytes:
     return buf.getvalue().encode("utf-8")
 
 
+# ------------------------------------- refunds / account charges / payouts --
+# See ebay_books.py. Same pattern as the fee cards: a DynamicItem button
+# (survives restarts) that re-checks everything on click.
+
+def _bullet_lines(rows: list, limit: int = 1000) -> str:
+    text = NL.join(rows)
+    return text if len(text) <= limit else text[:limit].rsplit(NL, 1)[0] + NL + "…"
+
+
+def build_refund_card_embed(b: dict) -> discord.Embed:
+    items = ", ".join(_item_label(i) for i in b["items"]) or "(no tracked items)"
+    embed = discord.Embed(title="↩️ eBay refund to log", description=f"Order `{b['order_id']}` - {items}",
+                          color=discord.Color.red())
+    embed.add_field(name="On eBay", value=_bullet_lines([f"{c['label']}: {_money(c['amount'])}" for c in b["charges"]]),
+                    inline=False)
+    embed.add_field(name="Total", value=f"**{_money(b['total'])}**", inline=True)
+    embed.add_field(name="Confirm will", value=(
+        "• post a QuickBooks Journal Entry - debit refunds (lowers sales), credit Undeposited Funds" + NL +
+        "• lower the pallet's revenue by this amount" + NL +
+        "If the item came back, `/item move-back` puts it back up for sale."), inline=False)
+    embed.set_footer(text="Nothing is sent to QuickBooks until you confirm.")
+    return embed
+
+
+def build_account_card_embed(b: dict) -> discord.Embed:
+    month = datetime.strptime(b["month"], "%Y-%m").strftime("%B %Y")
+    embed = discord.Embed(title=f"🧾 eBay account charges - {month}",
+                          description="eBay charges not tied to any order (store subscription, listing fees, ...).",
+                          color=discord.Color.orange())
+    embed.add_field(name="Charges", value=_bullet_lines(
+        [f"{c['date']} {c['label']}: {_money(c['amount'])}" for c in b["charges"]]), inline=False)
+    embed.add_field(name="Total", value=f"**{_money(b['totals']['total'])}**", inline=True)
+    embed.add_field(name="Confirm will", value=(
+        "post a QuickBooks Journal Entry - debit the eBay fee/ad accounts, credit Undeposited Funds. "
+        "A listing fee for a tracked item also goes on its pallet's cost."), inline=False)
+    embed.set_footer(text="Nothing is sent to QuickBooks until you confirm.")
+    return embed
+
+
+def build_payout_card_embed(b: dict) -> discord.Embed:
+    payout = b["payout"] or {}
+    bank = payout.get("instrument_nickname") or "bank"
+    if payout.get("instrument_last4"):
+        bank += f" (…{payout['instrument_last4']})"
+    embed = discord.Embed(title=f"🏦 eBay payout {_money(b['amount'])}",
+                          description=f"Sent {(payout.get('payout_date') or '')[:10]} to {bank} · `{b['payout_id']}`",
+                          color=discord.Color.green() if b["ready"] else discord.Color.gold())
+    by_cat = b["booked_by_category"]
+    labels = {"fees": "eBay fees", "shipping": "Labels", "ads": "Ads/listing fees", "refunds": "Refunds"}
+    rows = [f"Sales ({len(b['sales'])}): {_money(b['sales_total'])}"]
+    rows += [f"{labels.get(k, k)}: -{_money(v)}" for k, v in by_cat.items() if v]
+    rows.append(f"**Undeposited Funds for this payout: {_money(b['expected'])}**")
+    embed.add_field(name="What's in it", value=NL.join(rows), inline=False)
+    if b["deposit"]:
+        embed.add_field(name="Status", value="✅ Already recorded in QuickBooks.", inline=False)
+    elif b["ready"]:
+        embed.add_field(name="Status", value=(
+            "✅ Everything in this payout is logged. Confirm records the QuickBooks Bank Deposit into the bank "
+            "account; then **Match** it to the bank-feed deposit in QuickBooks."), inline=False)
+    else:
+        embed.add_field(name="Waiting on", value=_bullet_lines([f"• {p}" for p in b["problems"]]), inline=False)
+    embed.set_footer(text="Confirm re-checks everything first. Nothing is sent to QuickBooks until you confirm.")
+    return embed
+
+
+class EbayRefundConfirmButton(discord.ui.DynamicItem[discord.ui.Button], template=r"ebay_refund_confirm:(?P<order_id>.+)"):
+    def __init__(self, order_id: str):
+        super().__init__(discord.ui.Button(label="Confirm & log refund", style=discord.ButtonStyle.danger, emoji="↩️",
+                                           custom_id=f"ebay_refund_confirm:{order_id}"))
+        self.order_id = order_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(match["order_id"])
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await _require_finance_role(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        result = await ebay_books.confirm_order_refund(self.order_id, actor_id=interaction.user.id)
+        if not result["ok"]:
+            await interaction.followup.send(result["message"], ephemeral=True)
+            return
+        await _finish_book_card(interaction, result["pallet_ids"])
+        b = result["breakdown"]
+        await finance_utils.post_to_finance_audit_log(
+            interaction.client,
+            f"↩️ **eBay refund** for order `{self.order_id}` - {_money(b['total'])} "
+            f"(Journal Entry `{result['je_doc']}`: debit refunds, credit Undeposited Funds)")
+        await interaction.followup.send(
+            f"✅ Logged the {_money(b['total'])} refund for order `{self.order_id}` - Journal Entry "
+            f"`{result['je_doc']}`. The pallet's revenue is lowered to match.", ephemeral=True)
+
+
+class EbayAccountChargesButton(discord.ui.DynamicItem[discord.ui.Button], template=r"ebay_account_confirm:(?P<month>\d{4}-\d{2})"):
+    def __init__(self, month: str):
+        super().__init__(discord.ui.Button(label="Confirm & log charges", style=discord.ButtonStyle.success, emoji="🧾",
+                                           custom_id=f"ebay_account_confirm:{month}"))
+        self.month = month
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(match["month"])
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await _require_finance_role(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        result = await ebay_books.confirm_account_charges(self.month, actor_id=interaction.user.id)
+        if not result["ok"]:
+            await interaction.followup.send(result["message"], ephemeral=True)
+            return
+        await _finish_book_card(interaction, result["pallet_ids"])
+        total = result["breakdown"]["totals"]["total"]
+        await finance_utils.post_to_finance_audit_log(
+            interaction.client,
+            f"🧾 **eBay account charges** for {self.month} - {_money(total)} (Journal Entry `{result['je_doc']}`; "
+            "credited Undeposited Funds)")
+        await interaction.followup.send(
+            f"✅ Logged {_money(total)} of eBay account charges for {self.month} - Journal Entry `{result['je_doc']}`.",
+            ephemeral=True)
+
+
+class EbayPayoutConfirmButton(discord.ui.DynamicItem[discord.ui.Button], template=r"ebay_payout_confirm:(?P<payout_id>.+)"):
+    def __init__(self, payout_id: str):
+        super().__init__(discord.ui.Button(label="Confirm & record deposit", style=discord.ButtonStyle.success, emoji="🏦",
+                                           custom_id=f"ebay_payout_confirm:{payout_id}"))
+        self.payout_id = payout_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(match["payout_id"])
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await _require_finance_role(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        result = await ebay_books.confirm_payout(self.payout_id, actor_id=interaction.user.id)
+        if not result["ok"]:
+            await interaction.followup.send(result["message"][:1900], ephemeral=True)
+            return
+        await _finish_book_card(interaction, [], embed=build_payout_card_embed(ebay_books.payout_breakdown(self.payout_id)))
+        b = result["breakdown"]
+        kind = "Bank Deposit" if result["txn_type"] == "Deposit" else "Journal Entry"
+        await finance_utils.post_to_finance_audit_log(
+            interaction.client,
+            f"🏦 **eBay payout** `{self.payout_id}` - {_money(b['amount'])} recorded into the bank account "
+            f"({kind} `{result['doc']}`; {len(b['sales'])} sale(s))")
+        note = ""
+        if result["fallback"]:
+            note = (NL + NL + "QuickBooks wouldn't take a linked Bank Deposit, so this was recorded as a Journal Entry "
+                    "(bank up, Undeposited Funds down - same balances). The Sales Receipts will still be listed on "
+                    "QuickBooks' Bank Deposit screen - **don't deposit them again** there.")
+        await interaction.followup.send(
+            f"✅ Recorded the {_money(b['amount'])} eBay payout as {kind} `{result['doc']}`. In QuickBooks → Banking, "
+            "**Match** the bank-feed deposit to it." + note, ephemeral=True)
+
+
+async def _finish_book_card(interaction: discord.Interaction, pallet_ids: list, embed: discord.Embed = None):
+    try:
+        if embed is not None:
+            await interaction.message.edit(embed=embed, view=None)
+        else:
+            await interaction.message.edit(view=None)
+    except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+        pass
+    for pallet_id in pallet_ids:
+        await finance_utils.refresh_finance_message(interaction.client, pallet_id)
+
+
+async def _post_book_card(bot: discord.Client, embed: discord.Embed, button) -> bool:
+    channel_id = db.get_shared_channel_id("ebay-orders")
+    channel = bot.get_channel(channel_id) if channel_id else None
+    if channel is None:
+        log.warning("eBay %s card not posted - #ebay-orders isn't set up.", embed.title)
+        return False
+    view = None
+    if button is not None:
+        view = discord.ui.View(timeout=None)
+        view.add_item(button)
+    try:
+        await channel.send(embed=embed, view=view)
+    except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+        log.exception("Couldn't post eBay card %s - will retry next run", embed.title)
+        return False
+    return True
+
+
+async def post_refund_card(bot: discord.Client, b: dict) -> bool:
+    if await _post_book_card(bot, build_refund_card_embed(b), EbayRefundConfirmButton(b["order_id"])):
+        db.mark_ebay_book_carded("refund", ebay_books.refund_card_keys(b))
+        return True
+    return False
+
+
+async def post_account_card(bot: discord.Client, b: dict) -> bool:
+    if await _post_book_card(bot, build_account_card_embed(b), EbayAccountChargesButton(b["month"])):
+        db.mark_ebay_book_carded("account", ebay_books.account_card_keys(b))
+        return True
+    return False
+
+
+async def post_payout_card(bot: discord.Client, b: dict) -> bool:
+    button = None if b["deposit"] else EbayPayoutConfirmButton(b["payout_id"])
+    if await _post_book_card(bot, build_payout_card_embed(b), button):
+        db.mark_ebay_book_carded("payout", [b["payout_id"]])
+        return True
+    return False
+
+
+async def _run_book_cards(bot: discord.Client, since_date: str = None) -> dict:
+    """Refund, account-charge and payout cards that are due. Expects the
+    eBay data to be fresh (_run_fee_cards syncs it first)."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    since_date = since_date or config.EBAY_FEE_CARDS_START_DATE or db.get_ebay_fee_card_start_date(today)
+    posted = {"refund": 0, "account": 0, "payout": 0}
+    for b in ebay_books.orders_needing_refund_cards(since_date):
+        posted["refund"] += await post_refund_card(bot, b)
+    # A month's account card waits for the month to end, so it's one card.
+    for month in ebay_books.account_charge_months(before_month=today[:7]):
+        if month < since_date[:7]:
+            continue
+        b = ebay_books.account_breakdown(month)
+        if b["charges"] and any(not db.is_ebay_book_carded("account", k) for k in ebay_books.account_card_keys(b)):
+            posted["account"] += await post_account_card(bot, b)
+    if config.EBAY_PAYOUT_CARDS:
+        for payout in ebay_books.payouts_needing_cards(since_date):
+            posted["payout"] += await post_payout_card(bot, ebay_books.payout_breakdown(payout["payout_id"]))
+    return posted
+
+
 class Ebay(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -717,7 +951,8 @@ class Ebay(commands.Cog):
         # lifetime - see EbayOrderConfirmButton. Same for the fee cards'
         # Confirm & log fees button.
         if not config.PRESERVE_DISCORD_HISTORY:
-            self.bot.add_dynamic_items(EbayOrderConfirmButton, EbayFeeConfirmButton)
+            self.bot.add_dynamic_items(EbayOrderConfirmButton, EbayFeeConfirmButton, EbayRefundConfirmButton,
+                                       EbayAccountChargesButton, EbayPayoutConfirmButton)
 
     def cog_unload(self):
         self.order_poll_loop.cancel()
@@ -731,6 +966,10 @@ class Ebay(commands.Cog):
         if config.PRESERVE_DISCORD_HISTORY or not (config.EBAY_ENABLED and config.EBAY_FEE_CARDS):
             return
         await _run_fee_cards(self.bot)
+        try:
+            await _run_book_cards(self.bot)
+        except Exception:
+            log.exception("Posting eBay refund/account/payout cards failed - will retry next run")
 
     @fee_card_loop.before_loop
     async def _before_fee_card_loop(self):
@@ -878,6 +1117,110 @@ class Ebay(commands.Cog):
             "(Uses the last `/ebay sync-finances` data - run that first for older orders.)",
             ephemeral=True,
         )
+
+    @ebay_group.command(
+        name="refund-cards",
+        description="Post refund cards now for eBay refunds/adjustments on logged sales.",
+    )
+    @app_commands.describe(since="Only orders placed on/after this date, YYYY-MM-DD (default: the fee-card start date)")
+    async def refund_cards(self, interaction: discord.Interaction, since: str = None):
+        if not await _require_finance_role(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await ebay_finances.sync(30)
+        except ebay_api.EbayAPIError as e:
+            await interaction.followup.send(f"⚠️ Couldn't refresh eBay data: {e}", ephemeral=True)
+            return
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        since = since or config.EBAY_FEE_CARDS_START_DATE or db.get_ebay_fee_card_start_date(today)
+        posted = 0
+        for b in ebay_books.orders_needing_refund_cards(since):
+            posted += await post_refund_card(self.bot, b)
+        await interaction.followup.send(f"Posted {posted} eBay refund card(s) to #ebay-orders.", ephemeral=True)
+
+    @ebay_group.command(
+        name="account-charges",
+        description="Post the eBay account-charges card (store subscription, listing fees) for a month.",
+    )
+    @app_commands.describe(month="YYYY-MM (default: last month). The current month works too, for charges so far.")
+    async def account_charges_cmd(self, interaction: discord.Interaction, month: str = None):
+        if not await _require_finance_role(interaction):
+            return
+        now = datetime.now(timezone.utc)
+        if month is None:
+            first = now.replace(day=1)
+            month = (first - timedelta(days=1)).strftime("%Y-%m")
+        try:
+            datetime.strptime(month, "%Y-%m")
+        except ValueError:
+            await interaction.response.send_message("Month must look like `2026-09`.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await ebay_finances.sync(max(31, (now - datetime.strptime(month + "-01", "%Y-%m-%d").replace(tzinfo=timezone.utc)).days + 1))
+        except ebay_api.EbayAPIError as e:
+            await interaction.followup.send(f"⚠️ Couldn't refresh eBay data: {e}", ephemeral=True)
+            return
+        b = ebay_books.account_breakdown(month)
+        if not b["charges"]:
+            await interaction.followup.send(f"No unlogged eBay account charges for {month}.", ephemeral=True)
+            return
+        ok = await post_account_card(self.bot, b)
+        await interaction.followup.send(
+            f"Posted the {month} account-charges card ({_money(b['totals']['total'])}) to #ebay-orders." if ok
+            else "Couldn't post the card - is #ebay-orders set up?", ephemeral=True)
+
+    @ebay_group.command(
+        name="payouts",
+        description="Recent eBay payouts and whether each is recorded in QuickBooks.",
+    )
+    async def payouts_cmd(self, interaction: discord.Interaction):
+        if not await _require_finance_role(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await ebay_finances.sync(60)
+        except ebay_api.EbayAPIError as e:
+            await interaction.followup.send(f"⚠️ Couldn't refresh eBay data: {e}", ephemeral=True)
+            return
+        rows = []
+        for p in db.list_ebay_payouts(limit=15):
+            b = ebay_books.payout_breakdown(p["payout_id"])
+            if b["deposit"]:
+                state = "✅ in QuickBooks"
+            elif p.get("payout_status") != "SUCCEEDED":
+                state = f"⏳ {(p.get('payout_status') or 'pending').lower()}"
+            elif b["ready"]:
+                state = "🟢 ready - `/ebay payout-card`"
+            else:
+                state = f"⚠️ waiting on {len(b['problems'])} thing(s)"
+            rows.append(f"`{p['payout_id']}` {(p.get('payout_date') or '')[:10]} · {_money(p.get('amount') or 0)} · {state}")
+        await interaction.followup.send(
+            ("**eBay payouts (newest first):**" + NL + NL.join(rows))[:1900] if rows else "No eBay payouts synced yet.",
+            ephemeral=True)
+
+    @ebay_group.command(
+        name="payout-card",
+        description="Post (or re-post) the deposit card for one eBay payout.",
+    )
+    @app_commands.describe(payout_id="The payout ID from /ebay payouts")
+    async def payout_card_cmd(self, interaction: discord.Interaction, payout_id: str):
+        if not await _require_finance_role(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await ebay_finances.sync(60)
+        except ebay_api.EbayAPIError as e:
+            await interaction.followup.send(f"⚠️ Couldn't refresh eBay data: {e}", ephemeral=True)
+            return
+        b = ebay_books.payout_breakdown(payout_id.strip())
+        if b["payout"] is None:
+            await interaction.followup.send(f"No eBay payout `{payout_id}` found - check `/ebay payouts`.", ephemeral=True)
+            return
+        ok = await post_payout_card(self.bot, b)
+        await interaction.followup.send("Posted the payout card to #ebay-orders." if ok
+                                        else "Couldn't post the card - is #ebay-orders set up?", ephemeral=True)
 
     @ebay_group.command(
         name="status",

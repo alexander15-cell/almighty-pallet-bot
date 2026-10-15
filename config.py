@@ -363,8 +363,10 @@ CHANNEL_INFO = {
         "eBay listing ID, with a **Confirm & log sale** button - nothing is sent to "
         "QuickBooks until you click it. Once an order has shipped (or is 5 days old), an "
         "**eBay fees** card follows with eBay's fees and shipping label; confirming it "
-        "books them as expenses so QuickBooks matches eBay's payout. Missing card? "
-        "`/ebay order-card order_id:<id>`."
+        "books them as expenses. Refunds get a **↩️ eBay refund** card, store/listing "
+        "charges a monthly **🧾 account charges** card, and each payout a **🏦 payout** "
+        "card that records the Bank Deposit once everything in it is logged. Missing "
+        "card? `/ebay order-card order_id:<id>`."
     ),
 }
 
@@ -745,6 +747,17 @@ EBAY_FEE_CARD_DELAY_DAYS = int(os.getenv("EBAY_FEE_CARD_DELAY_DAYS") or "5")
 # (YYYY-MM-DD). Blank = the day the feature first runs, so past orders don't
 # flood #ebay-orders - use /ebay fee-cards since:<date> for those.
 EBAY_FEE_CARDS_START_DATE = os.getenv("EBAY_FEE_CARDS_START_DATE", "").strip()
+
+# ---- eBay refunds, account charges and payouts (see ebay_books.py) ----
+# Refunds/returns: the income account a refund is booked against (debited).
+# Blank = eBay Sales (QUICKBOOKS_EBAY_SALES_ACCOUNT_ID) for eBay refunds and
+# Sales (QUICKBOOKS_SALES_INCOME_ACCOUNT_ID) for /finance refund. Point it at
+# "Refunds & discounts to customers" to see refunds on their own P&L line.
+QUICKBOOKS_REFUNDS_ACCOUNT_ID = os.getenv("QUICKBOOKS_REFUNDS_ACCOUNT_ID", "").strip()
+# Post a card in #ebay-orders for each eBay payout that's reached the bank,
+# which records the QuickBooks Bank Deposit from Undeposited Funds into
+# QUICKBOOKS_BANK_ACCOUNT_ID. Same start date as the fee cards.
+EBAY_PAYOUT_CARDS = os.getenv("EBAY_PAYOUT_CARDS", "true").strip().lower() == "true"
 
 # ---- Cloudflare R2 image hosting (optional, see r2_storage.py) ----
 # Gives each Data Entry photo a durable public URL for the eBay CSV batch's

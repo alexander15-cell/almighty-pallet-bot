@@ -643,6 +643,48 @@ def init_db():
                 start_date  TEXT NOT NULL
             );
 
+            -- eBay payouts (Finances API getPayouts) - the money eBay sends
+            -- to the bank, mirrored like ebay_fin_transactions (written only
+            -- by ebay_finances.sync). Each transaction's payout_id says which
+            -- payout it went out in. Only the bank's nickname and last four
+            -- digits are kept, never a full account number.
+            CREATE TABLE IF NOT EXISTS ebay_payouts (
+                payout_id            TEXT PRIMARY KEY,
+                payout_status        TEXT,
+                amount               REAL,
+                payout_date          TEXT,
+                transaction_count    INTEGER,
+                instrument_nickname  TEXT,
+                instrument_last4     TEXT,
+                first_synced_at      TEXT NOT NULL,
+                last_synced_at       TEXT NOT NULL
+            );
+
+            -- A payout recorded in QuickBooks (ebay_books.confirm_payout):
+            -- the Deposit (or fallback Journal Entry) that moved it from
+            -- Undeposited Funds into the bank. The primary key is what stops
+            -- one payout being deposited twice.
+            CREATE TABLE IF NOT EXISTS ebay_payout_deposits (
+                payout_id             TEXT PRIMARY KEY,
+                quickbooks_txn_id     TEXT NOT NULL,
+                quickbooks_txn_type   TEXT NOT NULL,   -- 'Deposit' or 'JournalEntry'
+                amount                REAL NOT NULL,
+                bank_account_id       TEXT NOT NULL,
+                posted_by             INTEGER,
+                posted_at             TEXT NOT NULL
+            );
+
+            -- Which payouts / refund orders / account-charge months already
+            -- have a card in #ebay-orders, so the background job posts each
+            -- once. kind: 'payout', 'refund' (key = order id + txn) or
+            -- 'account' (key = YYYY-MM + txn).
+            CREATE TABLE IF NOT EXISTS ebay_book_cards (
+                kind       TEXT NOT NULL,
+                card_key   TEXT NOT NULL,
+                carded_at  TEXT NOT NULL,
+                PRIMARY KEY (kind, card_key)
+            );
+
             -- The #accounting worklist: which #accounting message belongs to
             -- which sold item (ItemFlow._post_to_accounting_channel), so it
             -- can be edited to "✅ logged" once the sale is booked to
@@ -2405,6 +2447,152 @@ def sum_pallet_costs_from_source(pallet_id: int, source: str) -> float:
             "SELECT COALESCE(SUM(amount), 0) AS total FROM pallet_costs WHERE pallet_id = ? AND source = ?",
             (pallet_id, source),
         ).fetchone()["total"] or 0.0
+
+
+# ------------------------------------------- eBay payouts / refunds / account charges --
+# See ebay_books.py. Mirror writes come only from ebay_finances.sync; the
+# booking writes below are each one database transaction.
+
+_EBAY_PAYOUT_FIELDS = ("payout_status", "amount", "payout_date", "transaction_count",
+                       "instrument_nickname", "instrument_last4")
+
+
+def upsert_ebay_payout(payout: dict):
+    now = _now()
+    values = [payout.get(f) for f in _EBAY_PAYOUT_FIELDS]
+    updates = ", ".join(f"{f} = excluded.{f}" for f in _EBAY_PAYOUT_FIELDS)
+    with get_conn() as conn:
+        conn.execute(
+            f"INSERT INTO ebay_payouts (payout_id, {', '.join(_EBAY_PAYOUT_FIELDS)}, first_synced_at, last_synced_at) "
+            f"VALUES (?, {', '.join('?' * len(_EBAY_PAYOUT_FIELDS))}, ?, ?) "
+            f"ON CONFLICT (payout_id) DO UPDATE SET {updates}, last_synced_at = excluded.last_synced_at",
+            [payout["payout_id"], *values, now, now],
+        )
+
+
+def get_ebay_payout(payout_id: str):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM ebay_payouts WHERE payout_id = ?", (payout_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def list_ebay_payouts(since_date: str = None, limit: int = 50) -> list:
+    """Newest first; since_date (YYYY-MM-DD) filters on payout_date."""
+    with get_conn() as conn:
+        if since_date:
+            rows = conn.execute(
+                "SELECT * FROM ebay_payouts WHERE substr(payout_date, 1, 10) >= ? ORDER BY payout_date DESC LIMIT ?",
+                (since_date, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM ebay_payouts ORDER BY payout_date DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_ebay_fin_transactions_for_payout(payout_id: str) -> list:
+    return [t for t in get_all_ebay_fin_transactions() if t.get("payout_id") == payout_id]
+
+
+def get_ebay_fee_postings_by_key() -> dict:
+    """{(transaction_id, transaction_type): posting row} for every booked eBay charge."""
+    with get_conn() as conn:
+        return {(r["transaction_id"], r["transaction_type"]): dict(r)
+                for r in conn.execute("SELECT * FROM ebay_fee_postings")}
+
+
+def get_ebay_payout_deposit(payout_id: str):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM ebay_payout_deposits WHERE payout_id = ?", (payout_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def record_ebay_payout_deposit(payout_id: str, quickbooks_txn_id: str, quickbooks_txn_type: str, amount: float,
+                               bank_account_id: str, actor_id: int):
+    """Raises sqlite3.IntegrityError if this payout was already recorded."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO ebay_payout_deposits (payout_id, quickbooks_txn_id, quickbooks_txn_type, amount, "
+            "bank_account_id, posted_by, posted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (payout_id, quickbooks_txn_id, quickbooks_txn_type, amount, bank_account_id, actor_id, _now()),
+        )
+
+
+def is_ebay_book_carded(kind: str, card_key: str) -> bool:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT 1 FROM ebay_book_cards WHERE kind = ? AND card_key = ?", (kind, card_key)
+        ).fetchone() is not None
+
+
+def mark_ebay_book_carded(kind: str, card_keys: list):
+    now = _now()
+    with get_conn() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO ebay_book_cards (kind, card_key, carded_at) VALUES (?, ?, ?)",
+            [(kind, k, now) for k in card_keys],
+        )
+
+
+def record_ebay_refund_posting(ebay_order_id: str, charges: list, quickbooks_je_id: str, actor_id: int,
+                               refunds: list):
+    """
+    One confirmed eBay refund card, in a single database transaction: a
+    ebay_fee_postings row per eBay transaction (category 'refunds') plus a
+    finance_transactions 'refund' row per item share (`refunds`: dicts with
+    pallet_id/item_id/amount/note) so the pallet's net revenue drops by
+    what was refunded. A credit back to the seller is a negative amount.
+    Raises sqlite3.IntegrityError if any transaction was already posted.
+    """
+    now = _now()
+    with get_conn() as conn:
+        conn.executemany(
+            "INSERT INTO ebay_fee_postings (transaction_id, transaction_type, ebay_order_id, category, amount, "
+            "quickbooks_je_id, posted_by, posted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [(c["transaction_id"], c["transaction_type"], ebay_order_id, c["category"], c["amount"],
+              quickbooks_je_id, actor_id, now) for c in charges],
+        )
+        conn.executemany(
+            "INSERT INTO finance_transactions (pallet_id, item_id, type, amount, note, actor_id, created_at) "
+            "VALUES (?, ?, 'refund', ?, ?, ?, ?)",
+            [(r["pallet_id"], r["item_id"], r["amount"], r["note"], actor_id, now) for r in refunds],
+        )
+        for r in refunds:
+            if r.get("item_id"):
+                conn.execute(
+                    "INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp) "
+                    "VALUES (?, NULL, (SELECT status FROM items WHERE id = ?), ?, ?, ?)",
+                    (r["item_id"], r["item_id"], actor_id, f"eBay refund recorded: ${r['amount']:.2f}", now),
+                )
+
+
+def get_sale_for_item(item_id: int):
+    """The logged sale (sales row) an item currently belongs to, or None."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT s.* FROM sales s JOIN sale_items si ON si.sale_id = s.id WHERE si.item_id = ?", (item_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_pallet_profit_inputs(pallet_id: int) -> dict:
+    """
+    Read-only inputs for /finance pallet-profit (ebay_books.pallet_profit):
+    itemized costs by type, refunds, every item's status / sale price /
+    listing price / dates. Nothing here changes any number.
+    """
+    with get_conn() as conn:
+        costs = {r["cost_type"]: r["total"] for r in conn.execute(
+            "SELECT cost_type, COALESCE(SUM(amount), 0) AS total FROM pallet_costs WHERE pallet_id = ? GROUP BY cost_type",
+            (pallet_id,),
+        )}
+        items = [dict(r) for r in conn.execute(
+            """SELECT i.id, i.item_number, i.status, i.sale_price, i.sale_platform, i.created_at,
+                      i.sale_recorded_at, eld.price AS list_price
+               FROM items i LEFT JOIN ebay_listing_data eld ON eld.item_id = i.id
+               WHERE i.pallet_id = ? AND i.status != ?""",
+            (pallet_id, STATUS_DELETED),
+        )]
+    return {"costs_by_type": costs, "items": items}
 
 
 # ---------------------------------------------------- #accounting worklist --

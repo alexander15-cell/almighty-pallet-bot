@@ -147,6 +147,8 @@ def _ebay_commands_embed() -> discord.Embed:
     embed.add_field(name="status", value="Check every eBay permission (orders, fees, listing, policies, location) and QuickBooks account the bot needs - ✅/❌ with what to fix. Read-only.", inline=False)
     embed.add_field(name="sync-finances [days_back]", value="Pull eBay's own fees, buyer-paid shipping, labels, refunds, and payouts (up to 5 years). Read-only - changes no recorded number, card, or QuickBooks entry.", inline=False)
     embed.add_field(name="net-report [pallet_name]", value="Recorded eBay revenue vs. eBay's real net payout, per pallet or business-wide, with a per-item CSV. Finance Management or Pallet Admin.", inline=False)
+    embed.add_field(name="payouts / payout-card <payout_id>", value="eBay payouts and whether each is in QuickBooks. **🏦 payout** cards post automatically once eBay pays out; when everything in it is logged, **Confirm & record deposit** creates the Bank Deposit into the bank account - then **Match** it in QuickBooks Banking.", inline=False)
+    embed.add_field(name="refund-cards / account-charges [YYYY-MM]", value="**↩️ eBay refund** cards (refunds/returns) and monthly **🧾 eBay account charges** cards (store subscription, listing fees) post automatically; these post them now.", inline=False)
     embed.add_field(name="fee-cards since:<YYYY-MM-DD>", value="Post **💸 eBay fees to log** cards for older orders. New orders get one automatically in #ebay-orders - **Confirm & log fees** books eBay's fees/labels/ads to QuickBooks and the pallet's cost.", inline=False)
     return embed
 
@@ -185,6 +187,7 @@ def _finance_commands_embed() -> discord.Embed:
     embed.add_field(name="summary", value="Post a fresh copy of a pallet's financial/status card.", inline=False)
     embed.add_field(name="refresh-card", value="Force-refresh the pinned card in place right now, without waiting for an item to move.", inline=False)
     embed.add_field(name="refresh-dashboard", value="Admin: update the pinned #finance-dashboard now (re-posts and pins it if it was deleted).", inline=False)
+    embed.add_field(name="pallet-profit [pallet_name] / pallets", value="True profit: purchase, eBay fees/labels, refunds, return on cost, sell-through, days to sell, what's left. `pallets` ranks every pallet.", inline=False)
     embed.add_field(name="pallet-summary [pallet_name]", value="Full cost breakdown by type (purchase/invoice/shipping/eBay fees/etc), revenue, and margin for a pallet.", inline=False)
     embed.add_field(name="overview", value="Business-wide snapshot: bank and Undeposited Funds balances (plus a card if set), month-to-date spend/revenue, pallets in progress vs sold out.", inline=False)
     embed.add_field(name="connect-quickbooks", value="Admin: link QuickBooks Online - sales receipts, eBay fee entries, pallet purchase expenses and balances.", inline=False)

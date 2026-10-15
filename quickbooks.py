@@ -496,6 +496,38 @@ async def create_journal_entry(debit_account_id: str, credit_account_id: str,
     return {"id": je.get("Id"), "doc_number": je.get("DocNumber")}
 
 
+async def create_deposit(bank_account_id: str, date: str, memo: str, sales_receipts: list,
+                         undeposited_account_id: str, undeposited_adjustment: float) -> dict:
+    """
+    A QuickBooks Bank Deposit into `bank_account_id` - used for eBay payouts
+    (ebay_books.confirm_payout). Each Sales Receipt in `sales_receipts`
+    ([{'id', 'amount'}]) is linked, so it leaves the "waiting to be
+    deposited" list. eBay pays out LESS than those receipts (it keeps its
+    fees), and those fees were already credited to Undeposited Funds by the
+    fee/refund Journal Entries - so one more line of -`undeposited_adjustment`
+    against Undeposited Funds puts that money back, leaving the deposit total
+    equal to the payout and Undeposited Funds at zero for these sales.
+    Returns {'id', 'doc_number'}.
+    """
+    lines = [
+        {"Amount": round(float(sr["amount"]), 2),
+         "LinkedTxn": [{"TxnId": str(sr["id"]), "TxnType": "SalesReceipt", "TxnLineId": "0"}]}
+        for sr in sales_receipts
+    ]
+    adjustment = round(float(undeposited_adjustment), 2)
+    if adjustment:
+        lines.append({
+            "Amount": -adjustment,
+            "DetailType": "DepositLineDetail",
+            "Description": f"eBay fees/refunds already booked - {memo}",
+            "DepositLineDetail": {"AccountRef": {"value": undeposited_account_id}},
+        })
+    payload = {"DepositToAccountRef": {"value": bank_account_id}, "TxnDate": date, "PrivateNote": memo, "Line": lines}
+    result = await _request("POST", "deposit", json_body=payload)
+    deposit = result.get("Deposit", {})
+    return {"id": deposit.get("Id"), "doc_number": deposit.get("DocNumber")}
+
+
 async def create_balanced_journal_entry(expense_lines: list, offset_account_id: str, date: str, memo: str) -> dict:
     """
     A Journal Entry with one line per entry in `expense_lines`

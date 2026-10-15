@@ -922,6 +922,46 @@ QuickBooks or with `/finance expense`) for an order, don't confirm its card
 off entirely. `/ebay net-report` accounts for fees booked this way, so its
 "profit using eBay net" doesn't subtract them twice.
 
+### Refunds, account charges, payouts, and true pallet profit
+
+The rest of the eBay money trail, same rules as the fee cards (nothing
+reaches QuickBooks without a confirm click, every click re-checks, and no
+eBay transaction can be booked twice by any card - they all share the
+`ebay_fee_postings` ledger). Logic in `ebay_books.py`.
+
+- **↩️ eBay refund cards** - eBay refunds, disputes and adjustments on an
+  order whose sale is logged. Confirm posts a Journal Entry debiting
+  `QUICKBOOKS_REFUNDS_ACCOUNT_ID` (blank = eBay Sales) and crediting
+  Undeposited Funds, and lowers the pallet's net revenue. `/ebay
+  refund-cards` posts due ones now. `/finance refund` now refuses eBay
+  items (their refunds come from these cards) and, for other sales, also
+  posts a Journal Entry crediting the bank account (or Undeposited Funds,
+  or nothing - `refunded_from`).
+- **🧾 eBay account charges** - eBay charges not tied to any order (store
+  subscription, insertion fees for listings that never sold, account
+  credits), one card per month once the month ends; `/ebay account-charges
+  month:YYYY-MM` posts one now (the current month works too). A listing fee
+  for a tracked item also goes on its pallet's cost; the rest is overhead.
+- **🏦 eBay payout cards** - payouts are synced with everything else
+  (`getPayouts`). Once a payout has reached the bank, a card shows what's in
+  it and anything not logged yet. When every sale, fee, label, refund and
+  account charge in it is logged and the numbers match eBay's payout to the
+  cent, **Confirm & record deposit** creates a QuickBooks **Bank Deposit**
+  into `QUICKBOOKS_BANK_ACCOUNT_ID`: each Sales Receipt linked, plus one
+  negative Undeposited Funds line for the fees already booked, so the
+  deposit equals the payout. Then **Match** the bank-feed deposit to it in
+  QuickBooks Banking. If QuickBooks refuses that Deposit, the bot falls back
+  to a Journal Entry (debit bank, credit Undeposited Funds) with identical
+  balances and says so - the Sales Receipts then still show on QuickBooks'
+  Bank Deposit screen, and must not be deposited again there. `/ebay
+  payouts` lists recent payouts and their state; `/ebay payout-card
+  payout_id:<id>` re-posts one. `EBAY_PAYOUT_CARDS=false` turns them off.
+- **`/finance pallet-profit [pallet_name]`** - read-only: purchase cost,
+  eBay fees/ads, labels, refunds, profit and return on the purchase price,
+  sell-through, average days to sell, unsold items at their list price,
+  and a projection if the rest sells at list (keeping eBay's share so far).
+  **`/finance pallets`** ranks every pallet by return on cost.
+
 ### Item specifics from eBay's own category list
 
 eBay ranks listings with complete item specifics (Brand, Type, Color,

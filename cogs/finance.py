@@ -61,6 +61,7 @@ from discord.ext import commands, tasks
 import config
 import database as db
 import discord_resilience
+import ebay_books
 import finance_utils
 import pirate_ship_import
 import quickbooks
@@ -851,6 +852,72 @@ def format_sales_list(rows: list, pallet: dict = None, platform: str = None, lim
     return text
 
 
+def _usd(value) -> str:
+    if value is None:
+        return "-"
+    return f"-${abs(value):,.2f}" if value < 0 else f"${value:,.2f}"
+
+
+def build_pallet_profit_embed(r: dict) -> discord.Embed:
+    """/finance pallet-profit - see ebay_books.pallet_profit."""
+    pallet = r["pallet"]
+    profit = r["profit"]
+    color = discord.Color.green() if (profit or 0) >= 0 else discord.Color.red()
+    embed = discord.Embed(title=f"💰 {pallet['name']} - True Profit", color=color)
+    embed.add_field(name="Money in", value=(
+        f"Sales: {_usd(r['revenue'])}\n"
+        f"Refunds: -{_usd(r['refunds'])}\n"
+        + (f"Other adjustments: -{_usd(r['other_expenses'])}\n" if r["other_expenses"] else "")
+        + f"**Net: {_usd(r['net_revenue'])}**"), inline=True)
+    embed.add_field(name="Money out", value=(
+        f"Pallet purchase: {_usd(r['purchase_cost'])}\n"
+        f"eBay fees & ads: {_usd(r['ebay_costs'])}\n"
+        f"Shipping labels: {_usd(r['shipping'])}\n"
+        f"**Total: {_usd(r['total_cost'])}**"), inline=True)
+    if profit is None:
+        result = "No cost recorded yet - set one with `/finance setprice` or claim the invoice."
+    else:
+        roi = f" ({r['roi_pct']:+.0f}% on the purchase price)" if r["roi_pct"] is not None else ""
+        result = f"**{'Profit' if profit >= 0 else 'Loss'} so far: {_usd(profit)}**{roi}"
+    embed.add_field(name="Result", value=result, inline=False)
+    st = f"{r['sell_through_pct']:.0f}%" if r["sell_through_pct"] is not None else "-"
+    lines = [f"Sold {r['items_sold']} of {r['items_total']} items ({st} sell-through)"]
+    if r["avg_sale"] is not None:
+        lines.append(f"Average sale: {_usd(r['avg_sale'])}")
+    if r["avg_days_to_sell"] is not None:
+        lines.append(f"Average time to sell: {r['avg_days_to_sell']:.0f} days")
+    if r["ebay_keep_pct"] is not None:
+        lines.append(f"eBay fees + labels: {r['ebay_keep_pct']:.0f}% of sales")
+    embed.add_field(name="Selling", value="\n".join(lines), inline=False)
+    if r["items_unsold"]:
+        left = [f"{r['items_unsold']} unsold item(s) listed at {_usd(r['unsold_list_value'])}"]
+        if r["unpriced_unsold"]:
+            left.append(f"({r['unpriced_unsold']} not priced yet)")
+        if r["projected_profit"] is not None:
+            left.append(f"If the rest sells at list price: about **{_usd(r['projected_profit'])}** total profit")
+        embed.add_field(name="Still to sell", value="\n".join(left), inline=False)
+    embed.set_footer(text="Counts only what's been logged - eBay fees/labels appear once their cards are confirmed.")
+    return embed
+
+
+def format_pallet_ranking(rows: list, limit_chars: int = 1900) -> str:
+    """/finance pallets - every pallet, best return on cost first."""
+    if not rows:
+        return "No pallets yet."
+    rows = sorted(rows, key=lambda r: (r["roi_pct"] is None, -(r["roi_pct"] or 0)))
+    out = ["**Pallets by return on cost:**"]
+    for r in rows:
+        st = f"{r['sell_through_pct']:.0f}%" if r["sell_through_pct"] is not None else "-"
+        roi = f"{r['roi_pct']:+.0f}%" if r["roi_pct"] is not None else "no cost"
+        line = (f"**{r['pallet']['name']}** · cost {_usd(r['total_cost'])} · sales {_usd(r['net_revenue'])} · "
+                f"profit {_usd(r['profit'])} ({roi}) · sold {r['items_sold']}/{r['items_total']} ({st})")
+        if len("\n".join(out + [line])) > limit_chars:
+            out.append("… (more - use `/finance pallet-profit` per pallet)")
+            break
+        out.append(line)
+    return "\n".join(out)
+
+
 class Finance(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -1177,13 +1244,20 @@ class Finance(commands.Cog):
         else:
             await interaction.followup.send(f"⚠️ Still failing: {result['error']}", ephemeral=True)
 
-    @finance_group.command(name="refund", description="Log a refund against an item's sale. Run inside that pallet's category.")
+    @finance_group.command(name="refund", description="Log a refund against an item's sale (and in QuickBooks). Run inside that pallet's category.")
     @app_commands.describe(
         item_number="The item's number shown on its card (e.g. 3)",
         amount="Amount refunded",
         reason="Why - shown in /finance history",
+        refunded_from="Where the money came from - posts a QuickBooks Journal Entry (default: the bank account)",
     )
-    async def refund(self, interaction: discord.Interaction, item_number: int, amount: float, reason: str):
+    @app_commands.choices(refunded_from=[
+        app_commands.Choice(name="Bank account", value="bank"),
+        app_commands.Choice(name="Cash not deposited yet (Undeposited Funds)", value="undeposited"),
+        app_commands.Choice(name="Don't post to QuickBooks (already entered there)", value="none"),
+    ])
+    async def refund(self, interaction: discord.Interaction, item_number: int, amount: float, reason: str,
+                     refunded_from: app_commands.Choice[str] = None):
         if not await _require_any_role(interaction, [config.ROLE_FINANCE_MGMT]):
             return
         pallet = _get_pallet_or_none(interaction)
@@ -1199,13 +1273,42 @@ class Finance(commands.Cog):
         if amount <= 0:
             await interaction.response.send_message("Refund amount must be positive.", ephemeral=True)
             return
+        if (item.get("sale_platform") or "").strip().lower() == "ebay" and config.EBAY_ENABLED:
+            # eBay refunds come from eBay's own data on a "↩️ eBay refund"
+            # card - logging it here too would count it twice.
+            await interaction.response.send_message(
+                "This item sold on eBay - eBay refunds are logged from the **↩️ eBay refund** card in #ebay-orders "
+                "(it appears once eBay processes the refund; `/ebay refund-cards` posts it right away). Logging it "
+                "here as well would count it twice.", ephemeral=True)
+            return
 
+        source = refunded_from.value if refunded_from else "bank"
         await interaction.response.defer(ephemeral=True, thinking=True)
+        qb_note = ""
+        if source != "none" and not quickbooks.is_connected():
+            qb_note = " QuickBooks isn't connected, so nothing was sent there."
+        elif source != "none":
+            credit = (config.QUICKBOOKS_BANK_ACCOUNT_ID if source == "bank"
+                      else config.QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID)
+            memo = f"Refund - {pallet['name']} item #{item_number} ({reason.strip()})"
+            try:
+                je = await quickbooks.create_balanced_journal_entry(
+                    [{"account_id": ebay_books.refunds_account(ebay=False), "amount": amount, "description": memo}],
+                    credit, datetime.now(timezone.utc).strftime("%Y-%m-%d"), memo)
+            except quickbooks.QuickBooksError as e:
+                await interaction.followup.send(f"QuickBooks didn't accept the refund - nothing was recorded: {e}",
+                                                ephemeral=True)
+                return
+            doc = je.get("doc_number") or je.get("id")
+            qb_note = f" QuickBooks Journal Entry `{doc}` (refund, paid from the {'bank account' if source == 'bank' else 'undeposited cash'})."
+            await finance_utils.post_to_finance_audit_log(
+                self.bot, f"↩️ **Refund** ${amount:.2f} - {pallet['name']} item #{item_number} ({reason.strip()}) "
+                          f"(Journal Entry `{doc}`)")
         db.record_refund(item["id"], amount, reason.strip(), actor_id=interaction.user.id)
         await finance_utils.refresh_finance_message(self.bot, pallet["id"])
         await interaction.followup.send(
             f"↩️ Logged a ${amount:.2f} refund for **{pallet['name']}** item #{item_number} ({reason.strip()}). "
-            f"Live card updated.",
+            f"Live card updated.{qb_note}",
             ephemeral=True,
         )
 
@@ -1455,6 +1558,33 @@ class Finance(commands.Cog):
         fin = db.get_pallet_financials(pallet["id"])
         embed = finance_utils.build_finance_embed(pallet, fin)
         await interaction.response.send_message(embed=embed)
+
+    @finance_group.command(
+        name="pallet-profit",
+        description="True profit for a pallet: what it cost, what eBay kept, refunds, sell-through, what's left.",
+    )
+    @app_commands.describe(pallet_name="Pallet name (omit to use the pallet whose channel you're in)")
+    async def pallet_profit(self, interaction: discord.Interaction, pallet_name: str = None):
+        if pallet_name:
+            pallet = db.get_pallet_by_name(pallet_name.strip())
+            if not pallet:
+                await interaction.response.send_message(f"No pallet named `{pallet_name}` found.", ephemeral=True)
+                return
+        else:
+            pallet = _get_pallet_or_none(interaction)
+            if not pallet:
+                await interaction.response.send_message(
+                    "Run this inside one of the pallet's own channels, or pass a `pallet_name`.", ephemeral=True)
+                return
+        await interaction.response.send_message(embed=build_pallet_profit_embed(ebay_books.pallet_profit(pallet["id"])))
+
+    @finance_group.command(
+        name="pallets",
+        description="Every pallet side by side: cost, revenue, profit, return on cost, sell-through.",
+    )
+    async def pallets_ranking(self, interaction: discord.Interaction):
+        rows = [ebay_books.pallet_profit(p["id"]) for p in db.get_all_pallets()]
+        await interaction.response.send_message(format_pallet_ranking(rows), ephemeral=True)
 
     @finance_group.command(
         name="pallet-summary",

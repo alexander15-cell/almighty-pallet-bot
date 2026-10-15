@@ -167,6 +167,16 @@ ENTRIES = (
         ("list sales", "logged sales", "check sale", "was it logged", "yard sale", "sales history", "find sale"),
     ),
     HelpEntry(
+        "/ebay payouts / payout-card <payout_id>",
+        "eBay payouts and whether each is recorded in QuickBooks. A 🏦 payout card (posted automatically once a payout reaches the bank) records the Bank Deposit into the bank account when everything in it is logged - then Match it in QuickBooks Banking.",
+        ("payout", "deposit", "bank deposit", "undeposited funds", "match bank feed", "ebay paid us"),
+    ),
+    HelpEntry(
+        "/ebay refund-cards / account-charges [month]",
+        "↩️ eBay refund cards book refunds/returns (lower the sale, credit Undeposited Funds); 🧾 account-charges cards book eBay charges not tied to an order (store subscription, listing fees) once a month. Both post automatically; these commands post them now.",
+        ("refund", "return", "store subscription", "listing fee", "insertion fee", "account charges"),
+    ),
+    HelpEntry(
         "/ebay order-card <order_id>",
         "Post the Confirm & log sale card for one eBay order whose card never appeared (refuses if already logged).",
         ("missing card", "order card", "no confirm button", "log ebay sale", "card didn't post"),
@@ -215,6 +225,16 @@ ENTRIES = (
         "/finance refresh-card",
         "Force-refresh the pinned finance card in place right now, without waiting for an item to move.",
         ("refresh card", "update card"),
+    ),
+    HelpEntry(
+        "/finance pallet-profit [pallet_name] / /finance pallets",
+        "True profit for a pallet - purchase cost, what eBay kept, labels, refunds, return on cost, sell-through, days to sell, and what's left to sell. /finance pallets ranks every pallet side by side.",
+        ("true profit", "roi", "return on cost", "sell through", "which pallets make money", "best pallet"),
+    ),
+    HelpEntry(
+        "/finance refund <item> <amount> <reason> [refunded_from]",
+        "Refund a non-eBay sale - also posts a QuickBooks Journal Entry (from the bank, or undeposited cash). eBay refunds use the ↩️ eBay refund card instead.",
+        ("refund", "give money back", "yard sale refund"),
     ),
     HelpEntry(
         "/finance pallet-summary [pallet_name]",

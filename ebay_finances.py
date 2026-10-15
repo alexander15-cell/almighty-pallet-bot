@@ -265,6 +265,47 @@ async def refresh_order_transactions(order_id: str) -> int:
             return count
 
 
+def parse_payout(raw: dict):
+    """One Finances API Payout -> the flat shape database.upsert_ebay_payout
+    stores, or None without an ID. Only the bank's nickname and last four
+    digits are kept."""
+    payout_id = raw.get("payoutId")
+    if not payout_id:
+        return None
+    instrument = raw.get("payoutInstrument") or {}
+    return {
+        "payout_id": str(payout_id),
+        "payout_status": raw.get("payoutStatus"),
+        "amount": _money(raw.get("amount")),
+        "payout_date": raw.get("payoutDate") or raw.get("lastAttemptedPayoutDate"),
+        "transaction_count": raw.get("transactionCount"),
+        "instrument_nickname": instrument.get("nickname"),
+        "instrument_last4": instrument.get("accountLastFourDigits"),
+    }
+
+
+async def fetch_payouts(since: datetime, until: datetime) -> list:
+    """Every Finances API payout between since and until (raw dicts), in
+    the same <=36-month windows as fetch_transactions, paginated."""
+    results = []
+    window_start = since
+    while window_start < until:
+        window_end = min(window_start + _TRANSACTIONS_WINDOW, until)
+        filter_value = f"payoutDate:[{_iso(window_start)}..{_iso(window_end)}]"
+        offset = 0
+        while True:
+            url = (f"{_finances_base_url()}/payout?filter={urllib.parse.quote(filter_value)}"
+                   f"&sort=payoutDate&limit=200&offset={offset}")
+            body = await _get(url, "getPayouts")
+            page = body.get("payouts") or []
+            results.extend(page)
+            offset += len(page)
+            if not page or offset >= (body.get("total") or 0):
+                break
+        window_start = window_end
+    return results
+
+
 async def fetch_orders(since: datetime, until: datetime) -> list:
     """Every Fulfillment API order created between since and until (raw
     dicts), paginated."""
@@ -316,6 +357,10 @@ async def sync(days_back: int, actor_id: int = None, now: datetime = None) -> di
             if txn:
                 db.upsert_ebay_fin_transaction(txn)
                 seen_txns.add((txn["transaction_id"], txn["transaction_type"]))
+        for raw in await fetch_payouts(transactions_from, now):
+            payout = parse_payout(raw)
+            if payout:
+                db.upsert_ebay_payout(payout)
     except Exception as e:
         db.finish_ebay_finance_sync(sync_id, len(seen_txns), len(seen_orders), error=str(e)[:500])
         raise
