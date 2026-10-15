@@ -968,6 +968,53 @@ move exactly as if someone had clicked there.
 Not on the website yet (use Discord): `/finance log-sale` for non-eBay
 sales, `/finance reverse-sale`, Start New Pallet, and admin commands.
 
+### Website checkout (Stripe)
+
+Website sales through **Stripe Checkout** (Stripe's hosted payment page)
+with **Stripe Tax**, fulfilled by the bot (`stripe_api.py`, `stripe_shop.py`,
+`webapp/shop.py`). No Connect - the LLC sells only its own stock. Needs the
+web dashboard on, since Stripe and the website reach the bot through it.
+
+- **Checkout:** the website POSTs `{"items": [item ID or "pallet-N-item-M"]}`
+  to `WEB_BASE_URL/shop/checkout` (from an origin in `STRIPE_SHOP_ORIGINS`)
+  and sends the buyer to the returned `url`. The bot only sells items that
+  are **Listed**, at the bot's **own** list price, and **holds** them for
+  `STRIPE_HOLD_MINUTES` (Stripe's minimum, 30) so a one-of-a-kind item
+  can't be bought twice; an abandoned checkout releases them. Tax: Stripe
+  Tax, General Tangible Goods (`txcd_99999999`), added on top. Shipping:
+  `STRIPE_SHIPPING_PRICE` (0 = free), US addresses.
+- **Payment links:** a Listed item's dashboard page has **Send a payment
+  link** (Listing Management or Finance) - a single-use Stripe page for
+  that one item, shipped or local pickup, open `STRIPE_LINK_HOURS`.
+- **When it's paid** (`checkout.session.completed` webhook, signature
+  checked): the item is marked Sold via the same `ItemFlow.do_mark_sold` as
+  Discord, the buyer's address is saved for the Pirate Ship export, the
+  eBay listing is withdrawn (bot-made listings; others are flagged to end in
+  Seller Hub), the sale is logged with a **non-taxable** Sales Receipt to
+  the Website Sale item, and one Journal Entry books Stripe's collected tax
+  to `QUICKBOOKS_SALES_TAX_PAYABLE_ACCOUNT_ID` and Stripe's fee to
+  `QUICKBOOKS_STRIPE_FEES_ACCOUNT_ID` against Undeposited Funds - leaving
+  exactly Stripe's payout there. A "🛒 Website order paid" note posts to
+  #ebay-orders. Each step is recorded; a 10-minute loop finishes anything
+  that didn't (QuickBooks down, fee not reported yet). If the item sold on
+  eBay while the buyer was paying, the order is flagged **REFUND NEEDED**
+  and nothing is logged.
+- **Finance → Website** on the dashboard lists orders and their state.
+
+**Setup (sandbox first):**
+1. Stripe Dashboard → **Tax → Settings**: head office address. **Tax →
+   Registrations**: add Indiana. **Tax → Monitoring** watches other states'
+   economic-nexus thresholds (Stripe sales only).
+2. **Developers → API keys**: the secret (or a restricted) key into
+   `STRIPE_SECRET_KEY`. **Developers → Webhooks**: add
+   `https://<dashboard>/stripe/webhook` for `checkout.session.completed`,
+   `checkout.session.async_payment_succeeded`,
+   `checkout.session.async_payment_failed`, `checkout.session.expired`; its
+   signing secret into `STRIPE_WEBHOOK_SECRET`.
+3. QuickBooks: a **Website Sales** income account (under Sales) and a
+   **Website Sale** product pointing at it → `QUICKBOOKS_WEBSITE_SALES_ITEM_ID`.
+4. Restart, then pay with a Stripe test card (4242 4242 4242 4242).
+
 ### Refunds, account charges, payouts, and true pallet profit
 
 The rest of the eBay money trail, same rules as the fee cards (nothing

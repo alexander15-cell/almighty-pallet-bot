@@ -33,6 +33,17 @@
     }
   });
 
+  // <button data-copy="input-id"> copies that input's text.
+  document.addEventListener("click", function (e) {
+    var id = e.target.getAttribute && e.target.getAttribute("data-copy");
+    if (!id) return;
+    var input = document.getElementById(id);
+    input.select();
+    (navigator.clipboard ? navigator.clipboard.writeText(input.value) : Promise.reject())
+      .then(function () { window.toast("Copied."); })
+      .catch(function () { document.execCommand("copy"); window.toast("Copied."); });
+  });
+
   // Approve form: search eBay categories and fill the select.
   var catSelect = document.getElementById("cat-select");
   var catSearch = document.getElementById("cat-search");

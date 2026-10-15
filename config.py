@@ -98,6 +98,38 @@ DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "").strip()
 # Largest single photo upload accepted from the phone intake page (MB).
 WEB_MAX_UPLOAD_MB = int(os.getenv("WEB_MAX_UPLOAD_MB") or "15")
 
+# ---- Stripe website checkout (stripe_api.py, stripe_shop.py) ----
+# Website sales through Stripe's hosted Checkout page, with Stripe Tax.
+# Needs the web dashboard on too (WEB_DASHBOARD_ENABLED) - the website calls
+# WEB_BASE_URL/shop/checkout and Stripe calls WEB_BASE_URL/stripe/webhook.
+# Use TEST keys (sk_test_...) until everything's been tried end to end.
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+STRIPE_API_VERSION = os.getenv("STRIPE_API_VERSION", "").strip()  # blank = the account's default
+STRIPE_ENABLED = bool(STRIPE_SECRET_KEY)
+# Where Stripe sends the buyer afterwards (pages on the website).
+STRIPE_SUCCESS_URL = os.getenv("STRIPE_SUCCESS_URL", "https://4guys1palletoverstock.com/checkout/success").strip()
+STRIPE_CANCEL_URL = os.getenv("STRIPE_CANCEL_URL", "https://4guys1palletoverstock.com/cart").strip()
+# Websites allowed to start a checkout from the browser (comma-separated origins).
+STRIPE_SHOP_ORIGINS = tuple(o.strip().rstrip("/") for o in
+                            os.getenv("STRIPE_SHOP_ORIGINS", "https://4guys1palletoverstock.com").split(",") if o.strip())
+# Shipping charged at checkout, in dollars (0 = free shipping).
+STRIPE_SHIPPING_PRICE = float(os.getenv("STRIPE_SHIPPING_PRICE") or "0")
+STRIPE_SHIPPING_LABEL = os.getenv("STRIPE_SHIPPING_LABEL", "Free shipping").strip()
+# Stripe Tax product tax code - General Tangible Goods.
+STRIPE_TAX_CODE = os.getenv("STRIPE_TAX_CODE", "txcd_99999999").strip()
+# How long a website checkout holds its items (Stripe's minimum is 30), and
+# how long a payment link sent from the dashboard stays open (max 24).
+STRIPE_HOLD_MINUTES = max(30, min(int(os.getenv("STRIPE_HOLD_MINUTES") or "30"), 1440))
+STRIPE_LINK_HOURS = max(1, min(int(os.getenv("STRIPE_LINK_HOURS") or "24"), 24))
+# QuickBooks: the Website Sale product/service (income account "Website
+# Sales"), the liability Stripe-collected sales tax is owed to (e.g.
+# "Indiana Department of Revenue Payable"), and where Stripe's processing
+# fee goes (blank = the eBay fees account).
+QUICKBOOKS_WEBSITE_SALES_ITEM_ID = os.getenv("QUICKBOOKS_WEBSITE_SALES_ITEM_ID", "").strip()
+QUICKBOOKS_SALES_TAX_PAYABLE_ACCOUNT_ID = os.getenv("QUICKBOOKS_SALES_TAX_PAYABLE_ACCOUNT_ID", "").strip()
+QUICKBOOKS_STRIPE_FEES_ACCOUNT_ID = os.getenv("QUICKBOOKS_STRIPE_FEES_ACCOUNT_ID", "").strip()
+
 # ---- Automated Review (AI) backend ----
 # "anthropic" (default) - Claude's cloud vision API, requires ANTHROPIC_API_KEY.
 # "ollama"    - a local Ollama server (https://ollama.com), no API key or

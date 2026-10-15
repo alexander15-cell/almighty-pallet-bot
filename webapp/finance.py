@@ -94,7 +94,7 @@ async def finance_home(request):
         payout_rows.append(f"<li><div class='t'><b>Payout {money(b['amount'])} · {esc(date)}</b>{detail}</div>{action}</li>")
     body = ("<h1>Finance</h1><div class='tabs'><a class='on' href='/finance'>To confirm</a>"
             "<a href='/finance/pallets'>Pallet profit</a><a href='/finance/sales'>Sales</a>"
-            "<a href='/finance/payouts'>Payouts</a></div>"
+            "<a href='/finance/payouts'>Payouts</a><a href='/finance/website'>Website</a></div>"
             "<p class='muted'>Built from the last eBay sync (hourly). Confirming here or on the Discord card is "
             "the same thing - the other one will just say it's already logged.</p>"
             + _section("eBay sales to log", sale_rows, "Every eBay sale is logged.")

@@ -326,6 +326,8 @@ def item_actions_html(user, item: dict) -> str:
                          f'<h2 style="margin-top:0">Edit details</h2>{_listing_fields_html(_listing_defaults(item, listing["category_id"]))}'
                          f'<button class="btn">Save details</button></form>')
     elif status == db.STATUS_LISTED and user.has(config.ROLE_LISTING_MGMT):
+        from webapp.shop import payment_link_form
+        parts.append(payment_link_form(user, item))
         parts.append(f'<form method="post" action="/items/{item_id}/mark-sold" class="card">{csrf_input(user)}'
                      '<h2 style="margin-top:0">Mark as sold</h2><label>Where did it sell?</label>'
                      '<select name="platform"><option>eBay</option><option>In Person</option><option value="Other">Other</option></select>'

@@ -1,0 +1,107 @@
+"""
+A small Stripe API client (aiohttp, no stripe package needed - same
+approach as ebay_api.py / quickbooks.py) for website checkout
+(stripe_shop.py): create / read / expire Checkout Sessions, and verify
+webhook signatures.
+
+Keys come only from .env (STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET) - never
+from code or the database. A restricted key needs: Checkout Sessions write,
+PaymentIntents read, Charges read, Balance transactions read.
+"""
+import hashlib
+import hmac
+import json
+import time
+
+import aiohttp
+
+import config
+
+API_BASE = "https://api.stripe.com/v1"
+
+
+class StripeError(Exception):
+    pass
+
+
+def _flatten(data, prefix="") -> list:
+    """Nested dicts/lists -> Stripe's form encoding (a[b][0][c]=...)."""
+    pairs = []
+    if isinstance(data, dict):
+        for key, value in data.items():
+            pairs += _flatten(value, f"{prefix}[{key}]" if prefix else str(key))
+    elif isinstance(data, (list, tuple)):
+        for i, value in enumerate(data):
+            pairs += _flatten(value, f"{prefix}[{i}]")
+    elif isinstance(data, bool):
+        pairs.append((prefix, "true" if data else "false"))
+    elif data is not None:
+        pairs.append((prefix, str(data)))
+    return pairs
+
+
+async def _request(method: str, path: str, params: dict = None, idempotency_key: str = None) -> dict:
+    if not config.STRIPE_SECRET_KEY:
+        raise StripeError("STRIPE_SECRET_KEY isn't set in .env.")
+    headers = {"Authorization": f"Bearer {config.STRIPE_SECRET_KEY}"}
+    if config.STRIPE_API_VERSION:
+        headers["Stripe-Version"] = config.STRIPE_API_VERSION
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    pairs = _flatten(params or {})
+    async with aiohttp.ClientSession() as session:
+        if method == "GET":
+            async with session.get(f"{API_BASE}{path}", params=pairs, headers=headers) as resp:
+                body = await resp.json(content_type=None)
+                status = resp.status
+        else:
+            async with session.request(method, f"{API_BASE}{path}", data=pairs, headers=headers) as resp:
+                body = await resp.json(content_type=None)
+                status = resp.status
+    if status >= 300:
+        err = (body or {}).get("error") or {}
+        raise StripeError(f"Stripe {method} {path} failed ({status}): {err.get('message') or body}")
+    return body
+
+
+async def create_checkout_session(params: dict, idempotency_key: str = None) -> dict:
+    return await _request("POST", "/checkout/sessions", params, idempotency_key=idempotency_key)
+
+
+async def retrieve_checkout_session(session_id: str) -> dict:
+    """With the payment's charge and balance transaction, so the Stripe fee
+    can be read (payment_intent.latest_charge.balance_transaction.fee)."""
+    return await _request("GET", f"/checkout/sessions/{session_id}", {
+        "expand": ["payment_intent.latest_charge.balance_transaction"]})
+
+
+async def expire_checkout_session(session_id: str) -> dict:
+    return await _request("POST", f"/checkout/sessions/{session_id}/expire")
+
+
+def verify_webhook(payload: bytes, signature_header: str, secret: str, tolerance: int = 300, now: int = None) -> dict:
+    """
+    Checks Stripe's Stripe-Signature header (t=timestamp, v1=HMAC-SHA256 of
+    "timestamp.payload" with the endpoint's signing secret) and returns the
+    parsed event. Raises StripeError for a missing/wrong/stale signature -
+    nothing unverified is ever acted on.
+    """
+    if not secret:
+        raise StripeError("STRIPE_WEBHOOK_SECRET isn't set.")
+    parts = {}
+    for item in (signature_header or "").split(","):
+        key, _, value = item.strip().partition("=")
+        parts.setdefault(key, []).append(value)
+    try:
+        timestamp = int(parts.get("t", [""])[0])
+    except ValueError:
+        raise StripeError("Webhook signature has no timestamp.")
+    if abs((now or int(time.time())) - timestamp) > tolerance:
+        raise StripeError("Webhook signature is too old.")
+    expected = hmac.new(secret.encode(), f"{timestamp}.".encode() + payload, hashlib.sha256).hexdigest()
+    if not any(hmac.compare_digest(expected, sig) for sig in parts.get("v1", [])):
+        raise StripeError("Webhook signature doesn't match.")
+    try:
+        return json.loads(payload)
+    except ValueError:
+        raise StripeError("Webhook body isn't JSON.")

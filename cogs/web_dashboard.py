@@ -7,9 +7,10 @@ config.WEB_DASHBOARD_ENABLED (see bot.py).
 import logging
 
 from aiohttp import web
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import config
+import stripe_shop
 from webapp.server import create_app
 
 log = logging.getLogger(__name__)
@@ -30,8 +31,21 @@ class WebDashboard(commands.Cog):
         await site.start()
         log.info("Web dashboard listening on http://%s:%s (public address %s)",
                  config.WEB_HOST, config.WEB_PORT, config.WEB_BASE_URL)
+        if config.STRIPE_ENABLED and not config.PRESERVE_DISCORD_HISTORY:
+            self.stripe_retry_loop.start()
+
+    @tasks.loop(minutes=10)
+    async def stripe_retry_loop(self):
+        """Finishes website orders whose fulfillment didn't complete (QuickBooks
+        or Discord was down, Stripe's fee not reported yet)."""
+        await stripe_shop.retry_pending(self.bot)
+
+    @stripe_retry_loop.before_loop
+    async def _before_stripe_retry(self):
+        await self.bot.wait_until_ready()
 
     async def cog_unload(self):
+        self.stripe_retry_loop.cancel()
         if self.runner is not None:
             await self.runner.cleanup()
 

@@ -22,7 +22,7 @@ from webapp.layout import bare_page, esc
 log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
-PUBLIC_PREFIXES = ("/login", "/oauth/callback", "/static/", "/health")
+PUBLIC_PREFIXES = ("/login", "/oauth/callback", "/static/", "/health", "/shop/", "/stripe/webhook")
 MULTIPART_PATHS = {"/intake"}  # POSTs that check their own CSRF token (see require_sign_in)
 BOT_KEY = web.AppKey("bot", object)
 
@@ -155,7 +155,7 @@ async def health(request):
 
 
 def create_app(bot) -> web.Application:
-    from webapp import finance, home, inventory, pipeline  # page modules register their routes
+    from webapp import finance, home, inventory, pipeline, shop  # page modules register their routes
 
     app = web.Application(middlewares=[security_headers, require_sign_in],
                           client_max_size=config.WEB_MAX_UPLOAD_MB * 1024 * 1024 * 10)
@@ -165,6 +165,6 @@ def create_app(bot) -> web.Application:
     app.router.add_post("/logout", logout)
     app.router.add_get("/health", health)
     app.router.add_static("/static/", STATIC_DIR, show_index=False)
-    for module in (home, inventory, finance, pipeline):
+    for module in (home, inventory, finance, pipeline, shop):
         module.add_routes(app)
     return app

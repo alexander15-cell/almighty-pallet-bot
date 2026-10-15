@@ -469,6 +469,8 @@ def sales_channel(platform: str) -> str:
         return "ebay"
     if p == "in person":
         return "in_person"
+    if p == "website":
+        return "website"
     return "other"
 
 
@@ -485,6 +487,8 @@ def sales_item_for_platform(platform: str) -> tuple:
         "ebay": config.QUICKBOOKS_EBAY_SALES_ITEM_ID,
         "in_person": config.QUICKBOOKS_IN_PERSON_SALES_ITEM_ID,
         "other": config.QUICKBOOKS_OTHER_SALES_ITEM_ID,
+        # Website (Stripe) sales: their own item, else filed with Other Sales.
+        "website": config.QUICKBOOKS_WEBSITE_SALES_ITEM_ID or config.QUICKBOOKS_OTHER_SALES_ITEM_ID,
     }[channel]
     if item_id:
         return item_id, None
@@ -519,6 +523,11 @@ async def post_sale_to_quickbooks(sale_id: int, platform: str, total_price: floa
     """
     sale = db.get_sale(sale_id)
     is_ebay = platform.strip().lower() == "ebay"
+    # eBay and the website (Stripe Tax) both collect the sales tax
+    # themselves, so neither receipt asks QuickBooks to add tax on top -
+    # the website's collected tax is booked to the payable account by
+    # stripe_shop.py instead.
+    tax_collected_elsewhere = is_ebay or sales_channel(platform) == "website"
     if sale["quickbooks_sales_receipt_id"]:
         return {"ok": True, "sales_receipt_doc": "(already created)"}
 
@@ -534,7 +543,7 @@ async def post_sale_to_quickbooks(sale_id: int, platform: str, total_price: floa
             income_account_id=income_account,
             deposit_account_id=deposit_account,
             amount=total_price, date=sale_date, memo=memo,
-            taxable=not is_ebay,
+            taxable=not tax_collected_elsewhere,
         )
     except quickbooks.QuickBooksError as e:
         return {"ok": False, "error": f"Sales Receipt failed: {e}"}

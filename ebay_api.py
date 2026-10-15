@@ -686,6 +686,30 @@ def _require_publish_config():
         )
 
 
+async def end_listing_for_item(item: dict) -> str:
+    """
+    Ends this item's live eBay listing (withdraws its published offer) -
+    used when it sells somewhere else, so it can't sell twice. Only works
+    for listings the bot created (they carry the bot's SKU); returns a
+    short note saying what happened. Raises EbayAPIError on failure.
+    """
+    if not config.EBAY_ENABLED:
+        return "eBay API isn't enabled - end the listing in Seller Hub."
+    sku = ebay_listing_rules.custom_label(item)
+    try:
+        offers = (await _request("GET", f"/offer?sku={urllib.parse.quote(sku)}")).get("offers") or []
+    except EbayAPIError as e:
+        if "25713" in str(e) or "404" in str(e):  # no offer for this SKU = not a bot-made listing
+            return "Not a bot-made listing - end it in Seller Hub."
+        raise
+    ended = 0
+    for offer in offers:
+        if offer.get("status") == "PUBLISHED" and offer.get("offerId"):
+            await _request("POST", f"/offer/{offer['offerId']}/withdraw")
+            ended += 1
+    return "eBay listing ended." if ended else "No live eBay listing found for it."
+
+
 async def create_listing(item: dict, listing: dict) -> dict:
     """
     Creates a live eBay listing from `item` (items table dict) and `listing`

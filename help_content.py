@@ -177,6 +177,11 @@ ENTRIES = (
         ("refund", "return", "store subscription", "listing fee", "insertion fee", "account charges"),
     ),
     HelpEntry(
+        "Website checkout (Stripe)",
+        "Website orders are paid on Stripe's checkout page (tax added automatically). When one's paid the bot marks the item sold, ends its eBay listing, saves the shipping address for the Pirate Ship export, and books the sale, sales tax and Stripe's fee to QuickBooks - see '🛒 Website order paid' in #ebay-orders. On the web dashboard, a Listed item's page has 'Send a payment link' for one-off buyers (ship or local pickup); Finance → Website lists orders.",
+        ("stripe", "website order", "payment link", "card payment", "checkout", "sales tax website"),
+    ),
+    HelpEntry(
         "Web dashboard",
         "The same bot as a website (if a Pallet Admin turned it on): sign in with Discord - your Discord roles decide what you can do. Phone intake with the camera, Queue Review and approving, listing/sold/shipped, inventory search, and Finance confirms. Everything stays in sync with Discord - use whichever you prefer.",
         ("website", "web dashboard", "phone intake", "use on phone", "browser", "dashboard site"),

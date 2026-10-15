@@ -689,6 +689,46 @@ def init_db():
                 expires_at        TEXT NOT NULL
             );
 
+            -- Stripe website checkouts (stripe_shop.py): one row per
+            -- Checkout Session the bot created, and how far its fulfillment
+            -- got (each step is recorded so a retry never repeats one).
+            CREATE TABLE IF NOT EXISTS stripe_checkouts (
+                session_id        TEXT PRIMARY KEY,
+                source            TEXT NOT NULL,      -- 'website' or 'link'
+                status            TEXT NOT NULL,      -- open / processing / paid / fulfilled / attention / expired / failed
+                item_ids          TEXT NOT NULL,      -- JSON list
+                url               TEXT,
+                delivery          TEXT,               -- 'ship' or 'pickup'
+                expires_at        TEXT,
+                amount_total      REAL,
+                amount_tax        REAL,
+                amount_shipping   REAL,
+                stripe_fee        REAL,
+                sale_id           INTEGER,
+                sold_marked       INTEGER NOT NULL DEFAULT 0,
+                fees_booked       INTEGER NOT NULL DEFAULT 0,
+                notified          INTEGER NOT NULL DEFAULT 0,
+                note              TEXT,
+                created_by        INTEGER,
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL
+            );
+
+            -- Items held by an open Stripe checkout, so a one-of-a-kind item
+            -- can't be bought twice. Released when the session expires/fails.
+            CREATE TABLE IF NOT EXISTS stripe_holds (
+                item_id      INTEGER PRIMARY KEY,
+                session_id   TEXT NOT NULL,
+                expires_at   TEXT NOT NULL
+            );
+
+            -- Stripe webhook events already handled (Stripe can resend).
+            CREATE TABLE IF NOT EXISTS stripe_events (
+                event_id     TEXT PRIMARY KEY,
+                event_type   TEXT,
+                received_at  TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS ebay_book_cards (
                 kind       TEXT NOT NULL,
                 card_key   TEXT NOT NULL,
@@ -2643,6 +2683,93 @@ def get_item_events(item_id: int, limit: int = 50) -> list:
     with get_conn() as conn:
         return [dict(r) for r in conn.execute(
             "SELECT * FROM item_events WHERE item_id = ? ORDER BY id DESC LIMIT ?", (item_id, limit))]
+
+
+# ------------------------------------------------------- Stripe checkouts --
+
+def active_stripe_holds(item_ids: list) -> dict:
+    """{item_id: session_id} for items held by a checkout that's still open
+    (or paid and still processing). Expired holds don't count."""
+    if not item_ids:
+        return {}
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""SELECT h.item_id, h.session_id FROM stripe_holds h
+                JOIN stripe_checkouts c ON c.session_id = h.session_id
+                WHERE h.item_id IN ({','.join('?' * len(item_ids))})
+                  AND (h.expires_at > ? OR c.status IN ('processing', 'paid', 'attention'))""",
+            [*item_ids, _now()],
+        ).fetchall()
+        return {r["item_id"]: r["session_id"] for r in rows}
+
+
+def create_stripe_checkout(session_id: str, source: str, item_ids: list, url: str, delivery: str, expires_at: str,
+                           created_by: int = None):
+    """Saves a new checkout and holds its items, in one transaction. Raises
+    sqlite3.IntegrityError if another checkout grabbed one of the items."""
+    now = _now()
+    with get_conn() as conn:
+        conn.execute("DELETE FROM stripe_holds WHERE expires_at <= ? AND session_id IN "
+                     "(SELECT session_id FROM stripe_checkouts WHERE status IN ('open', 'expired', 'failed'))", (now,))
+        conn.execute(
+            "INSERT INTO stripe_checkouts (session_id, source, status, item_ids, url, delivery, expires_at, created_by, "
+            "created_at, updated_at) VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, source, json.dumps(item_ids), url, delivery, expires_at, created_by, now, now),
+        )
+        conn.executemany("INSERT INTO stripe_holds (item_id, session_id, expires_at) VALUES (?, ?, ?)",
+                         [(i, session_id, expires_at) for i in item_ids])
+
+
+def get_stripe_checkout(session_id: str):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM stripe_checkouts WHERE session_id = ?", (session_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["item_ids"] = json.loads(d["item_ids"])
+        return d
+
+
+def update_stripe_checkout(session_id: str, **fields):
+    allowed = {"status", "amount_total", "amount_tax", "amount_shipping", "stripe_fee", "sale_id", "sold_marked",
+               "fees_booked", "notified", "note"}
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    if not fields:
+        return
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE stripe_checkouts SET {', '.join(f'{k} = ?' for k in fields)}, updated_at = ? WHERE session_id = ?",
+            [*fields.values(), _now(), session_id],
+        )
+
+
+def release_stripe_holds(session_id: str):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM stripe_holds WHERE session_id = ?", (session_id,))
+
+
+def list_stripe_checkouts(statuses: list = None, limit: int = 50) -> list:
+    with get_conn() as conn:
+        if statuses:
+            rows = conn.execute(
+                f"SELECT * FROM stripe_checkouts WHERE status IN ({','.join('?' * len(statuses))}) "
+                "ORDER BY created_at DESC LIMIT ?", [*statuses, limit]).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM stripe_checkouts ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["item_ids"] = json.loads(d["item_ids"])
+        out.append(d)
+    return out
+
+
+def record_stripe_event(event_id: str, event_type: str) -> bool:
+    """True the first time an event is seen, False for a resend."""
+    with get_conn() as conn:
+        cur = conn.execute("INSERT OR IGNORE INTO stripe_events (event_id, event_type, received_at) VALUES (?, ?, ?)",
+                           (event_id, event_type, _now()))
+        return cur.rowcount == 1
 
 
 # ---------------------------------------------------------- web sessions --
