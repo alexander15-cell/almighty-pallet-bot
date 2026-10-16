@@ -797,6 +797,14 @@ EBAY_FEE_CARD_DELAY_DAYS = int(os.getenv("EBAY_FEE_CARD_DELAY_DAYS") or "5")
 # flood #ebay-orders - use /ebay fee-cards since:<date> for those.
 EBAY_FEE_CARDS_START_DATE = os.getenv("EBAY_FEE_CARDS_START_DATE", "").strip()
 
+# ---- eBay price sync (price_sync.py) ----
+# Copies each Listed item's live eBay price into the bot, so a price changed
+# on eBay (Seller Hub, eBay's price suggestions, ...) also changes it in
+# Discord, on the web dashboard, the website checkout (Stripe) and the
+# pallet's value still to sell. Fixed-price listings only.
+EBAY_PRICE_SYNC = os.getenv("EBAY_PRICE_SYNC", "true").strip().lower() == "true"
+EBAY_PRICE_SYNC_MINUTES = max(15, int(os.getenv("EBAY_PRICE_SYNC_MINUTES") or "60"))
+
 # ---- eBay refunds, account charges and payouts (see ebay_books.py) ----
 # Refunds/returns: the income account a refund is booked against (debited).
 # Blank = eBay Sales (QUICKBOOKS_EBAY_SALES_ACCOUNT_ID) for eBay refunds and

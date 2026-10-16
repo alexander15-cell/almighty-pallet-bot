@@ -968,6 +968,22 @@ move exactly as if someone had clicked there.
 Not on the website yet (use Discord): `/finance log-sale` for non-eBay
 sales, `/finance reverse-sale`, Start New Pallet, and admin commands.
 
+### eBay price sync
+
+Every `EBAY_PRICE_SYNC_MINUTES` (default 60), and on demand with `/ebay
+sync-prices` (Finance Management), each **Listed** item with a live
+fixed-price eBay listing has its current eBay price read (Browse API
+`getItemByLegacyId`, application token - works for listings made by hand in
+Seller Hub too). A changed price updates the bot's listing price (with the
+change in the item's history) - which website checkout (Stripe), the web
+dashboard and the pallet's value-still-to-sell all use - edits the item's
+#listed card in place (its **💲 Price** field, which Awaiting Listing and
+Listed cards now show, plus the website publisher's price field when website
+markers are on), and refreshes the pallet card. Auctions, ended listings
+and items that aren't Listed are left alone. `EBAY_PRICE_SYNC=false` turns
+it off. One way only: changing a price in the bot (Edit Details) doesn't
+change it on eBay.
+
 ### Website checkout (Stripe)
 
 Website sales through **Stripe Checkout** (Stripe's hosted payment page)

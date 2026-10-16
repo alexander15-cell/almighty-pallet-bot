@@ -103,6 +103,11 @@ def parse_quantity(raw_text: str) -> tuple:
     return 1, raw_text, False
 
 
+# The visible price on Awaiting Listing / Listed cards - kept in step with
+# eBay by price_sync.py (which edits this field in place).
+PRICE_FIELD = "💲 Price"
+
+
 def photo_dir_for(item_id: int) -> Path:
     d = PHOTO_DIR / str(item_id)
     d.mkdir(parents=True, exist_ok=True)
@@ -175,6 +180,10 @@ async def send_item_card(channel: discord.TextChannel, item: dict, view: discord
     main_embed.add_field(name="📦 Pallet", value=pallet_name[:100], inline=True)
     main_embed.add_field(name="Item #", value=str(item["item_number"]), inline=True)
     main_embed.add_field(name="Status", value=status, inline=True)
+    if status in (db.STATUS_AWAITING_LISTING, db.STATUS_LISTED):
+        listing_price = (db.get_ebay_listing_data(item["id"]) or {}).get("price")
+        if listing_price is not None:
+            main_embed.add_field(name=PRICE_FIELD, value=f"${listing_price:,.2f}", inline=True)
     if flags and flags not in ("[]", None, ""):
         main_embed.add_field(name="⚠️ Flags", value=str(flags)[:300], inline=False)
     if contract:

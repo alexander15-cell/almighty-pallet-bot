@@ -40,6 +40,7 @@ import discord_resilience
 import ebay_api
 import ebay_aspects
 import ebay_books
+import price_sync
 import ebay_fee_expenses
 import ebay_finances
 import ebay_listing_rules
@@ -945,6 +946,7 @@ class Ebay(commands.Cog):
         if not config.PRESERVE_DISCORD_HISTORY:
             self.order_poll_loop.start()
             self.fee_card_loop.start()
+            self.price_sync_loop.start()
 
     async def cog_load(self):
         # Registers the (order_id -> button) template once so every
@@ -959,6 +961,21 @@ class Ebay(commands.Cog):
     def cog_unload(self):
         self.order_poll_loop.cancel()
         self.fee_card_loop.cancel()
+        self.price_sync_loop.cancel()
+
+    @tasks.loop(minutes=config.EBAY_PRICE_SYNC_MINUTES)
+    async def price_sync_loop(self):
+        """Keeps the bot's prices in step with eBay (see price_sync.py)."""
+        if config.PRESERVE_DISCORD_HISTORY or not (config.EBAY_ENABLED and config.EBAY_PRICE_SYNC):
+            return
+        try:
+            await price_sync.sync_prices(self.bot)
+        except Exception:
+            log.exception("eBay price sync failed - will retry next run")
+
+    @price_sync_loop.before_loop
+    async def _before_price_sync_loop(self):
+        await self.bot.wait_until_ready()
 
     @tasks.loop(minutes=config.EBAY_FEE_SYNC_MINUTES)
     async def fee_card_loop(self):
@@ -1119,6 +1136,26 @@ class Ebay(commands.Cog):
             "(Uses the last `/ebay sync-finances` data - run that first for older orders.)",
             ephemeral=True,
         )
+
+    @ebay_group.command(
+        name="sync-prices",
+        description="Copy each Listed item's current eBay price into the bot (Discord, website, dashboard) now.",
+    )
+    async def sync_prices_cmd(self, interaction: discord.Interaction):
+        if not await _require_finance_role(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        result = await price_sync.sync_prices(self.bot)
+        lines = [f"Checked {result['checked']} listed item(s) against eBay - "
+                 f"{len(result['changed'])} price(s) updated."]
+        for item, old, new in result["changed"][:15]:
+            pallet = (db.get_pallet(item["pallet_id"]) or {}).get("name", "?")
+            lines.append(f"• {pallet} #{item['item_number']}: {_money(old) if old is not None else '-'} → {_money(new)}")
+        if len(result["changed"]) > 15:
+            lines.append(f"… and {len(result['changed']) - 15} more")
+        if result["errors"]:
+            lines.append(f"⚠️ {len(result['errors'])} couldn't be checked: " + "; ".join(result["errors"][:3]))
+        await interaction.followup.send(NL.join(lines)[:1900], ephemeral=True)
 
     @ebay_group.command(
         name="refund-cards",

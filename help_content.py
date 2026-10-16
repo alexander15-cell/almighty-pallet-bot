@@ -177,6 +177,11 @@ ENTRIES = (
         ("refund", "return", "store subscription", "listing fee", "insertion fee", "account charges"),
     ),
     HelpEntry(
+        "/ebay sync-prices",
+        "Copy each Listed item's current eBay price into the bot now (it also happens every hour) - updates the 💲 Price on its Discord card, the website checkout price and the dashboard. Change prices on eBay; the bot follows.",
+        ("price", "price change", "update price", "ebay price", "reprice", "sync prices"),
+    ),
+    HelpEntry(
         "Website checkout (Stripe)",
         "Website orders are paid on Stripe's checkout page (tax added automatically). When one's paid the bot marks the item sold, ends its eBay listing, saves the shipping address for the Pirate Ship export, and books the sale, sales tax and Stripe's fee to QuickBooks - see '🛒 Website order paid' in #ebay-orders. On the web dashboard, a Listed item's page has 'Send a payment link' for one-off buyers (ship or local pickup); Finance → Website lists orders.",
         ("stripe", "website order", "payment link", "card payment", "checkout", "sales tax website"),
