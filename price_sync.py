@@ -1,0 +1,101 @@
+"""
+eBay -> bot price sync. Every EBAY_PRICE_SYNC_MINUTES (and /ebay
+sync-prices) each Listed item with a live fixed-price eBay listing has its
+current eBay price read (ebay_api.get_live_listing_price - the Browse API,
+so hand-made Seller Hub listings work too). When it differs from the bot's
+price:
+
+  - ebay_listing_data.price is updated, with the change in the item's
+    history - which is what website checkout (Stripe), the web dashboard and
+    the pallet's "value still to sell" all read;
+  - the item's #listed card is edited in place (its 💲 Price field, plus the
+    website publisher's price field when website markers are on, so the
+    website follows too);
+  - the pallet's pinned card is refreshed.
+
+Only the price changes - nothing else about the item, and never an item
+that isn't Listed. An eBay listing that's ended or unreachable is left alone
+(the order automation handles sales).
+"""
+import asyncio
+import logging
+
+import config
+import database as db
+import ebay_api
+import finance_utils
+
+log = logging.getLogger(__name__)
+CONCURRENCY = 5
+WEBSITE_PRICE_FIELD = "Website price cents"
+
+
+async def _fetch(item: dict, sem: asyncio.Semaphore):
+    async with sem:
+        try:
+            return item, await ebay_api.get_live_listing_price(item["ebay_item_id"]), None
+        except ebay_api.EbayAPIError as e:
+            return item, None, str(e)
+
+
+async def update_card_price(bot, item: dict, price: float):
+    """Edits the item's #listed card so its price fields show `price`."""
+    from cogs.item_flow import PRICE_FIELD  # avoid importing the cog at module load
+    flow = bot.get_cog("ItemFlow") if bot else None
+    if flow is None or config.PRESERVE_DISCORD_HISTORY:
+        return False
+    message = await flow._fetch_current_card(item, "listed")
+    if message is None or not message.embeds:
+        return False
+    embeds = list(message.embeds)
+    main = embeds[0]
+    fields = [(f.name, f.value, f.inline) for f in main.fields]
+    shown = f"${price:,.2f}"
+    names = [name for name, _, _ in fields]
+    if PRICE_FIELD in names:
+        fields = [(n, shown if n == PRICE_FIELD else v, i) for n, v, i in fields]
+    else:
+        status_at = names.index("Status") + 1 if "Status" in names else len(fields)
+        fields.insert(status_at, (PRICE_FIELD, shown, True))
+    fields = [(n, str(round(price * 100)) if n == WEBSITE_PRICE_FIELD else v, i) for n, v, i in fields]
+    main.clear_fields()
+    for name, value, inline in fields:
+        main.add_field(name=name, value=value, inline=inline)
+    try:
+        await message.edit(embeds=embeds)
+    except Exception:
+        log.exception("Couldn't update the Discord card price for item %s", item["id"])
+        return False
+    return True
+
+
+async def sync_prices(bot) -> dict:
+    """One pass. Returns {'checked', 'changed': [(item, old, new)], 'errors'}."""
+    if not config.EBAY_ENABLED:
+        return {"checked": 0, "changed": [], "errors": ["eBay API isn't enabled."]}
+    items = db.items_for_price_sync()
+    sem = asyncio.Semaphore(CONCURRENCY)
+    results = await asyncio.gather(*(_fetch(item, sem) for item in items))
+    changed, errors, pallets = [], [], set()
+    for item, live, error in results:
+        if error:
+            errors.append(f"#{item['item_number']}: {error}")
+            continue
+        if not live or live["currency"] != "USD":
+            continue
+        old = item["list_price"]
+        new = live["price"]
+        if old is not None and round(old, 2) == new:
+            continue
+        current = db.get_item(item["id"])
+        if current["status"] != db.STATUS_LISTED:
+            continue  # sold or moved while we were checking
+        db.update_listing_price(item["id"], new, old, "Price synced from eBay")
+        await update_card_price(bot, current, new)
+        changed.append((current, old, new))
+        pallets.add(current["pallet_id"])
+    for pallet_id in pallets:
+        await finance_utils.refresh_finance_message(bot, pallet_id)
+    if changed:
+        log.info("eBay price sync: %d price(s) updated", len(changed))
+    return {"checked": len(items), "changed": changed, "errors": errors}

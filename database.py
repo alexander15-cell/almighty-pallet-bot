@@ -2646,6 +2646,38 @@ def get_pallet_profit_inputs(pallet_id: int) -> dict:
     return {"costs_by_type": costs, "items": items}
 
 
+# ---------------------------------------------------------- eBay price sync --
+
+def items_for_price_sync() -> list:
+    """Listed items with a live fixed-price eBay listing: item row plus
+    ebay_item_id and the bot's current price."""
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            """SELECT i.*, eld.ebay_item_id, eld.price AS list_price FROM items i
+               JOIN ebay_listing_data eld ON eld.item_id = i.id
+               WHERE i.status = ? AND eld.ebay_item_id IS NOT NULL AND eld.ebay_item_id != ''
+                 AND COALESCE(eld.listing_format, 'FixedPrice') = 'FixedPrice'
+               ORDER BY i.id""",
+            (STATUS_LISTED,),
+        )]
+
+
+def update_listing_price(item_id: int, new_price: float, old_price: float, note: str, actor_id: int = None):
+    """Sets the item's listing price (only that field) and records the change
+    in the item's history."""
+    now = _now()
+    with get_conn() as conn:
+        conn.execute("UPDATE ebay_listing_data SET price = ?, updated_at = ? WHERE item_id = ?",
+                     (new_price, now, item_id))
+        conn.execute(
+            "INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp) "
+            "VALUES (?, NULL, (SELECT status FROM items WHERE id = ?), ?, ?, ?)",
+            (item_id, item_id, actor_id,
+             f"{note}: ${old_price:.2f} -> ${new_price:.2f}" if old_price is not None else f"{note}: ${new_price:.2f}",
+             now),
+        )
+
+
 # ------------------------------------------------------- web dashboard reads --
 
 def web_status_counts() -> dict:

@@ -154,6 +154,40 @@ def _taxonomy_base_url() -> str:
     return "https://api.ebay.com/commerce/taxonomy/v1"
 
 
+def _browse_base_url() -> str:
+    if config.EBAY_ENVIRONMENT == "sandbox":
+        return "https://api.sandbox.ebay.com/buy/browse/v1"
+    return "https://api.ebay.com/buy/browse/v1"
+
+
+async def get_live_listing_price(legacy_item_id: str):
+    """
+    A live eBay listing's current price, from the Browse API (public data,
+    application token - works for hand-made Seller Hub listings too).
+    Returns {'price': float, 'currency': str} for a fixed-price listing,
+    None if the listing has ended / can't be found, or has no fixed price
+    (an auction - its current bid isn't a price to copy). Raises
+    EbayAPIError for any other failure.
+    """
+    token = await get_app_access_token()
+    url = f"{_browse_base_url()}/item/get_item_by_legacy_id?legacy_item_id={urllib.parse.quote(str(legacy_item_id))}"
+    headers = {"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": config.EBAY_MARKETPLACE_ID}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as resp:
+            body = await resp.json(content_type=None)
+            if resp.status == 404:
+                return None
+            if resp.status >= 300:
+                _raise_for_ebay_error(resp.status, body, "Browse getItemByLegacyId")
+    price = (body or {}).get("price") or {}
+    if "FIXED_PRICE" not in ((body or {}).get("buyingOptions") or ["FIXED_PRICE"]) or price.get("value") is None:
+        return None
+    try:
+        return {"price": round(float(price["value"]), 2), "currency": price.get("currency") or "USD"}
+    except (TypeError, ValueError):
+        return None
+
+
 def _fulfillment_base_url() -> str:
     if config.EBAY_ENVIRONMENT == "sandbox":
         return "https://api.sandbox.ebay.com/sell/fulfillment/v1"
