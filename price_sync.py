@@ -10,7 +10,9 @@ price:
     the pallet's "value still to sell" all read;
   - the item's #listed card is edited in place (its 💲 Price field, plus the
     website publisher's price field when website markers are on, so the
-    website follows too);
+    website follows too). Card edits are queued (price_card_updates) and
+    worked off a few at a time by update_queued_cards - Discord only allows
+    so many edits to older messages per hour, and stops a bulk change cold;
   - the pallet's pinned card is refreshed.
 
 Only the price changes - nothing else about the item, and never an item
@@ -28,6 +30,9 @@ import finance_utils
 log = logging.getLogger(__name__)
 CONCURRENCY = 5
 WEBSITE_PRICE_FIELD = "Website price cents"
+CARD_EDITS_PER_RUN = 5
+CARD_EDIT_GAP_SECONDS = 3
+OLD_MESSAGE_EDIT_LIMIT = 30046  # Discord: "Maximum number of edits to messages older than 1 hour reached"
 
 
 async def _fetch(item: dict, sem: asyncio.Semaphore):
@@ -39,7 +44,9 @@ async def _fetch(item: dict, sem: asyncio.Semaphore):
 
 
 async def update_card_price(bot, item: dict, price: float):
-    """Edits the item's #listed card so its price fields show `price`."""
+    """Edits the item's #listed card so its price fields show `price`.
+    True when edited, False when there's no card to edit, "limited" when
+    Discord refused because of its old-message edit limit (try later)."""
     from cogs.item_flow import PRICE_FIELD  # avoid importing the cog at module load
     flow = bot.get_cog("ItemFlow") if bot else None
     if flow is None or config.PRESERVE_DISCORD_HISTORY:
@@ -63,10 +70,43 @@ async def update_card_price(bot, item: dict, price: float):
         main.add_field(name=name, value=value, inline=inline)
     try:
         await message.edit(embeds=embeds)
-    except Exception:
+    except Exception as e:
+        if getattr(e, "code", None) == OLD_MESSAGE_EDIT_LIMIT:
+            return "limited"
         log.exception("Couldn't update the Discord card price for item %s", item["id"])
         return False
     return True
+
+
+_card_lock = asyncio.Lock()
+
+
+async def update_queued_cards(bot, limit: int = None, gap: float = None) -> dict:
+    """Works off up to `limit` queued card price edits, spaced out. Stops at
+    Discord's old-message edit limit and leaves the rest queued. Returns
+    {'edited', 'remaining', 'limited'}."""
+    limit = CARD_EDITS_PER_RUN if limit is None else limit
+    gap = CARD_EDIT_GAP_SECONDS if gap is None else gap
+    edited, limited = 0, False
+    if _card_lock.locked():
+        return {"edited": 0, "remaining": db.count_price_card_updates(), "limited": False}
+    async with _card_lock:
+        for n, row in enumerate(db.pending_price_card_updates(limit)):
+            item = db.get_item(row["item_id"])
+            if item is None or item["status"] != db.STATUS_LISTED:
+                db.clear_price_card_update(row["item_id"], row["price"])
+                continue
+            if n and gap:
+                await asyncio.sleep(gap)
+            outcome = await update_card_price(bot, item, row["price"])
+            if outcome == "limited":
+                limited = True
+                break
+            db.clear_price_card_update(row["item_id"], row["price"])  # edited, or no card to edit
+            edited += outcome is True
+    if limited:
+        log.info("Discord's edit limit reached - the remaining card price updates will be retried later")
+    return {"edited": edited, "remaining": db.count_price_card_updates(), "limited": limited}
 
 
 async def link_listings() -> dict:
@@ -129,11 +169,13 @@ async def sync_prices(bot, link_first: bool = True) -> dict:
         if current["status"] != db.STATUS_LISTED:
             continue  # sold or moved while we were checking
         db.update_listing_price(item["id"], new, old, "Price synced from eBay")
-        await update_card_price(bot, current, new)
+        db.queue_price_card_update(item["id"], new)
         changed.append((current, old, new))
         pallets.add(current["pallet_id"])
     for pallet_id in pallets:
         await finance_utils.refresh_finance_message(bot, pallet_id)
     if changed:
         log.info("eBay price sync: %d price(s) updated", len(changed))
-    return {"checked": len(items), "changed": changed, "errors": errors, "linked": linked}
+    cards = await update_queued_cards(bot)
+    return {"checked": len(items), "changed": changed, "errors": errors, "linked": linked,
+            "cards_pending": cards["remaining"]}

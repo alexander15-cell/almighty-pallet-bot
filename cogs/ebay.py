@@ -947,6 +947,7 @@ class Ebay(commands.Cog):
             self.order_poll_loop.start()
             self.fee_card_loop.start()
             self.price_sync_loop.start()
+            self.price_card_loop.start()
 
     async def cog_load(self):
         # Registers the (order_id -> button) template once so every
@@ -962,6 +963,7 @@ class Ebay(commands.Cog):
         self.order_poll_loop.cancel()
         self.fee_card_loop.cancel()
         self.price_sync_loop.cancel()
+        self.price_card_loop.cancel()
 
     @tasks.loop(minutes=config.EBAY_PRICE_SYNC_MINUTES)
     async def price_sync_loop(self):
@@ -975,6 +977,21 @@ class Ebay(commands.Cog):
 
     @price_sync_loop.before_loop
     async def _before_price_sync_loop(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(minutes=5)
+    async def price_card_loop(self):
+        """Shows synced prices on the #listed cards a few at a time (see
+        price_sync.update_queued_cards) - nothing to do most runs."""
+        if config.PRESERVE_DISCORD_HISTORY:
+            return
+        try:
+            await price_sync.update_queued_cards(self.bot)
+        except Exception:
+            log.exception("Updating card prices failed - will retry next run")
+
+    @price_card_loop.before_loop
+    async def _before_price_card_loop(self):
         await self.bot.wait_until_ready()
 
     @tasks.loop(minutes=config.EBAY_FEE_SYNC_MINUTES)
@@ -1171,6 +1188,9 @@ class Ebay(commands.Cog):
             lines.append(f"… and {len(result['changed']) - 15} more")
         if result["errors"]:
             lines.append(f"⚠️ {len(result['errors'])} couldn't be checked: " + "; ".join(result["errors"][:3]))
+        if result.get("cards_pending"):
+            lines.append(f"The bot's prices are already updated; {result['cards_pending']} Discord card(s) will "
+                         "show the new price over the next while (Discord limits how fast old messages can be edited).")
         await interaction.followup.send(NL.join(lines)[:1900], ephemeral=True)
 
     @ebay_group.command(

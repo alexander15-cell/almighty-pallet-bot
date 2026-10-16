@@ -723,6 +723,12 @@ def init_db():
             );
 
             -- Stripe webhook events already handled (Stripe can resend).
+            CREATE TABLE IF NOT EXISTS price_card_updates (
+                item_id    INTEGER PRIMARY KEY,
+                price      REAL NOT NULL,
+                queued_at  TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS stripe_events (
                 event_id     TEXT PRIMARY KEY,
                 event_type   TEXT,
@@ -2716,6 +2722,32 @@ def update_listing_price(item_id: int, new_price: float, old_price: float, note:
              f"{note}: ${old_price:.2f} -> ${new_price:.2f}" if old_price is not None else f"{note}: ${new_price:.2f}",
              now),
         )
+
+
+def queue_price_card_update(item_id: int, price: float):
+    """Remembers that the item's Discord card should show `price` (the
+    latest price wins)."""
+    with get_conn() as conn:
+        conn.execute("INSERT INTO price_card_updates (item_id, price, queued_at) VALUES (?, ?, ?) "
+                     "ON CONFLICT(item_id) DO UPDATE SET price = excluded.price, queued_at = excluded.queued_at",
+                     (item_id, price, _now()))
+
+
+def pending_price_card_updates(limit: int = 50) -> list:
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT item_id, price FROM price_card_updates ORDER BY queued_at, item_id LIMIT ?", (limit,))]
+
+
+def count_price_card_updates() -> int:
+    with get_conn() as conn:
+        return conn.execute("SELECT COUNT(*) FROM price_card_updates").fetchone()[0]
+
+
+def clear_price_card_update(item_id: int, price: float):
+    """Drops the queued card update - only if it's still for this price."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM price_card_updates WHERE item_id = ? AND price = ?", (item_id, price))
 
 
 # ------------------------------------------------------- web dashboard reads --

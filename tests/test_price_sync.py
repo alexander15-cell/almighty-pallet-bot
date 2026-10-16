@@ -212,3 +212,47 @@ def test_listing_fetch_failure_still_syncs_the_linked_ones(env, monkeypatch):
     monkeypatch.setattr(ebay_api, "get_live_listing_price", AsyncMock(return_value={"price": 12.0, "currency": "USD"}))
     result = asyncio.run(price_sync.sync_prices(_bot(None)))
     assert result["linked"] is None and len(result["changed"]) == 1
+
+
+# ------------------------------------------------- card edits under Discord's limit
+
+class _LimitedMessage(_Message):
+    def __init__(self, fields, refuse_after):
+        super().__init__(fields)
+        self.calls, self.refuse_after = 0, refuse_after
+
+    async def edit(self, embeds=None):
+        self.calls += 1
+        if self.calls > self.refuse_after:
+            err = discord.HTTPException(SimpleNamespace(status=429, reason="Too Many Requests"),
+                                        {"code": 30046, "message": "Maximum number of edits"})
+            raise err
+        self.edited = embeds
+
+
+def test_card_edits_are_queued_and_stop_at_discords_limit(env, monkeypatch):
+    monkeypatch.setattr(price_sync, "CARD_EDIT_GAP_SECONDS", 0)
+    items = [_listed(env, 10.0, f"11000000050{n}") for n in range(4)]
+    monkeypatch.setattr(ebay_api, "get_live_listing_price", AsyncMock(return_value={"price": 12.0, "currency": "USD"}))
+    message = _LimitedMessage([("Status", "listed")], refuse_after=2)
+
+    result = asyncio.run(price_sync.sync_prices(_bot(message)))
+
+    assert len(result["changed"]) == 4 and message.calls == 3 and result["cards_pending"] == 2
+    for item in items:  # the bot's own price is updated regardless of Discord
+        assert env.get_ebay_listing_data(item["id"])["price"] == 12.0
+
+    message.refuse_after = 99
+    done = asyncio.run(price_sync.update_queued_cards(_bot(message)))
+    assert done == {"edited": 2, "remaining": 0, "limited": False}
+
+
+def test_queued_card_for_an_item_no_longer_listed_is_dropped(env, monkeypatch):
+    item = _listed(env, 10.0, "110000000601")
+    env.queue_price_card_update(item["id"], 11.0)
+    env.queue_price_card_update(item["id"], 12.0)  # latest price wins, still one entry
+    assert env.pending_price_card_updates() == [{"item_id": item["id"], "price": 12.0}]
+    env.update_status(item["id"], env.STATUS_SOLD, actor_id=1)
+    message = _Message([("Status", "listed")])
+    assert asyncio.run(price_sync.update_queued_cards(_bot(message), gap=0))["remaining"] == 0
+    assert message.edited is None
