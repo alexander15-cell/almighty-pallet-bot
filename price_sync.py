@@ -65,6 +65,8 @@ async def update_card_price(bot, item: dict, price: float):
         status_at = names.index("Status") + 1 if "Status" in names else len(fields)
         fields.insert(status_at, (PRICE_FIELD, shown, True))
     fields = [(n, str(round(price * 100)) if n == WEBSITE_PRICE_FIELD else v, i) for n, v, i in fields]
+    if fields == [(f.name, f.value, f.inline) for f in main.fields]:
+        return True  # already shows this price - no edit needed
     main.clear_fields()
     for name, value, inline in fields:
         main.add_field(name=name, value=value, inline=inline)

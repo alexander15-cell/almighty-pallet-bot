@@ -216,34 +216,38 @@ def test_listing_fetch_failure_still_syncs_the_linked_ones(env, monkeypatch):
 
 # ------------------------------------------------- card edits under Discord's limit
 
-class _LimitedMessage(_Message):
-    def __init__(self, fields, refuse_after):
-        super().__init__(fields)
+class _Discord:
+    """Hands out a fresh card per fetch; refuses edits after `refuse_after`."""
+    def __init__(self, refuse_after):
         self.calls, self.refuse_after = 0, refuse_after
 
-    async def edit(self, embeds=None):
-        self.calls += 1
-        if self.calls > self.refuse_after:
-            err = discord.HTTPException(SimpleNamespace(status=429, reason="Too Many Requests"),
-                                        {"code": 30046, "message": "Maximum number of edits"})
-            raise err
-        self.edited = embeds
+    def bot(self):
+        discord_ = self
+
+        class _Card(_Message):
+            async def edit(self, embeds=None):
+                discord_.calls += 1
+                if discord_.calls > discord_.refuse_after:
+                    raise discord.HTTPException(SimpleNamespace(status=429, reason="Too Many Requests"),
+                                                {"code": 30046, "message": "Maximum number of edits"})
+        flow = SimpleNamespace(_fetch_current_card=AsyncMock(side_effect=lambda *a: _Card([("Status", "listed")])))
+        return SimpleNamespace(get_cog=lambda name: flow if name == "ItemFlow" else None)
 
 
 def test_card_edits_are_queued_and_stop_at_discords_limit(env, monkeypatch):
     monkeypatch.setattr(price_sync, "CARD_EDIT_GAP_SECONDS", 0)
     items = [_listed(env, 10.0, f"11000000050{n}") for n in range(4)]
     monkeypatch.setattr(ebay_api, "get_live_listing_price", AsyncMock(return_value={"price": 12.0, "currency": "USD"}))
-    message = _LimitedMessage([("Status", "listed")], refuse_after=2)
+    fake = _Discord(refuse_after=2)
 
-    result = asyncio.run(price_sync.sync_prices(_bot(message)))
+    result = asyncio.run(price_sync.sync_prices(fake.bot()))
 
-    assert len(result["changed"]) == 4 and message.calls == 3 and result["cards_pending"] == 2
+    assert len(result["changed"]) == 4 and fake.calls == 3 and result["cards_pending"] == 2
     for item in items:  # the bot's own price is updated regardless of Discord
         assert env.get_ebay_listing_data(item["id"])["price"] == 12.0
 
-    message.refuse_after = 99
-    done = asyncio.run(price_sync.update_queued_cards(_bot(message)))
+    fake.refuse_after = 99
+    done = asyncio.run(price_sync.update_queued_cards(fake.bot()))
     assert done == {"edited": 2, "remaining": 0, "limited": False}
 
 
@@ -256,3 +260,16 @@ def test_queued_card_for_an_item_no_longer_listed_is_dropped(env, monkeypatch):
     message = _Message([("Status", "listed")])
     assert asyncio.run(price_sync.update_queued_cards(_bot(message), gap=0))["remaining"] == 0
     assert message.edited is None
+
+
+def test_recently_synced_cards_are_requeued_and_unchanged_cards_not_edited(env, monkeypatch):
+    item = _listed(env, 10.0, "110000000701")
+    other = _listed(env, 10.0, "110000000702")
+    env.update_listing_price(item["id"], 14.0, 10.0, "Price synced from eBay")
+    assert env.queue_recently_synced_cards() == 1
+    assert env.pending_price_card_updates() == [{"item_id": item["id"], "price": 14.0}]
+
+    message = _Message([("Status", "listed"), (PRICE_FIELD, "$14.00")])
+    assert asyncio.run(price_sync.update_card_price(_bot(message), env.get_item(item["id"]), 14.0)) is True
+    assert message.edited is None  # already right - Discord not touched
+    assert other["id"] not in [r["item_id"] for r in env.pending_price_card_updates()]

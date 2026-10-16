@@ -2733,6 +2733,23 @@ def queue_price_card_update(item_id: int, price: float):
                      (item_id, price, _now()))
 
 
+def queue_recently_synced_cards(days: int = 7) -> int:
+    """Queues a card check for every Listed item whose price the eBay sync
+    changed in the last `days` days (cards an interrupted or rate-limited
+    pass may have left showing the old price). Returns how many were added."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO price_card_updates (item_id, price, queued_at)
+               SELECT DISTINCT i.id, d.price, ? FROM items i
+               JOIN ebay_listing_data d ON d.item_id = i.id
+               JOIN item_events e ON e.item_id = i.id
+               WHERE i.status = ? AND d.price IS NOT NULL
+                 AND e.note LIKE 'Price synced from eBay%' AND e.timestamp >= ?""",
+            (_now(), STATUS_LISTED, cutoff))
+        return cur.rowcount
+
+
 def pending_price_card_updates(limit: int = 50) -> list:
     with get_conn() as conn:
         return [dict(r) for r in conn.execute(

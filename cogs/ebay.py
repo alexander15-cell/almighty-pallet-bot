@@ -993,6 +993,12 @@ class Ebay(commands.Cog):
     @price_card_loop.before_loop
     async def _before_price_card_loop(self):
         await self.bot.wait_until_ready()
+        # Re-check cards a rate-limited or interrupted earlier pass may have
+        # left showing the old price (unchanged cards aren't edited).
+        try:
+            db.queue_recently_synced_cards()
+        except Exception:
+            log.exception("Couldn't queue recently synced card prices")
 
     @tasks.loop(minutes=config.EBAY_FEE_SYNC_MINUTES)
     async def fee_card_loop(self):
