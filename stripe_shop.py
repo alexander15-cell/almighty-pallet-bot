@@ -24,6 +24,7 @@ marking anything twice.
 """
 import asyncio
 import json
+import re
 import logging
 import sqlite3
 from collections import defaultdict
@@ -61,7 +62,10 @@ def resolve_items(refs: list) -> list:
         if isinstance(ref, int) or (isinstance(ref, str) and ref.isdigit()):
             item = db.get_item(int(ref))
         elif isinstance(ref, str):
-            parsed = ebay_listing_rules.parse_custom_label(ref.strip())
+            # The bot's SKU, or the website's product slug that ends with it
+            # ("ebay-318921853363-pallet-1-item-100").
+            match = re.search(r"pallet-\d+-item-\d+$", ref.strip())
+            parsed = ebay_listing_rules.parse_custom_label(match.group(0)) if match else None
             if parsed:
                 pallet_id, number = parsed
                 item = db.get_item_by_pallet_and_number(pallet_id, number)

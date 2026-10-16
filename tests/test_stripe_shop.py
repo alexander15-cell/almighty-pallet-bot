@@ -136,6 +136,13 @@ def test_checkout_uses_the_bots_price_tax_settings_and_holds_the_item(shop):
         asyncio.run(stripe_shop.start_checkout([item["id"]]))
 
 
+def test_checkout_accepts_the_websites_product_slug(shop):
+    item = _listed(shop.db)[0]
+    slug = f"ebay-318921853363-pallet-{item['pallet_id']}-item-{item['item_number']}"
+    assert asyncio.run(stripe_shop.start_checkout([slug]))["url"]
+    assert shop.created[0]["line_items"][0]["price_data"]["product_data"]["metadata"]["item_id"] == str(item["id"])
+
+
 def test_checkout_refuses_unsellable_items(shop):
     item = _listed(shop.db)[0]
     shop.db.update_status(item["id"], shop.db.STATUS_SOLD, actor_id=1)
