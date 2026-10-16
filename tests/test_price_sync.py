@@ -17,6 +17,7 @@ def env(fresh_db, monkeypatch):
     monkeypatch.setattr(config, "EBAY_ENABLED", True)
     monkeypatch.setattr(config, "PRESERVE_DISCORD_HISTORY", False)
     monkeypatch.setattr("finance_utils.refresh_finance_message", AsyncMock())
+    monkeypatch.setattr(ebay_api, "get_active_listings", AsyncMock(return_value=[]))
     return fresh_db
 
 
@@ -129,3 +130,85 @@ def test_live_price_reader(monkeypatch):
     assert asyncio.run(ebay_api.get_live_listing_price("1")) is None
     replies["next"] = (404, {"errors": [{"errorId": 11001}]})
     assert asyncio.run(ebay_api.get_live_listing_price("1")) is None
+
+
+# ------------------------------------------- matching eBay listings to items
+
+XML = """<?xml version="1.0" encoding="UTF-8"?>
+<GetMyeBaySellingResponse xmlns="urn:ebay:apis:eBLBaseComponents"><Ack>Success</Ack>
+<ActiveList><ItemArray>
+<Item><ItemID>860012952535</ItemID><SKU>pallet-1-item-96</SKU><Title>Halo 4" Canless LED</Title>
+ <SellingStatus><CurrentPrice currencyID="USD">22.0</CurrentPrice></SellingStatus><QuantityAvailable>1</QuantityAvailable>
+ <ListingType>FixedPriceItem</ListingType><PrimaryCategory><CategoryID>20706</CategoryID></PrimaryCategory><ConditionID>3000</ConditionID></Item>
+<Item><ItemID>318921540269</ItemID><SKU>pallet-1-item-43</SKU><Title>Recessed Light</Title>
+ <SellingStatus><CurrentPrice currencyID="USD">22.0</CurrentPrice></SellingStatus><QuantityAvailable>17</QuantityAvailable></Item>
+</ItemArray><PaginationResult><TotalNumberOfPages>1</TotalNumberOfPages></PaginationResult></ActiveList>
+</GetMyeBaySellingResponse>"""
+
+
+def test_active_listings_reply_is_parsed():
+    listings, pages = ebay_api._parse_active_listings(XML)
+    assert pages == 1 and [l["sku"] for l in listings] == ["pallet-1-item-96", "pallet-1-item-43"]
+    first = listings[0]
+    assert first["listing_id"] == "860012952535" and first["price"] == 22.0 and first["category_id"] == "20706"
+    assert listings[1]["quantity"] == 17
+    with pytest.raises(ebay_api.EbayAPIError, match="token expired"):
+        ebay_api._parse_active_listings(
+            '<R xmlns="urn:ebay:apis:eBLBaseComponents"><Ack>Failure</Ack><Errors><LongMessage>token expired'
+            "</LongMessage></Errors></R>")
+
+
+def _item(db, number_of_items=1):
+    pallet_id = db.create_pallet("Pallets 1-6", category_id=1, created_by=1)
+    ids = [db.create_item(pallet_id, "x", [], 1) for _ in range(number_of_items)]
+    for item_id in ids:
+        db.update_status(item_id, db.STATUS_LISTED, actor_id=1)
+    return pallet_id, [db.get_item(i) for i in ids]
+
+
+def _listing(sku, lid, price=22.0):
+    return {"listing_id": lid, "sku": sku, "title": "Lamp", "price": price, "quantity": 1,
+            "listing_type": "FixedPriceItem", "category_id": "20706", "condition_id": "3000"}
+
+
+def test_linking_only_fills_blanks(env, monkeypatch):
+    pallet_id, (no_data, no_id, same, different) = _item(env, 4)
+    for item in (no_id, same, different):
+        env.save_ebay_listing_data(item["id"], "Lamp", "1", "1500", 15.0, {})
+    env.set_ebay_item_id(same["id"], "333")
+    env.set_ebay_item_id(different["id"], "999")
+    sku = lambda i: f"pallet-{pallet_id}-item-{i['item_number']}"
+    monkeypatch.setattr(ebay_api, "get_active_listings", AsyncMock(return_value=[
+        _listing(sku(no_data), "111"), _listing(sku(no_id), "222"), _listing(sku(same), "333"),
+        _listing(sku(different), "444"), _listing("pallet-99-item-1", "555"), _listing("", "666")]))
+
+    r = asyncio.run(price_sync.link_listings())
+
+    assert [i["id"] for i, _ in r["created"]] == [no_data["id"]] and [i["id"] for i, _ in r["linked"]] == [no_id["id"]]
+    assert r["already"] == 1 and [i["id"] for i, _ in r["conflicts"]] == [different["id"]] and len(r["unmatched"]) == 2
+    created = env.get_ebay_listing_data(no_data["id"])
+    assert created["ebay_item_id"] == "111" and created["price"] == 22.0 and created["category_id"] == "20706"
+    assert env.get_ebay_listing_data(no_id["id"])["ebay_item_id"] == "222"
+    assert env.get_ebay_listing_data(no_id["id"])["price"] == 15.0  # linking never touches the price
+    assert env.get_ebay_listing_data(different["id"])["ebay_item_id"] == "999"  # never overwritten
+
+
+def test_price_sync_links_first_then_updates_the_newly_linked(env, monkeypatch):
+    pallet_id, (item,) = _item(env)
+    env.save_ebay_listing_data(item["id"], "Halo", "1", "1500", 15.0, {})
+    monkeypatch.setattr(ebay_api, "get_active_listings", AsyncMock(return_value=[
+        _listing(f"pallet-{pallet_id}-item-{item['item_number']}", "860012952535")]))
+    monkeypatch.setattr(ebay_api, "get_live_listing_price", AsyncMock(return_value={"price": 22.0, "currency": "USD"}))
+
+    result = asyncio.run(price_sync.sync_prices(_bot(None)))
+
+    assert len(result["linked"]["linked"]) == 1 and result["checked"] == 1
+    assert env.get_ebay_listing_data(item["id"])["price"] == 22.0
+
+
+def test_listing_fetch_failure_still_syncs_the_linked_ones(env, monkeypatch):
+    _listed(env, 10.0, "110000000901")
+    monkeypatch.setattr(ebay_api, "get_active_listings", AsyncMock(side_effect=ebay_api.EbayAPIError("scope")))
+    monkeypatch.setattr(ebay_api, "get_live_listing_price", AsyncMock(return_value={"price": 12.0, "currency": "USD"}))
+    result = asyncio.run(price_sync.sync_prices(_bot(None)))
+    assert result["linked"] is None and len(result["changed"]) == 1

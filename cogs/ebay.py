@@ -1146,8 +1146,24 @@ class Ebay(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         result = await price_sync.sync_prices(self.bot)
-        lines = [f"Checked {result['checked']} listed item(s) against eBay - "
-                 f"{len(result['changed'])} price(s) updated."]
+        lines = []
+        linked = result.get("linked")
+        if linked:
+            newly = len(linked["linked"]) + len(linked["created"])
+            lines.append(f"Matched {linked['listings']} active eBay listing(s) to items by Custom label - "
+                         f"{newly} newly linked.")
+            if linked["not_listed"]:
+                lines.append(f"⚠️ {len(linked['not_listed'])} are live on eBay but not **Listed** in the bot: " +
+                             ", ".join(f"#{i['item_number']} ({i['status']})" for i, _ in linked["not_listed"][:10]))
+            if linked["conflicts"]:
+                lines.append(f"⚠️ {len(linked['conflicts'])} have a different eBay listing ID on file (left alone): " +
+                             ", ".join(f"#{i['item_number']}" for i, _ in linked["conflicts"][:10]))
+            if linked["unmatched"]:
+                lines.append(f"{len(linked['unmatched'])} eBay listing(s) have no matching item (no/unknown Custom label).")
+        elif linked is None:
+            lines.append("⚠️ Couldn't fetch the eBay listing list - only already-linked items were checked.")
+        lines.append(f"Checked {result['checked']} listed item(s) against eBay - "
+                     f"{len(result['changed'])} price(s) updated.")
         for item, old, new in result["changed"][:15]:
             pallet = (db.get_pallet(item["pallet_id"]) or {}).get("name", "?")
             lines.append(f"• {pallet} #{item['item_number']}: {_money(old) if old is not None else '-'} → {_money(new)}")

@@ -981,7 +981,17 @@ dashboard and the pallet's value-still-to-sell all use - edits the item's
 Listed cards now show, plus the website publisher's price field when website
 markers are on), and refreshes the pallet card. Auctions, ended listings
 and items that aren't Listed are left alone. `EBAY_PRICE_SYNC=false` turns
-it off. One way only: changing a price in the bot (Edit Details) doesn't
+it off.
+
+Before each pass it **matches every active eBay listing to its bot item by
+Custom label** (the bot's `pallet-N-item-M` SKU, via the Trading API's
+GetMyeBaySelling), recording the eBay listing ID wherever the bot doesn't
+have one yet - so listings made by hand in Seller Hub, or before the bot
+recorded IDs, are covered too. An item with no saved listing details gets
+eBay's title / category / condition / price. It only fills blanks: a
+different listing ID already on file is left alone and reported. `/ebay
+sync-prices` shows what was matched, plus any listing that's live on eBay
+but not Listed in the bot. One way only: changing a price in the bot (Edit Details) doesn't
 change it on eBay.
 
 ### Website checkout (Stripe)

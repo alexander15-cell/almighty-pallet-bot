@@ -188,6 +188,77 @@ async def get_live_listing_price(legacy_item_id: str):
         return None
 
 
+_TRADING_NS = "{urn:ebay:apis:eBLBaseComponents}"
+
+
+def _trading_url() -> str:
+    if config.EBAY_ENVIRONMENT == "sandbox":
+        return "https://api.sandbox.ebay.com/ws/api.dll"
+    return "https://api.ebay.com/ws/api.dll"
+
+
+def _parse_active_listings(xml_text: str) -> tuple:
+    """(listings, total_pages) from a GetMyeBaySelling response. Raises
+    EbayAPIError if eBay answered with Ack=Failure."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(xml_text)
+    ns = _TRADING_NS
+    if (root.findtext(f"{ns}Ack") or "") == "Failure":
+        msg = root.findtext(f"{ns}Errors/{ns}LongMessage") or root.findtext(f"{ns}Errors/{ns}ShortMessage") or xml_text[:300]
+        raise EbayAPIError(f"eBay GetMyeBaySelling failed: {msg}")
+    listings = []
+    for item in root.iter(f"{ns}Item"):
+        listing_id = item.findtext(f"{ns}ItemID")
+        if not listing_id:
+            continue
+        price = item.findtext(f"{ns}SellingStatus/{ns}CurrentPrice") or item.findtext(f"{ns}BuyItNowPrice")
+        quantity = item.findtext(f"{ns}QuantityAvailable") or item.findtext(f"{ns}Quantity")
+        listings.append({
+            "listing_id": listing_id.strip(),
+            "sku": (item.findtext(f"{ns}SKU") or "").strip(),
+            "title": (item.findtext(f"{ns}Title") or "").strip(),
+            "price": float(price) if price else None,
+            "quantity": int(quantity) if quantity and quantity.isdigit() else None,
+            "listing_type": item.findtext(f"{ns}ListingType") or "",
+            "category_id": item.findtext(f"{ns}PrimaryCategory/{ns}CategoryID") or "",
+            "condition_id": item.findtext(f"{ns}ConditionID") or "",
+        })
+    pages = root.findtext(f"{ns}ActiveList/{ns}PaginationResult/{ns}TotalNumberOfPages")
+    return listings, int(pages) if pages and pages.isdigit() else 1
+
+
+async def get_active_listings() -> list:
+    """
+    Every active listing on the seller's eBay account (Trading API
+    GetMyeBaySelling - includes listings made by hand in Seller Hub), with
+    its Custom label (SKU), listing ID, title, price, quantity, category
+    and condition. Uses the seller's own token. Raises EbayAPIError.
+    """
+    token = await get_access_token()
+    headers = {
+        "X-EBAY-API-CALL-NAME": "GetMyeBaySelling", "X-EBAY-API-SITEID": "0",
+        "X-EBAY-API-COMPATIBILITY-LEVEL": "1349", "X-EBAY-API-IAF-TOKEN": token, "Content-Type": "text/xml",
+    }
+    listings, page, pages = [], 1, 1
+    async with aiohttp.ClientSession() as session:
+        while page <= pages and page <= 50:
+            body = (
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+                "<ActiveList><Include>true</Include><Pagination><EntriesPerPage>200</EntriesPerPage>"
+                f"<PageNumber>{page}</PageNumber></Pagination></ActiveList><DetailLevel>ReturnAll</DetailLevel>"
+                "</GetMyeBaySellingRequest>"
+            )
+            async with session.post(_trading_url(), data=body.encode(), headers=headers) as resp:
+                text = await resp.text()
+                if resp.status >= 300:
+                    raise EbayAPIError(f"eBay GetMyeBaySelling failed ({resp.status}): {text[:300]}")
+            found, pages = _parse_active_listings(text)
+            listings += found
+            page += 1
+    return listings
+
+
 def _fulfillment_base_url() -> str:
     if config.EBAY_ENVIRONMENT == "sandbox":
         return "https://api.sandbox.ebay.com/sell/fulfillment/v1"

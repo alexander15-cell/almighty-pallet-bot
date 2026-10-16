@@ -2648,6 +2648,46 @@ def get_pallet_profit_inputs(pallet_id: int) -> dict:
 
 # ---------------------------------------------------------- eBay price sync --
 
+def link_ebay_listing(item_id: int, listing: dict) -> str:
+    """
+    Records that `item_id` is live on eBay as listing['listing_id'] - only
+    ever filling in what's missing:
+      'created'  - the item had no listing details; saved eBay's title,
+                   category, condition and price with the listing ID
+      'linked'   - listing details existed without a listing ID; ID added
+      'already'  - already recorded with this same ID (nothing changed)
+      'conflict' - already recorded with a DIFFERENT ID (left alone)
+    """
+    now = _now()
+    with get_conn() as conn:
+        row = conn.execute("SELECT ebay_item_id FROM ebay_listing_data WHERE item_id = ?", (item_id,)).fetchone()
+        if row is None:
+            conn.execute(
+                """INSERT INTO ebay_listing_data (item_id, ebay_title, category_id, condition_id, price,
+                       listing_format, ebay_item_id, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (item_id, (listing.get("title") or "")[:80], listing.get("category_id") or "",
+                 listing.get("condition_id") or "", listing.get("price") or 0.0,
+                 "Auction" if listing.get("listing_type") == "Chinese" else "FixedPrice",
+                 listing["listing_id"], now, now),
+            )
+            outcome = "created"
+        elif not row["ebay_item_id"]:
+            conn.execute("UPDATE ebay_listing_data SET ebay_item_id = ?, updated_at = ? WHERE item_id = ?",
+                         (listing["listing_id"], now, item_id))
+            outcome = "linked"
+        elif str(row["ebay_item_id"]) == str(listing["listing_id"]):
+            return "already"
+        else:
+            return "conflict"
+        conn.execute(
+            "INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp) "
+            "VALUES (?, NULL, (SELECT status FROM items WHERE id = ?), NULL, ?, ?)",
+            (item_id, item_id, f"Linked to eBay listing {listing['listing_id']}", now),
+        )
+        return outcome
+
+
 def items_for_price_sync() -> list:
     """Listed items with a live fixed-price eBay listing: item row plus
     ebay_item_id and the bot's current price."""

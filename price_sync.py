@@ -69,10 +69,48 @@ async def update_card_price(bot, item: dict, price: float):
     return True
 
 
-async def sync_prices(bot) -> dict:
-    """One pass. Returns {'checked', 'changed': [(item, old, new)], 'errors'}."""
+async def link_listings() -> dict:
+    """
+    Matches every active eBay listing to its bot item by the Custom label
+    (the bot's "pallet-N-item-M" SKU) and records the listing ID wherever
+    it's missing - so the price sync covers listings made by hand in Seller
+    Hub or before the bot recorded IDs. Never overwrites a different ID
+    already on file (reported as a conflict). Returns counts and lists.
+    """
+    import ebay_listing_rules
+    result = {"listings": 0, "created": [], "linked": [], "already": 0, "conflicts": [], "unmatched": [],
+              "not_listed": []}
+    listings = await ebay_api.get_active_listings()
+    result["listings"] = len(listings)
+    for listing in listings:
+        parsed = ebay_listing_rules.parse_custom_label(listing["sku"])
+        item = db.get_item_by_pallet_and_number(*parsed) if parsed else None
+        if item is None or item["status"] == db.STATUS_DELETED:
+            result["unmatched"].append(listing)
+            continue
+        outcome = db.link_ebay_listing(item["id"], listing)
+        if outcome == "already":
+            result["already"] += 1
+        elif outcome == "conflict":
+            result["conflicts"].append((item, listing))
+        else:
+            result[outcome].append((item, listing))
+        if item["status"] != db.STATUS_LISTED:
+            result["not_listed"].append((item, listing))
+    return result
+
+
+async def sync_prices(bot, link_first: bool = True) -> dict:
+    """One pass. Returns {'checked', 'changed': [(item, old, new)], 'errors',
+    'linked' (link_listings' result, or None)}."""
     if not config.EBAY_ENABLED:
-        return {"checked": 0, "changed": [], "errors": ["eBay API isn't enabled."]}
+        return {"checked": 0, "changed": [], "errors": ["eBay API isn't enabled."], "linked": None}
+    linked = None
+    if link_first:
+        try:
+            linked = await link_listings()
+        except ebay_api.EbayAPIError as e:
+            log.warning("Couldn't match eBay listings to items (%s) - syncing the ones already linked", e)
     items = db.items_for_price_sync()
     sem = asyncio.Semaphore(CONCURRENCY)
     results = await asyncio.gather(*(_fetch(item, sem) for item in items))
@@ -98,4 +136,4 @@ async def sync_prices(bot) -> dict:
         await finance_utils.refresh_finance_message(bot, pallet_id)
     if changed:
         log.info("eBay price sync: %d price(s) updated", len(changed))
-    return {"checked": len(items), "changed": changed, "errors": errors}
+    return {"checked": len(items), "changed": changed, "errors": errors, "linked": linked}
