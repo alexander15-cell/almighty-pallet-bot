@@ -30,6 +30,7 @@ log = logging.getLogger(__name__)
 
 _recent = defaultdict(deque)  # client IP -> checkout start times (a light rate limit)
 RATE_LIMIT, RATE_WINDOW = 10, 60
+WEBSITE_PRICES_CONTRACT = "website-prices-v1"
 
 
 def _cors(request, resp):
@@ -78,11 +79,38 @@ async def checkout(request):
             raise ValueError
     except (ValueError, AttributeError, json.JSONDecodeError):
         return _cors(request, web.json_response({"error": "Send {\"items\": [...]}."}, status=400))
+    contract = body.get("checkout_contract")
+    if contract is None and "website_prices" in body:
+        return _cors(request, web.json_response({"error": "website_prices needs checkout_contract."}, status=400))
+    if contract not in (None, WEBSITE_PRICES_CONTRACT):
+        return _cors(request, web.json_response({"error": f"Unknown checkout_contract {contract!r}."}, status=400))
+    if contract == WEBSITE_PRICES_CONTRACT and not _from_website_server(request):
+        # Only the website's server, holding the shared key, may set prices.
+        log.warning("Refused a website-prices checkout without a valid X-Shop-Key")
+        return web.json_response({"error": "Not allowed."}, status=403)
     try:
-        result = await stripe_shop.start_checkout(refs, source="website", delivery="ship")
+        result = await stripe_shop.start_checkout(
+            refs, source="website", delivery="ship",
+            website_prices=body.get("website_prices") if contract else None)
     except stripe_shop.CheckoutError as e:
         return _cors(request, web.json_response({"error": str(e)}, status=409))
+    if contract == WEBSITE_PRICES_CONTRACT:
+        return web.json_response({
+            "url": result["url"], "checkout_contract": WEBSITE_PRICES_CONTRACT, "currency": "usd",
+            "subtotal_cents": result["subtotal_cents"], "website_prices": result["unit_amounts"],
+            "session_id": result["session_id"], "expires_at": result["expires_at"]})
     return _cors(request, web.json_response({"url": result["url"], "expires_at": result["expires_at"]}))
+
+
+async def session_status(request):
+    """GET /shop/session/{id} - the website's server asks whether a checkout
+    was paid (shared key required)."""
+    if not _from_website_server(request):
+        return web.json_response({"error": "Not allowed."}, status=403)
+    state = stripe_shop.session_state(request.match_info["session_id"])
+    if state is None:
+        return web.json_response({"error": "No such checkout."}, status=404)
+    return web.json_response(state)
 
 
 async def webhook(request):
@@ -166,6 +194,7 @@ async def website_orders(request):
 def add_routes(app: web.Application):
     app.router.add_route("OPTIONS", "/shop/checkout", checkout_preflight)
     app.router.add_post("/shop/checkout", checkout)
+    app.router.add_get(r"/shop/session/{session_id:cs_[A-Za-z0-9_]+}", session_status)
     app.router.add_post("/stripe/webhook", webhook)
     app.router.add_post(r"/items/{item_id:\d+}/payment-link", payment_link)
     app.router.add_get("/finance/website", website_orders)

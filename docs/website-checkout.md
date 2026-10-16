@@ -68,3 +68,58 @@ Both addresses can be changed in the bot (`STRIPE_SUCCESS_URL`,
 The bot's Stripe keys are in test mode until the owners switch them. Use
 card `4242 4242 4242 4242`, any future expiry, any CVC, and a US address.
 Nothing is charged in test mode.
+
+## 5. `website-prices-v1` - the website's own prices (server-to-server only)
+
+When the website's **server** wants its own prices charged (read from its
+own database, never from the shopper), it calls `/shop/checkout` with the
+shared key:
+
+```
+POST /shop/checkout
+X-Shop-Key: <shared key = bot's STRIPE_SHOP_SERVER_KEY>
+X-Client-IP: <shopper's IP, for per-shopper rate limits>
+
+{"items": ["pallet-1-item-96"],
+ "checkout_contract": "website-prices-v1",
+ "website_prices": {"pallet-1-item-96": 2200}}
+```
+
+- Without a valid `X-Shop-Key` the request is refused (403) before
+  anything reaches Stripe. `website_prices` without the contract name, or
+  an unknown contract, is 400.
+- `website_prices` must name exactly the requested items, each a positive
+  whole number of USD cents (max 2,000,000). Listed / held / sold /
+  one-of-each checks still apply (409 with a message otherwise).
+- The Stripe line items use those amounts. The answer is built from what
+  was sent to Stripe and checked against Stripe's own `amount_subtotal` -
+  if they ever differ the session is expired and 409 returned:
+
+```json
+{"url": "https://checkout.stripe.com/g/pay/cs_live_...",
+ "checkout_contract": "website-prices-v1", "currency": "usd",
+ "subtotal_cents": 2200, "website_prices": {"pallet-1-item-96": 2200},
+ "session_id": "cs_live_...", "expires_at": "2026-..."}
+```
+
+Shipping and tax are added by Stripe on its page (free shipping, Stripe Tax).
+
+## 6. Order status (optional)
+
+```
+GET /shop/session/{session_id}
+X-Shop-Key: <shared key>
+```
+
+→ `{"session_id", "state": "open|processing|paid|expired|failed|refund_pending",
+"paid": true|false, "items": ["pallet-1-item-96"], "amount_total_cents": 2354}`.
+`paid` turns true once the bot has received Stripe's signed payment
+notification - safe to use for clearing the cart / showing "paid". 404 for
+an unknown session, 403 without the key.
+
+## 7. Testing without touching real stock
+
+Use the bot's **test** keys (`sk_test_...` and a test-mode webhook secret)
+while validating. Make a throwaway item in a test pallet, mark it **Listed
+(Other)** so it has no eBay listing, give it a price, and buy it with card
+4242 4242 4242 4242. Afterwards `/item delete` it in Discord.

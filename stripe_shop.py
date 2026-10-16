@@ -102,7 +102,10 @@ def _photo(item: dict):
     return [u for u in urls if u][:1]
 
 
-def build_session_params(sellable: list, delivery: str, expires_at: datetime, reference: str) -> dict:
+def build_session_params(sellable: list, delivery: str, expires_at: datetime, reference: str,
+                         unit_amounts: dict = None) -> dict:
+    """unit_amounts: {item_id: cents} to charge instead of the bot's price
+    (the website's own prices - see start_checkout)."""
     line_items = []
     for item, listing in sellable:
         title = (listing.get("ebay_title") or item.get("ai_title") or f"Item #{item['item_number']}")[:250]
@@ -112,7 +115,9 @@ def build_session_params(sellable: list, delivery: str, expires_at: datetime, re
         if images:
             product["images"] = images
         line_items.append({"quantity": 1, "price_data": {
-            "currency": "usd", "unit_amount": _cents(listing["price"]), "tax_behavior": "exclusive",
+            "currency": "usd",
+            "unit_amount": (unit_amounts or {}).get(item["id"], _cents(listing["price"])),
+            "tax_behavior": "exclusive",
             "product_data": product}})
     params = {
         "mode": "payment",
@@ -138,14 +143,43 @@ def build_session_params(sellable: list, delivery: str, expires_at: datetime, re
     return params
 
 
-async def start_checkout(refs: list, source: str = "website", delivery: str = "ship", actor_id: int = None) -> dict:
-    """Holds the items and creates the Stripe Checkout page. Returns
-    {'url', 'session_id', 'expires_at'}; raises CheckoutError."""
+MAX_UNIT_CENTS = 2_000_000  # $20,000 - anything above is treated as a mistake
+
+
+def _website_unit_amounts(refs: list, items: list, website_prices) -> dict:
+    """{item_id: cents} from the website's own prices, which must cover
+    exactly the requested items with positive whole-cent USD amounts."""
+    if not isinstance(website_prices, dict):
+        raise CheckoutError("website_prices must be an object of item -> cents.")
+    if set(map(str, website_prices)) != set(map(str, refs)) or len(website_prices) != len(refs):
+        raise CheckoutError("website_prices must list exactly the items in the cart.")
+    amounts = {}
+    for ref, item in zip(refs, items):
+        cents = website_prices.get(ref, website_prices.get(str(ref)))
+        if isinstance(cents, bool) or not isinstance(cents, int) or not 0 < cents <= MAX_UNIT_CENTS:
+            raise CheckoutError(f"The price for {ref!r} must be a positive whole number of cents.")
+        amounts[item["id"]] = cents
+    return amounts
+
+
+async def start_checkout(refs: list, source: str = "website", delivery: str = "ship", actor_id: int = None,
+                         website_prices: dict = None) -> dict:
+    """
+    Holds the items and creates the Stripe Checkout page. Returns
+    {'url', 'session_id', 'expires_at', 'subtotal_cents', 'unit_amounts'
+    ({ref: cents actually sent to Stripe})}; raises CheckoutError.
+
+    website_prices ({ref: cents}) - only ever passed for a request the
+    website's server authenticated with the shared key (webapp/shop.py) -
+    charges the website's own prices instead of the bot's. Every other
+    check (Listed, not held, one of each) still applies.
+    """
     if not config.STRIPE_ENABLED:
         raise CheckoutError("Online checkout isn't available right now.")
     if not refs or len(refs) > 20:
         raise CheckoutError("The cart needs between 1 and 20 items.")
     items = resolve_items(refs)
+    unit_amounts = _website_unit_amounts(refs, items, website_prices) if website_prices is not None else None
     key = ",".join(sorted(str(i["id"]) for i in items))
     async with _locks[key]:
         sellable = check_sellable(items)
@@ -154,7 +188,10 @@ async def start_checkout(refs: list, source: str = "website", delivery: str = "s
             expires_at = now + timedelta(hours=config.STRIPE_LINK_HOURS) - timedelta(minutes=1)
         else:
             expires_at = now + timedelta(minutes=config.STRIPE_HOLD_MINUTES, seconds=30)
-        params = build_session_params(sellable, delivery, expires_at, reference=f"{source}-{key}")
+        params = build_session_params(sellable, delivery, expires_at, reference=f"{source}-{key}",
+                                      unit_amounts=unit_amounts)
+        sent = {item["id"]: line["price_data"]["unit_amount"]
+                for (item, _), line in zip(sellable, params["line_items"])}
         try:
             session = await stripe_api.create_checkout_session(params)
         except stripe_api.StripeError as e:
@@ -170,7 +207,44 @@ async def start_checkout(refs: list, source: str = "website", delivery: str = "s
             except stripe_api.StripeError:
                 log.exception("Couldn't expire Stripe session %s after losing an item race", session["id"])
             raise CheckoutError("Someone else is checking out one of these items right now.")
-    return {"url": session.get("url"), "session_id": session["id"], "expires_at": expires_at.isoformat()}
+        # What Stripe will actually charge before tax/shipping - from Stripe's
+        # own answer, not just what we asked for.
+        subtotal = session.get("amount_subtotal")
+        if subtotal is not None and subtotal != sum(sent.values()):
+            await _cancel(session["id"])
+            raise CheckoutError("Checkout prices didn't come out right - please try again.")
+    return {"url": session.get("url"), "session_id": session["id"], "expires_at": expires_at.isoformat(),
+            "subtotal_cents": subtotal if subtotal is not None else sum(sent.values()),
+            "unit_amounts": {ref: sent[item["id"]] for ref, item in zip(refs, items)}}
+
+
+async def _cancel(session_id: str):
+    try:
+        await stripe_api.expire_checkout_session(session_id)
+    except stripe_api.StripeError:
+        log.exception("Couldn't expire Stripe session %s", session_id)
+    db.update_stripe_checkout(session_id, status="expired", note="Cancelled: amounts didn't match")
+    db.release_stripe_holds(session_id)
+
+
+def session_state(session_id: str):
+    """For the website's server: where a checkout stands, or None."""
+    checkout = db.get_stripe_checkout(session_id)
+    if not checkout:
+        return None
+    status = checkout["status"]
+    refund = (checkout.get("note") or "").startswith(CONFLICT)
+    if refund:
+        state = "refund_pending"
+    elif status in ("paid", "fulfilled", "attention"):
+        state = "paid"
+    else:
+        state = status  # open / processing / expired / failed
+    items = [db.get_item(i) for i in checkout["item_ids"]]
+    total = checkout.get("amount_total")
+    return {"session_id": session_id, "state": state, "paid": state == "paid",
+            "items": [ebay_listing_rules.custom_label(i) for i in items if i],
+            "amount_total_cents": round(total * 100) if total is not None else None}
 
 
 # ================================================================ webhooks
