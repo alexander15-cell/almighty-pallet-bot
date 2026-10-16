@@ -28,6 +28,8 @@ online.
 import argparse
 import hashlib
 import json
+import logging
+import os
 import shutil
 import sqlite3
 import sys
@@ -37,6 +39,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import config
+
+log = logging.getLogger(__name__)
+# Outcome of the last copy to BACKUP_COPY_DIR: None (off), a Path, or an error string.
+last_copy = None
 
 # Everything backed up besides the database itself, keyed by the name it's
 # stored under inside the zip.
@@ -133,7 +139,40 @@ def create_backup() -> Path:
         raise RuntimeError("New backup failed verification and was discarded:\n" + "\n".join(problems))
 
     _apply_retention()
+    copy_backup(zip_path)
     return zip_path
+
+
+def copy_backup(zip_path: Path):
+    """Copies a verified backup into BACKUP_COPY_DIR (e.g. a Google Drive
+    folder). Writes under a temporary name and renames once the copy's hash
+    matches, so the sync app never uploads a half-written zip. Never raises -
+    the result is left in `last_copy` and logged."""
+    global last_copy
+    if not config.BACKUP_COPY_DIR:
+        last_copy = None
+        return None
+    try:
+        copy_dir = Path(config.BACKUP_COPY_DIR)
+        copy_dir.mkdir(parents=True, exist_ok=True)
+        partial = copy_dir / (zip_path.name + ".partial")
+        shutil.copyfile(zip_path, partial)
+        if _sha256(partial) != _sha256(zip_path):
+            partial.unlink(missing_ok=True)
+            raise RuntimeError("the copy didn't match the original")
+        final = copy_dir / zip_path.name
+        os.replace(partial, final)
+        copies = sorted(copy_dir.glob("backup_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not config.PRESERVE_DISCORD_HISTORY:
+            for old in copies[max(1, config.BACKUP_COPY_KEEP_COUNT):]:
+                old.unlink(missing_ok=True)
+        last_copy = final
+        log.info("Backup copied to %s", final)
+        return final
+    except Exception as e:
+        last_copy = f"{type(e).__name__}: {e}"
+        log.exception("Couldn't copy backup %s to %s", zip_path.name, config.BACKUP_COPY_DIR)
+        return None
 
 
 def _apply_retention():

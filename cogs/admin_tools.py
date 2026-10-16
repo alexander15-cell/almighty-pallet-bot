@@ -744,7 +744,12 @@ class AdminTools(commands.Cog):
             log.exception("Manual backup failed")
             await interaction.followup.send(f"Backup failed: {e}", ephemeral=True)
             return
-        await interaction.followup.send(f"✅ Backup created and verified: `{path.name}`", ephemeral=True)
+        message = f"✅ Backup created and verified: `{path.name}`"
+        if isinstance(backup.last_copy, Path):
+            message += f"\n☁️ Copied to `{backup.last_copy.parent}`"
+        elif backup.last_copy:
+            message += f"\n⚠️ Couldn't copy it to the backup copy folder: {backup.last_copy}"
+        await interaction.followup.send(message, ephemeral=True)
 
     @admin_group.command(name="backups", description="List recent local backups.")
     async def backups(self, interaction: discord.Interaction):

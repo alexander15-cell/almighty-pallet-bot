@@ -449,6 +449,13 @@ BACKUP_DIR = os.getenv("BACKUP_DIR", "backups")
 BACKUP_INTERVAL_HOURS = int(os.getenv("BACKUP_INTERVAL_HOURS") or "24")
 BACKUP_KEEP_COUNT = int(os.getenv("BACKUP_KEEP_COUNT") or "14")
 BACKUP_MAX_AGE_DAYS = int(os.getenv("BACKUP_MAX_AGE_DAYS") or "14")
+# Optional second copy of every verified backup - point it at a folder that
+# Google Drive for desktop (or OneDrive/Dropbox) syncs, e.g.
+# "G:\My Drive\Pallet Bot Backups", and the backups show up in the cloud.
+# Blank = off. The copy folder keeps its own BACKUP_COPY_KEEP_COUNT newest
+# backups. A copy that fails is logged; the local backup still counts.
+BACKUP_COPY_DIR = (os.getenv("BACKUP_COPY_DIR") or "").strip()
+BACKUP_COPY_KEEP_COUNT = int(os.getenv("BACKUP_COPY_KEEP_COUNT") or "30")
 
 # ---- Local photo storage (see workflow photo handling in item_flow.py) ----
 PHOTO_DIR = os.getenv("PHOTO_DIR", "data/photos")
