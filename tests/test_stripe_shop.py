@@ -292,3 +292,30 @@ def test_webhook_endpoint_checks_the_signature(shop, monkeypatch):
         finally:
             await c.close()
     asyncio.run(go())
+
+
+def test_website_server_key_gives_each_shopper_their_own_rate_limit(shop, monkeypatch):
+    from webapp import shop as shop_routes
+    monkeypatch.setattr(config, "STRIPE_SHOP_SERVER_KEY", "k" * 32)
+    monkeypatch.setattr(shop_routes, "RATE_LIMIT", 2)
+    shop_routes._recent.clear()
+    items = _listed(shop.db, number_of_items=8)
+
+    async def go():
+        c = _client(shop)
+        await c.start_server()
+        try:
+            def post(i, ip, key="k" * 32):
+                return c.post("/shop/checkout", json={"items": [items[i]["id"]]},
+                              headers={"X-Shop-Key": key, "X-Client-IP": ip})
+            assert (await post(0, "1.1.1.1")).status == 200
+            assert (await post(1, "1.1.1.1")).status == 200
+            assert (await post(2, "1.1.1.1")).status == 429  # that shopper hit the limit
+            assert (await post(3, "2.2.2.2")).status == 200  # a different shopper isn't affected
+            # without the right key, X-Client-IP is ignored - all share the caller's own limit
+            assert (await post(4, "3.3.3.3", key="wrong")).status == 200
+            assert (await post(5, "4.4.4.4", key="wrong")).status == 200
+            assert (await post(6, "5.5.5.5", key="wrong")).status == 429
+        finally:
+            await c.close()
+    asyncio.run(go())

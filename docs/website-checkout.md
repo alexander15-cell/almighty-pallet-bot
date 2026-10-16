@@ -6,6 +6,11 @@ the items, collects payment and sales tax, and when the buyer pays it marks
 the items sold, ends their eBay listings and books everything to QuickBooks.
 The website only has to send the cart to the bot and redirect.
 
+> **Ready-made files:** `website-kit/` in this repo (server route, button,
+> success page, README). The site's Content-Security-Policy only allows the
+> browser to talk to the site itself, so use the kit's server route
+> (`/api/checkout`) rather than calling the bot from the browser.
+
 ## 1. The Checkout button
 
 Replace the demo checkout (and the "Purchases are completed on eBay" copy)

@@ -11,6 +11,7 @@ Stripe on the web server:
                         one item, to send a buyer (ship or local pickup).
   GET  /finance/website           signed in - website orders.
 """
+import hmac
 import json
 import logging
 import time
@@ -45,7 +46,17 @@ async def checkout_preflight(request):
     return _cors(request, web.Response(status=204))
 
 
+def _from_website_server(request) -> bool:
+    key = request.headers.get("X-Shop-Key", "")
+    return bool(config.STRIPE_SHOP_SERVER_KEY and key) and hmac.compare_digest(key, config.STRIPE_SHOP_SERVER_KEY)
+
+
 def _client_ip(request) -> str:
+    # The website's server forwards for every shopper, so its own IP would
+    # rate-limit everyone together - trust its X-Client-IP, but only with
+    # the shared key.
+    if _from_website_server(request) and request.headers.get("X-Client-IP"):
+        return "shopper:" + request.headers["X-Client-IP"][:64]
     return request.headers.get("CF-Connecting-IP") or request.remote or "?"
 
 

@@ -113,6 +113,10 @@ STRIPE_CANCEL_URL = os.getenv("STRIPE_CANCEL_URL", "https://4guys1palletoverstoc
 # Websites allowed to start a checkout from the browser (comma-separated origins).
 STRIPE_SHOP_ORIGINS = tuple(o.strip().rstrip("/") for o in
                             os.getenv("STRIPE_SHOP_ORIGINS", "https://4guys1palletoverstock.com").split(",") if o.strip())
+# Shared secret the website's SERVER sends (header X-Shop-Key) when it
+# forwards a cart to /shop/checkout - lets the bot trust its X-Client-IP
+# header for per-shopper rate limiting. Same value in the website's env.
+STRIPE_SHOP_SERVER_KEY = os.getenv("STRIPE_SHOP_SERVER_KEY", "").strip()
 # Shipping charged at checkout, in dollars (0 = free shipping).
 STRIPE_SHIPPING_PRICE = float(os.getenv("STRIPE_SHIPPING_PRICE") or "0")
 STRIPE_SHIPPING_LABEL = os.getenv("STRIPE_SHIPPING_LABEL", "Free shipping").strip()
