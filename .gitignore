@@ -13,3 +13,7 @@ backups/
 *.db-shm
 *.sqlite
 *.sqlite3
+
+# Python bytecode anywhere, and local-only folders that may hold keys/tokens
+*.pyc
+private/
