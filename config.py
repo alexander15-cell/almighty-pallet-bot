@@ -808,6 +808,16 @@ EBAY_FEE_CARDS_START_DATE = os.getenv("EBAY_FEE_CARDS_START_DATE", "").strip()
 # pallet's value still to sell. Fixed-price listings only.
 EBAY_PRICE_SYNC = os.getenv("EBAY_PRICE_SYNC", "true").strip().lower() == "true"
 EBAY_PRICE_SYNC_MINUTES = max(15, int(os.getenv("EBAY_PRICE_SYNC_MINUTES") or "60"))
+# The website catalog (GET /shop/catalog - ebay_catalog.py) is served from
+# the last complete active-listings pass; it's refreshed every
+# EBAY_CATALOG_SYNC_MINUTES and the catalog answers 503 once that pass is
+# older than EBAY_CATALOG_MAX_AGE_MINUTES.
+EBAY_CATALOG_SYNC_MINUTES = max(5, int(os.getenv("EBAY_CATALOG_SYNC_MINUTES") or "20"))
+EBAY_CATALOG_MAX_AGE_MINUTES = max(15, int(os.getenv("EBAY_CATALOG_MAX_AGE_MINUTES") or "60"))
+# Disposable test items the website may check out WITHOUT a live eBay
+# listing (bot price, quantity 1) - honored only while STRIPE_SECRET_KEY is a
+# sk_test_ key, so it can never sell anything for real. Comma-separated SKUs.
+SHOP_TEST_SKUS = frozenset(s.strip().lower() for s in (os.getenv("SHOP_TEST_SKUS") or "").split(",") if s.strip())
 
 # ---- eBay refunds, account charges and payouts (see ebay_books.py) ----
 # Refunds/returns: the income account a refund is booked against (debited).

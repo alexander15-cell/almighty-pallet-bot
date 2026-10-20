@@ -40,6 +40,7 @@ import discord_resilience
 import ebay_api
 import ebay_aspects
 import ebay_books
+import ebay_catalog
 import price_sync
 import ebay_fee_expenses
 import ebay_finances
@@ -948,6 +949,7 @@ class Ebay(commands.Cog):
             self.fee_card_loop.start()
             self.price_sync_loop.start()
             self.price_card_loop.start()
+            self.catalog_snapshot_loop.start()
 
     async def cog_load(self):
         # Registers the (order_id -> button) template once so every
@@ -964,6 +966,7 @@ class Ebay(commands.Cog):
         self.fee_card_loop.cancel()
         self.price_sync_loop.cancel()
         self.price_card_loop.cancel()
+        self.catalog_snapshot_loop.cancel()
 
     @tasks.loop(minutes=config.EBAY_PRICE_SYNC_MINUTES)
     async def price_sync_loop(self):
@@ -989,6 +992,23 @@ class Ebay(commands.Cog):
             await price_sync.update_queued_cards(self.bot)
         except Exception:
             log.exception("Updating card prices failed - will retry next run")
+
+    @tasks.loop(minutes=config.EBAY_CATALOG_SYNC_MINUTES)
+    async def catalog_snapshot_loop(self):
+        """Keeps the website catalog's view of live eBay listings fresh (see
+        ebay_catalog.py) - one GetMyeBaySelling pass per 200 listings."""
+        if config.PRESERVE_DISCORD_HISTORY or not config.EBAY_ENABLED:
+            return
+        try:
+            await ebay_catalog.refresh_snapshot(reuse_seconds=60)
+        except ebay_catalog.CatalogUnavailable:
+            pass  # already logged; the catalog answers 503 once the last pass is too old
+        except Exception:
+            log.exception("eBay catalog snapshot failed - will retry next run")
+
+    @catalog_snapshot_loop.before_loop
+    async def _before_catalog_snapshot_loop(self):
+        await self.bot.wait_until_ready()
 
     @price_card_loop.before_loop
     async def _before_price_card_loop(self):

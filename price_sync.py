@@ -21,6 +21,7 @@ that isn't Listed. An eBay listing that's ended or unreachable is left alone
 """
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 import config
 import database as db
@@ -35,7 +36,12 @@ CARD_EDIT_GAP_SECONDS = 3
 OLD_MESSAGE_EDIT_LIMIT = 30046  # Discord: "Maximum number of edits to messages older than 1 hour reached"
 
 
-async def _fetch(item: dict, sem: asyncio.Semaphore):
+async def _fetch(item: dict, sem: asyncio.Semaphore, active: dict = None):
+    # The active-listings pass already carries each live listing's price -
+    # only listings missing from it cost a Browse API call.
+    listing = (active or {}).get(str(item["ebay_item_id"]))
+    if listing and listing.get("price") is not None and listing.get("listing_type") != "Chinese":
+        return item, {"price": float(listing["price"]), "currency": "USD"}, None
     async with sem:
         try:
             return item, await ebay_api.get_live_listing_price(item["ebay_item_id"]), None
@@ -121,9 +127,24 @@ async def link_listings() -> dict:
     """
     import ebay_listing_rules
     result = {"listings": 0, "created": [], "linked": [], "already": 0, "conflicts": [], "unmatched": [],
-              "not_listed": []}
-    listings = await ebay_api.get_active_listings()
+              "not_listed": [], "active": []}
+    checked_at = datetime.now(timezone.utc).isoformat()
+    try:
+        listings = await ebay_api.get_active_listings()
+    except Exception as e:
+        db.record_snapshot_failure(f"{type(e).__name__}: {e}")
+        raise
     result["listings"] = len(listings)
+    result["active"] = listings
+    snapshot = {}
+    for listing in listings:
+        parsed = ebay_listing_rules.parse_custom_label(listing["sku"])
+        if parsed:
+            sku = f"pallet-{parsed[0]}-item-{parsed[1]}"
+            snapshot[sku] = dict(listing, sku=sku)
+    # Every page fetched - this is a complete picture of what's live (the
+    # website catalog reads it; see ebay_catalog.py).
+    db.record_active_snapshot(list(snapshot.values()), checked_at)
     for listing in listings:
         parsed = ebay_listing_rules.parse_custom_label(listing["sku"])
         item = db.get_item_by_pallet_and_number(*parsed) if parsed else None
@@ -155,7 +176,8 @@ async def sync_prices(bot, link_first: bool = True) -> dict:
             log.warning("Couldn't match eBay listings to items (%s) - syncing the ones already linked", e)
     items = db.items_for_price_sync()
     sem = asyncio.Semaphore(CONCURRENCY)
-    results = await asyncio.gather(*(_fetch(item, sem) for item in items))
+    active = {str(l["listing_id"]): l for l in (linked or {}).get("active", [])}
+    results = await asyncio.gather(*(_fetch(item, sem, active) for item in items))
     changed, errors, pallets = [], [], set()
     for item, live, error in results:
         if error:

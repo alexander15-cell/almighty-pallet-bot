@@ -729,6 +729,23 @@ def init_db():
                 queued_at  TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS ebay_active_snapshot (
+                sku          TEXT PRIMARY KEY,
+                listing_id   TEXT NOT NULL,
+                price        REAL,
+                quantity     INTEGER,
+                listing_type TEXT,
+                seen_at      TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS ebay_catalog_sync (
+                id              INTEGER PRIMARY KEY CHECK (id = 1),
+                last_success_at TEXT,
+                listing_count   INTEGER,
+                last_error      TEXT,
+                last_error_at   TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS stripe_events (
                 event_id     TEXT PRIMARY KEY,
                 event_type   TEXT,
@@ -2765,6 +2782,67 @@ def clear_price_card_update(item_id: int, price: float):
     """Drops the queued card update - only if it's still for this price."""
     with get_conn() as conn:
         conn.execute("DELETE FROM price_card_updates WHERE item_id = ? AND price = ?", (item_id, price))
+
+
+# ------------------------------------------------- eBay active-listing snapshot --
+# What eBay said was live at the last COMPLETE GetMyeBaySelling pass, keyed
+# by the canonical Custom label. A row is current only when its seen_at
+# equals ebay_catalog_sync.last_success_at - rows from older passes are
+# listings that have since ended (kept, never used as current).
+
+def record_active_snapshot(listings: list, checked_at: str) -> int:
+    """Stores one complete pass: listings = [{'sku' (canonical), 'listing_id',
+    'price', 'quantity', 'listing_type'}]. Returns how many were stored."""
+    stored = 0
+    with get_conn() as conn:
+        for listing in listings:
+            conn.execute(
+                """INSERT INTO ebay_active_snapshot (sku, listing_id, price, quantity, listing_type, seen_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(sku) DO UPDATE SET listing_id = excluded.listing_id, price = excluded.price,
+                       quantity = excluded.quantity, listing_type = excluded.listing_type, seen_at = excluded.seen_at""",
+                (listing["sku"], str(listing["listing_id"]), listing.get("price"), listing.get("quantity"),
+                 listing.get("listing_type") or "", checked_at))
+            stored += 1
+        conn.execute(
+            """INSERT INTO ebay_catalog_sync (id, last_success_at, listing_count) VALUES (1, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET last_success_at = excluded.last_success_at,
+                   listing_count = excluded.listing_count""",
+            (checked_at, stored))
+    return stored
+
+
+def record_snapshot_failure(error: str):
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO ebay_catalog_sync (id, last_error, last_error_at) VALUES (1, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET last_error = excluded.last_error, last_error_at = excluded.last_error_at""",
+            (error[:500], _now()))
+
+
+def snapshot_checked_at():
+    """ISO time of the last complete, successful eBay pass, or None."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT last_success_at FROM ebay_catalog_sync WHERE id = 1").fetchone()
+        return row["last_success_at"] if row else None
+
+
+def current_active_listings() -> dict:
+    """{sku: row} for listings live at the last complete pass."""
+    checked_at = snapshot_checked_at()
+    if not checked_at:
+        return {}
+    with get_conn() as conn:
+        return {r["sku"]: dict(r) for r in conn.execute(
+            "SELECT * FROM ebay_active_snapshot WHERE seen_at = ?", (checked_at,))}
+
+
+def catalog_items() -> list:
+    """Every tracked item (deleted ones too, so the website can hide them):
+    id, pallet_id, item_number, status."""
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT id, pallet_id, item_number, status FROM items ORDER BY pallet_id, item_number, id")]
 
 
 # ------------------------------------------------------- web dashboard reads --

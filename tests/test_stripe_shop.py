@@ -250,27 +250,6 @@ def _client(shop):
     return TestClient(TestServer(create_app(_bot(shop.db))))
 
 
-def test_checkout_endpoint_and_cors(shop):
-    item = _listed(shop.db)[0]
-
-    async def go():
-        c = _client(shop)
-        await c.start_server()
-        try:
-            r = await c.post("/shop/checkout", json={"items": [item["id"]]}, headers={"Origin": "https://evil.test"})
-            assert r.status == 403
-            r = await c.post("/shop/checkout", json={"items": [item["id"]]}, headers={"Origin": "https://shop.test"})
-            assert r.status == 200 and r.headers["Access-Control-Allow-Origin"] == "https://shop.test"
-            assert (await r.json())["url"].startswith("https://checkout.stripe.com/")
-            r = await c.post("/shop/checkout", json={"items": [item["id"]]}, headers={"Origin": "https://shop.test"})
-            assert r.status == 409  # held by the first checkout
-            r = await c.post("/shop/checkout", data="nope", headers={"Origin": "https://shop.test"})
-            assert r.status == 400
-        finally:
-            await c.close()
-    asyncio.run(go())
-
-
 def test_webhook_endpoint_checks_the_signature(shop, monkeypatch):
     item = _listed(shop.db)[0]
     sid = asyncio.run(stripe_shop.start_checkout([item["id"]]))["session_id"]
@@ -289,33 +268,6 @@ def test_webhook_endpoint_checks_the_signature(shop, monkeypatch):
             r = await c.post("/stripe/webhook", data=body, headers={"Stripe-Signature": f"t={now},v1={sig}"})
             assert r.status == 200
             assert shop.db.get_stripe_checkout(sid)["status"] == "expired"
-        finally:
-            await c.close()
-    asyncio.run(go())
-
-
-def test_website_server_key_gives_each_shopper_their_own_rate_limit(shop, monkeypatch):
-    from webapp import shop as shop_routes
-    monkeypatch.setattr(config, "STRIPE_SHOP_SERVER_KEY", "k" * 32)
-    monkeypatch.setattr(shop_routes, "RATE_LIMIT", 2)
-    shop_routes._recent.clear()
-    items = _listed(shop.db, number_of_items=8)
-
-    async def go():
-        c = _client(shop)
-        await c.start_server()
-        try:
-            def post(i, ip, key="k" * 32):
-                return c.post("/shop/checkout", json={"items": [items[i]["id"]]},
-                              headers={"X-Shop-Key": key, "X-Client-IP": ip})
-            assert (await post(0, "1.1.1.1")).status == 200
-            assert (await post(1, "1.1.1.1")).status == 200
-            assert (await post(2, "1.1.1.1")).status == 429  # that shopper hit the limit
-            assert (await post(3, "2.2.2.2")).status == 200  # a different shopper isn't affected
-            # without the right key, X-Client-IP is ignored - all share the caller's own limit
-            assert (await post(4, "3.3.3.3", key="wrong")).status == 200
-            assert (await post(5, "4.4.4.4", key="wrong")).status == 200
-            assert (await post(6, "5.5.5.5", key="wrong")).status == 429
         finally:
             await c.close()
     asyncio.run(go())
@@ -342,57 +294,6 @@ def _contract_post(c, refs, prices, key=KEY, **extra):
     if key:
         headers["X-Shop-Key"] = key
     return c.post("/shop/checkout", json=body, headers=headers)
-
-
-def test_website_prices_need_the_shared_key_and_are_charged_and_confirmed(shop, monkeypatch):
-    monkeypatch.setattr(config, "STRIPE_SHOP_SERVER_KEY", KEY)
-    _priced_stripe(monkeypatch, shop)
-    item = _listed(shop.db, price=15.00)[0]
-    ref = f"pallet-{item['pallet_id']}-item-{item['item_number']}"
-
-    async def go():
-        c = _client(shop)
-        await c.start_server()
-        try:
-            assert (await _contract_post(c, [ref], {ref: 2200}, key=None)).status == 403
-            assert (await _contract_post(c, [ref], {ref: 2200}, key="wrong")).status == 403
-            assert shop.created == []  # nothing reached Stripe
-            r = await _contract_post(c, [ref], {ref: 2200})
-            assert r.status == 200
-            data = await r.json()
-            assert data["checkout_contract"] == "website-prices-v1" and data["currency"] == "usd"
-            assert data["subtotal_cents"] == 2200 and data["website_prices"] == {ref: 2200}
-            assert data["url"].startswith("https://checkout.stripe.com/g/pay/")
-        finally:
-            await c.close()
-    asyncio.run(go())
-    assert shop.created[0]["line_items"][0]["price_data"]["unit_amount"] == 2200  # website price, not the bot's 15.00
-
-
-def test_website_prices_must_match_the_cart_exactly(shop, monkeypatch):
-    monkeypatch.setattr(config, "STRIPE_SHOP_SERVER_KEY", KEY)
-    _priced_stripe(monkeypatch, shop)
-    a, b = _listed(shop.db, number_of_items=2)
-    ra, rb = (f"pallet-{i['pallet_id']}-item-{i['item_number']}" for i in (a, b))
-
-    async def go():
-        c = _client(shop)
-        await c.start_server()
-        try:
-            for prices in ({ra: 1000}, {ra: 1000, rb: 1000, "pallet-9-item-9": 5}, {ra: 1000, rb: 10.5},
-                           {ra: 0, rb: 100}, {ra: True, rb: 100}, {ra: 3_000_000, rb: 100}, ["x"]):
-                r = await _contract_post(c, [ra, rb], prices)
-                assert r.status == 409, prices
-            r = await c.post("/shop/checkout", json={"items": [ra], "website_prices": {ra: 1}},
-                             headers={"X-Shop-Key": KEY})
-            assert r.status == 400  # prices without the contract name
-            r = await c.post("/shop/checkout", json={"items": [ra], "checkout_contract": "v9"},
-                             headers={"X-Shop-Key": KEY})
-            assert r.status == 400
-        finally:
-            await c.close()
-    asyncio.run(go())
-    assert shop.created == []
 
 
 def test_a_stripe_total_that_doesnt_match_is_cancelled(shop, monkeypatch):

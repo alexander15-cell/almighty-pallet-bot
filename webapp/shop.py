@@ -1,11 +1,15 @@
 """
 Stripe on the web server:
 
-  POST /shop/checkout   public - the website's Checkout button. Body
-                        {"items": [item id or "pallet-N-item-M", ...]}.
-                        Answers {"url": <Stripe Checkout page>} or
-                        {"error": "..."}. Only the website origins in
-                        STRIPE_SHOP_ORIGINS may call it from a browser.
+  The website's SERVER only - every /shop/ route needs the shared key
+  (X-Shop-Key = STRIPE_SHOP_SERVER_KEY), checked before anything else.
+  Contracts: docs/website-checkout.md sections 7-8.
+
+  GET  /shop/catalog            ebay-catalog-v1 snapshot of every item.
+  POST /shop/catalog/refresh    fresh eBay check for 1-20 SKUs.
+  POST /shop/checkout           website-prices-v1 - verified against eBay,
+                                then a Stripe Checkout page.
+  GET  /shop/session/{id}       where a checkout stands.
   POST /stripe/webhook  public - Stripe's notifications, signature-checked.
   POST /items/{id}/payment-link   signed in - a single-use payment page for
                         one item, to send a buyer (ship or local pickup).
@@ -21,6 +25,7 @@ from aiohttp import web
 
 import config
 import database as db
+import ebay_catalog
 import stripe_api
 import stripe_shop
 from webapp.layout import csrf_input, esc, money, page, qs
@@ -33,73 +38,138 @@ RATE_LIMIT, RATE_WINDOW = 10, 60
 WEBSITE_PRICES_CONTRACT = "website-prices-v1"
 
 
-def _cors(request, resp):
-    origin = (request.headers.get("Origin") or "").rstrip("/")
-    if origin and origin in config.STRIPE_SHOP_ORIGINS:
-        resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Vary"] = "Origin"
-        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    return resp
-
-
-async def checkout_preflight(request):
-    return _cors(request, web.Response(status=204))
-
-
 def _from_website_server(request) -> bool:
+    """The website's server, proven by the shared key (constant-time compare).
+    No key configured = nobody (fail closed)."""
+    if not config.STRIPE_SHOP_SERVER_KEY:
+        log.warning("STRIPE_SHOP_SERVER_KEY isn't set - refusing website shop requests")
+        return False
     key = request.headers.get("X-Shop-Key", "")
-    return bool(config.STRIPE_SHOP_SERVER_KEY and key) and hmac.compare_digest(key, config.STRIPE_SHOP_SERVER_KEY)
+    return bool(key) and hmac.compare_digest(key.encode(), config.STRIPE_SHOP_SERVER_KEY.encode())
 
 
-def _client_ip(request) -> str:
+def _denied():
+    return web.json_response({"error": "Not allowed.", "code": "unauthorized"}, status=403)
+
+
+def _error(status: int, code: str, message: str, **extra):
+    return web.json_response({"error": message, "code": code, **extra}, status=status,
+                             headers={"Cache-Control": "no-store"})
+
+
+def _rate_limited(request) -> bool:
     # The website's server forwards for every shopper, so its own IP would
-    # rate-limit everyone together - trust its X-Client-IP, but only with
-    # the shared key.
-    if _from_website_server(request) and request.headers.get("X-Client-IP"):
-        return "shopper:" + request.headers["X-Client-IP"][:64]
-    return request.headers.get("CF-Connecting-IP") or request.remote or "?"
-
-
-async def checkout(request):
-    origin = (request.headers.get("Origin") or "").rstrip("/")
-    if origin and origin not in config.STRIPE_SHOP_ORIGINS:
-        return web.json_response({"error": "Not allowed."}, status=403)
-    ip, now = _client_ip(request), time.monotonic()
+    # rate-limit everyone together - its X-Client-IP is trusted (the key was
+    # already checked by every caller of this).
+    ip = request.headers.get("X-Client-IP", "")[:64] or request.headers.get("CF-Connecting-IP") or request.remote or "?"
+    now = time.monotonic()
     times = _recent[ip]
     while times and now - times[0] > RATE_WINDOW:
         times.popleft()
     if len(times) >= RATE_LIMIT:
-        return _cors(request, web.json_response({"error": "Too many tries - wait a minute."}, status=429))
+        return True
     times.append(now)
+    return False
+
+
+async def _json_body(request):
     try:
         body = await request.json()
-        refs = body.get("items")
-        if not isinstance(refs, list):
-            raise ValueError
-    except (ValueError, AttributeError, json.JSONDecodeError):
-        return _cors(request, web.json_response({"error": "Send {\"items\": [...]}."}, status=400))
-    contract = body.get("checkout_contract")
-    if contract is None and "website_prices" in body:
-        return _cors(request, web.json_response({"error": "website_prices needs checkout_contract."}, status=400))
-    if contract not in (None, WEBSITE_PRICES_CONTRACT):
-        return _cors(request, web.json_response({"error": f"Unknown checkout_contract {contract!r}."}, status=400))
-    if contract == WEBSITE_PRICES_CONTRACT and not _from_website_server(request):
-        # Only the website's server, holding the shared key, may set prices.
-        log.warning("Refused a website-prices checkout without a valid X-Shop-Key")
-        return web.json_response({"error": "Not allowed."}, status=403)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return body if isinstance(body, dict) else None
+
+
+async def catalog(request):
+    """GET /shop/catalog - the full ebay-catalog-v1 snapshot."""
+    if not _from_website_server(request):
+        return _denied()
     try:
-        result = await stripe_shop.start_checkout(
-            refs, source="website", delivery="ship",
-            website_prices=body.get("website_prices") if contract else None)
+        data = ebay_catalog.catalog()
+    except ebay_catalog.CatalogUnavailable as e:
+        return _error(503, "ebay_unavailable", str(e))
+    return web.json_response(data, headers={"Cache-Control": "no-store"})
+
+
+async def catalog_refresh(request):
+    """POST /shop/catalog/refresh {"items": [sku, ...]} - a fresh eBay check
+    for 1-20 SKUs. Never creates a checkout, holds anything or ends a listing."""
+    if not _from_website_server(request):
+        return _denied()
+    if _rate_limited(request):
+        return _error(429, "rate_limited", "Too many tries - wait a minute.")
+    body = await _json_body(request)
+    try:
+        skus = ebay_catalog.parse_skus((body or {}).get("items"))
+    except ValueError as e:
+        return _error(400, "bad_request", str(e))
+    try:
+        data = await ebay_catalog.refresh(skus)
+    except ebay_catalog.CatalogUnavailable:
+        return _error(503, "ebay_unavailable", "eBay couldn't be checked right now - try again shortly.")
+    return web.json_response(data, headers={"Cache-Control": "no-store"})
+
+
+def _website_prices(skus: list, raw_items: list, prices) -> dict:
+    """{sku: cents} - exactly the requested items, positive whole cents."""
+    if not isinstance(prices, dict):
+        raise ValueError("website_prices must map each SKU to whole cents.")
+    by_sku = {}
+    for raw, sku in zip(raw_items, skus):
+        cents = prices.get(raw, prices.get(sku))
+        if isinstance(cents, bool) or not isinstance(cents, int) or not 0 < cents <= stripe_shop.MAX_UNIT_CENTS:
+            raise ValueError(f"The price for {sku} must be a positive whole number of cents.")
+        by_sku[sku] = cents
+    if len(prices) != len(skus):
+        raise ValueError("website_prices must list exactly the items in the cart.")
+    return by_sku
+
+
+async def checkout(request):
+    """
+    POST /shop/checkout (website-prices-v1) - the website's server only.
+    Checks every SKU against a fresh eBay pass and the bot's own state
+    before anything is reserved: 409 not_available / price_changed, 503 if
+    eBay can't be checked. Then holds the items and creates Stripe Checkout
+    at the verified eBay prices, and confirms exactly what Stripe will charge.
+    """
+    if not _from_website_server(request):
+        log.warning("Refused a website checkout without a valid X-Shop-Key")
+        return _denied()
+    if _rate_limited(request):
+        return _error(429, "rate_limited", "Too many tries - wait a minute.")
+    body = await _json_body(request)
+    if body is None:
+        return _error(400, "bad_request", "Send a JSON object.")
+    if body.get("checkout_contract") != WEBSITE_PRICES_CONTRACT:
+        return _error(400, "bad_request", f"checkout_contract must be {WEBSITE_PRICES_CONTRACT!r}.")
+    try:
+        skus = ebay_catalog.parse_skus(body.get("items"))
+        wanted = _website_prices(skus, body["items"], body.get("website_prices"))
+    except ValueError as e:
+        return _error(400, "bad_request", str(e))
+    try:
+        check = await ebay_catalog.verify_for_checkout(skus, wanted)
+    except ebay_catalog.CatalogUnavailable:
+        return _error(503, "ebay_unavailable", "eBay couldn't be checked right now - try again shortly.")
+    if check["unavailable"]:
+        return _error(409, "not_available", "Some items are no longer available.",
+                      unavailable_items=check["unavailable"])
+    if check["price_changes"]:
+        return _error(409, "price_changed", "Some prices have changed - refresh and try again.",
+                      price_changes=check["price_changes"], current_prices=check["prices"])
+    try:
+        result = await stripe_shop.start_checkout(skus, source="website", delivery="ship",
+                                                  website_prices=check["prices"])
     except stripe_shop.CheckoutError as e:
-        return _cors(request, web.json_response({"error": str(e)}, status=409))
-    if contract == WEBSITE_PRICES_CONTRACT:
-        return web.json_response({
-            "url": result["url"], "checkout_contract": WEBSITE_PRICES_CONTRACT, "currency": "usd",
-            "subtotal_cents": result["subtotal_cents"], "website_prices": result["unit_amounts"],
-            "session_id": result["session_id"], "expires_at": result["expires_at"]})
-    return _cors(request, web.json_response({"url": result["url"], "expires_at": result["expires_at"]}))
+        if e.skus:
+            return _error(409, "not_available", str(e), unavailable_items=[s for s in e.skus if s in skus])
+        return _error(503, "checkout_unavailable", str(e))
+    return web.json_response({
+        "url": result["url"], "checkout_contract": WEBSITE_PRICES_CONTRACT, "currency": "usd",
+        "subtotal_cents": result["subtotal_cents"], "website_prices": result["unit_amounts"],
+        "session_id": result["session_id"], "expires_at": result["expires_at"]},
+        headers={"Cache-Control": "no-store"})
 
 
 async def session_status(request):
@@ -192,7 +262,8 @@ async def website_orders(request):
 
 
 def add_routes(app: web.Application):
-    app.router.add_route("OPTIONS", "/shop/checkout", checkout_preflight)
+    app.router.add_get("/shop/catalog", catalog)
+    app.router.add_post("/shop/catalog/refresh", catalog_refresh)
     app.router.add_post("/shop/checkout", checkout)
     app.router.add_get(r"/shop/session/{session_id:cs_[A-Za-z0-9_]+}", session_status)
     app.router.add_post("/stripe/webhook", webhook)

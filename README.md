@@ -1001,10 +1001,16 @@ with **Stripe Tax**, fulfilled by the bot (`stripe_api.py`, `stripe_shop.py`,
 `webapp/shop.py`). No Connect - the LLC sells only its own stock. Needs the
 web dashboard on, since Stripe and the website reach the bot through it.
 
-- **Checkout:** the website POSTs `{"items": [item ID or "pallet-N-item-M"]}`
-  to `WEB_BASE_URL/shop/checkout` (from an origin in `STRIPE_SHOP_ORIGINS`)
-  and sends the buyer to the returned `url`. The bot only sells items that
-  are **Listed**, at the bot's **own** list price, and **holds** them for
+- **Website API** (`docs/website-checkout.md`, `ebay_catalog.py`): the
+  website's *server* (shared key `STRIPE_SHOP_SERVER_KEY`, checked first on
+  every route) reads `GET /shop/catalog` (every item's current active eBay
+  listing ID / price matched by Custom label, plus bot status and
+  availability), calls `POST /shop/catalog/refresh` before checkout, then
+  `POST /shop/checkout` (`website-prices-v1`), which re-checks eBay and
+  refuses stale prices (`409 price_changed`) or unavailable items (`409
+  not_available`). Active eBay prices are the source of truth.
+- **Checkout:** the bot only sells items that are **Listed** and live on
+  eBay as a one-unit fixed-price listing, at the verified eBay price, and **holds** them for
   `STRIPE_HOLD_MINUTES` (Stripe's minimum, 30) so a one-of-a-kind item
   can't be bought twice; an abandoned checkout releases them. Tax: Stripe
   Tax, General Tangible Goods (`txcd_99999999`), added on top. Shipping:

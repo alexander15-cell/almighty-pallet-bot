@@ -256,6 +256,8 @@ async def get_active_listings() -> list:
             found, pages = _parse_active_listings(text)
             listings += found
             page += 1
+    if page <= pages:
+        raise EbayAPIError(f"eBay returned more than {page - 1} pages of active listings - stopped early")
     return listings
 
 

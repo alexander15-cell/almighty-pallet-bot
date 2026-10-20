@@ -46,7 +46,12 @@ _locks = defaultdict(asyncio.Lock)
 
 
 class CheckoutError(Exception):
-    """Why a checkout can't start - safe to show the buyer."""
+    """Why a checkout can't start - safe to show the buyer. `skus`: the
+    items it's about, when it's about particular items."""
+
+    def __init__(self, message: str, skus: list = None):
+        super().__init__(message)
+        self.skus = skus or []
 
 
 def _cents(dollars: float) -> int:
@@ -84,10 +89,12 @@ def check_sellable(items: list) -> list:
     for item in items:
         listing = db.get_ebay_listing_data(item["id"]) or {}
         title = listing.get("ebay_title") or item.get("ai_title") or f"Item #{item['item_number']}"
+        sku = ebay_listing_rules.custom_label(item)
         if item["status"] != db.STATUS_LISTED:
-            raise CheckoutError(f"Sorry - \"{title}\" just sold.")
+            raise CheckoutError(f"Sorry - \"{title}\" just sold.", skus=[sku])
         if item["id"] in held:
-            raise CheckoutError(f"Someone is checking out \"{title}\" right now - try again in a little while.")
+            raise CheckoutError(f"Someone is checking out \"{title}\" right now - try again in a little while.",
+                                skus=[sku])
         if not listing.get("price") or listing["price"] <= 0:
             raise CheckoutError(f"\"{title}\" doesn't have a price yet.")
         out.append((item, listing))
@@ -206,7 +213,8 @@ async def start_checkout(refs: list, source: str = "website", delivery: str = "s
                 await stripe_api.expire_checkout_session(session["id"])
             except stripe_api.StripeError:
                 log.exception("Couldn't expire Stripe session %s after losing an item race", session["id"])
-            raise CheckoutError("Someone else is checking out one of these items right now.")
+            raise CheckoutError("Someone else is checking out one of these items right now.",
+                                skus=[ebay_listing_rules.custom_label(i) for i in items])
         # What Stripe will actually charge before tax/shipping - from Stripe's
         # own answer, not just what we asked for.
         subtotal = session.get("amount_subtotal")
@@ -357,6 +365,17 @@ async def fulfill(bot, session_id: str) -> dict:
             db.update_stripe_checkout(session_id, status="attention", note=CONFLICT + " " + " ".join(problems))
             await _notify(bot, checkout, session, total, tax, fee, notes + problems, attention=True)
             return {"ok": False, "message": " ".join(problems)}
+
+        # A Stripe TEST-mode payment (sk_test_ keys - see docs/website-checkout.md
+        # section 7) proves the flow but isn't money: nothing is logged as a
+        # sale or booked to QuickBooks.
+        if session.get("livemode") is False:
+            db.update_stripe_checkout(session_id, status="fulfilled",
+                                      note="TEST MODE payment - item marked sold, nothing booked")
+            if not checkout["notified"]:
+                await _notify(bot, checkout, session, total, tax, fee, notes + ["TEST MODE - nothing booked."])
+                db.update_stripe_checkout(session_id, notified=1)
+            return {"ok": True, "sale_id": None, "status": "fulfilled", "test_mode": True}
 
         # 2. Log the sale + Sales Receipt (Website Sales, no QuickBooks tax on top).
         sale_id = checkout["sale_id"]

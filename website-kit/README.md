@@ -1,5 +1,9 @@
 # Website checkout kit (Stripe, via the pallet bot)
 
+> **Superseded (Oct 2026):** the bot's routes now require the shared key on
+> every call and use the catalog + `website-prices-v1` contracts in
+> `docs/website-checkout.md`. This kit's route predates that - use the doc.
+
 Hey Jacob - this hooks the storefront's cart up to real payments. The pallet
 bot does all the Stripe work (checkout page, card/Apple Pay/Google Pay,
 Indiana sales tax, holding one-of-a-kind items, marking them sold, ending the
