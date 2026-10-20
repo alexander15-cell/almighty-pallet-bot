@@ -1352,6 +1352,16 @@ created, and again before any restore - a backup that fails that check is
 never restored from, and a newly-created one that fails it is discarded
 immediately rather than left on disk looking valid.
 
+**Cloud copy (Google Drive).** Set `BACKUP_COPY_DIR` to a folder that
+Google Drive for desktop syncs (e.g. `G:\My Drive\Pallet Bot Backups`) and
+every verified backup is also copied there - written under a temporary
+`.partial` name and renamed only once its hash matches, so Drive never
+uploads a half-written zip. That folder keeps its own
+`BACKUP_COPY_KEEP_COUNT` (default 30) newest backups; other files in it
+are never touched. A failed copy is logged (and shown by `/admin
+backup-now`) but never fails the local backup. Keep that Drive folder
+private (not shared) and the Google account on 2-step verification.
+
 Backups contain real business/customer data - don't upload them anywhere
 public. Restoring one is deliberately **not** a Discord command (it's the
 one operation here that can put stale data back in place of current data)
