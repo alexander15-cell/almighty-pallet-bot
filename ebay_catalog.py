@@ -22,6 +22,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 
+import shop_test_item
 import config
 import database as db
 import price_sync
@@ -119,36 +120,46 @@ def _items_by_sku() -> dict:
     return out
 
 
-def _test_listing(sku: str, item):
-    """A stand-in "live listing" for a disposable test item - only while the
-    bot runs on Stripe TEST keys, and only for SKUs named in SHOP_TEST_SKUS.
-    Lets the website test checkout end to end without a real eBay listing."""
-    if not item or sku not in config.SHOP_TEST_SKUS or not config.STRIPE_SECRET_KEY.startswith("sk_test_"):
-        return None
-    listing = db.get_ebay_listing_data(item["id"]) or {}
-    if not listing.get("price"):
-        return None
-    return {"listing_id": "TEST", "price": listing["price"], "quantity": 1, "listing_type": "FixedPriceItem"}
-
-
-def _records(skus: list, checked_at: str) -> list:
+def _records(skus: list, checked_at, test: dict = None) -> list:
+    """One record per SKU. The checkout test item (shop_test_item.py) gets
+    its simulated listing and a simulated check time - on Stripe test keys
+    only; on live keys it's reported like an unknown SKU."""
+    test = shop_test_item.test_skus() if test is None else test
     items = _items_by_sku()
     active = db.current_active_listings()
-    for sku in skus:
-        test = _test_listing(sku, items.get(sku))
-        if test:
-            active[sku] = test
     held = db.active_stripe_holds([items[s]["id"] for s in skus if s in items])
-    return [_record(s, items.get(s), active.get(s), s in items and items[s]["id"] in held, checked_at)
-            for s in skus]
+    simulated_at = _now().isoformat()
+    out = []
+    for sku in skus:
+        item = items.get(sku)
+        is_held = item is not None and item["id"] in held
+        if sku in test:
+            listing = shop_test_item.simulated_listing(test[sku])
+            out.append(_record(sku, item, listing, is_held, simulated_at) if listing
+                       else _record(sku, None, None, False, None))
+        else:
+            out.append(_record(sku, item, active.get(sku), is_held, checked_at))
+    return out
 
 
-def catalog() -> dict:
-    """GET /shop/catalog - every tracked item. Raises CatalogUnavailable."""
+class NotFound(Exception):
+    pass
+
+
+def catalog(scope: str = None) -> dict:
+    """GET /shop/catalog - every tracked item, never the checkout test item.
+    scope="test" - ONLY the test item(s), and only on Stripe test keys
+    (NotFound otherwise). Raises CatalogUnavailable."""
+    test = shop_test_item.test_skus()
+    if scope == "test":
+        if not shop_test_item.test_mode():
+            raise NotFound()
+        return {"catalog_contract": CONTRACT, "complete": True, "scope": "test", "generated_at": _now().isoformat(),
+                "items": _records(list(test), None, test)}
     checked_at = _fresh_checked_at()
-    skus = list(_items_by_sku())
+    skus = [s for s in _items_by_sku() if s not in test]
     return {"catalog_contract": CONTRACT, "complete": True, "generated_at": _now().isoformat(),
-            "items": _records(skus, checked_at)}
+            "items": _records(skus, checked_at, test)}
 
 
 def parse_skus(values) -> list:
@@ -167,9 +178,11 @@ async def refresh(skus: list) -> dict:
     """POST /shop/catalog/refresh - a fresh eBay check for these SKUs (one
     result each, unknown ones as unavailable). Also brings the bot's own
     price for them in line with eBay. Raises CatalogUnavailable."""
-    checked_at = await refresh_snapshot(REFRESH_REUSE_SECONDS)
-    records = _records(skus, checked_at)
-    await _sync_bot_prices(records)
+    test = shop_test_item.test_skus()
+    real = [s for s in skus if s not in test]
+    checked_at = await refresh_snapshot(REFRESH_REUSE_SECONDS) if real else None
+    records = _records(skus, checked_at, test)
+    await _sync_bot_prices([rec for rec in records if rec["sku"] not in test])
     return {"catalog_contract": CONTRACT, "scope": "requested_items", "generated_at": _now().isoformat(),
             "items": records}
 
@@ -198,13 +211,18 @@ async def verify_for_checkout(skus: list, website_prices: dict) -> dict:
     unless it's Listed, live on eBay at a fixed price with exactly one unit,
     and not held. Raises CatalogUnavailable.
     """
-    checked_at = await refresh_snapshot(CHECKOUT_REUSE_SECONDS)
-    records = _records(skus, checked_at)
-    await _sync_bot_prices(records)
+    test = shop_test_item.test_skus()
+    real = [s for s in skus if s not in test]
+    checked_at = await refresh_snapshot(CHECKOUT_REUSE_SECONDS) if real else None
+    records = _records(skus, checked_at, test)
+    await _sync_bot_prices([rec for rec in records if rec["sku"] not in test])
+    on_test_keys = shop_test_item.test_mode()
     unavailable, changes, prices = [], [], {}
     for record in records:
         sku = record["sku"]
-        if record["available_quantity"] != 1 or record["price_cents"] is None:
+        # On Stripe test keys only the test item can be bought, so a test
+        # payment can never touch real stock.
+        if (on_test_keys and sku not in test) or record["available_quantity"] != 1 or record["price_cents"] is None:
             unavailable.append(sku)
             continue
         prices[sku] = record["price_cents"]

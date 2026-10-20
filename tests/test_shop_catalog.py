@@ -27,6 +27,7 @@ def _live(item, price, listing_id="900000000001", quantity=1, listing_type="Fixe
 def _setup(shop, monkeypatch, listings):
     from webapp import shop as routes
     monkeypatch.setattr(config, "STRIPE_SHOP_SERVER_KEY", KEY)
+    monkeypatch.setattr(config, "STRIPE_SECRET_KEY", "sk_live_x")
     routes._recent.clear()
     fetch = AsyncMock(return_value=listings)
     monkeypatch.setattr(ebay_api, "get_active_listings", fetch)
@@ -198,30 +199,97 @@ def test_each_shopper_has_their_own_rate_limit(shop, monkeypatch):
     _run(shop, steps)
 
 
-def test_disposable_test_item_only_works_on_stripe_test_keys(shop, monkeypatch):
-    item = _listed(shop.db, price=1.0)[0]
-    _setup(shop, monkeypatch, [])  # no eBay listing at all
-    monkeypatch.setattr(config, "SHOP_TEST_SKUS", frozenset({_sku(item)}))
+# ------------------------------------------------ disposable checkout test item
+
+def _test_item(shop, monkeypatch, keys="sk_test_x"):
+    import shop_test_item
+    fetch = _setup(shop, monkeypatch, [])
+    monkeypatch.setattr(config, "STRIPE_SECRET_KEY", keys)
+    live_create = stripe_api.create_checkout_session
+
+    async def test_create(params, idempotency_key=None):  # Stripe reports test sessions as livemode=false
+        session = await live_create(params, idempotency_key)
+        return {**session, "id": session["id"].replace("cs_live_", "cs_test_"), "livemode": False}
+    monkeypatch.setattr(stripe_api, "create_checkout_session", test_create)
+    item = shop_test_item.create(actor_id=1)
+    return item, fetch
+
+
+def test_test_item_is_isolated_on_test_keys(shop, monkeypatch):
+    real = _listed(shop.db, price=15.0)[0]
+    item, fetch = _test_item(shop, monkeypatch)
+    fetch.return_value = [_live(real, 22.0)]
+    sku = _sku(item)
+    assert shop.db.get_pallet(item["pallet_id"])["archived"] == 1  # hidden from pallet lists
 
     async def steps(c):
-        monkeypatch.setattr(config, "STRIPE_SECRET_KEY", "sk_live_x")
-        r = await _checkout(c, {_sku(item): 100})
-        assert r.status == 409 and (await r.json())["code"] == "not_available"
-        monkeypatch.setattr(config, "STRIPE_SECRET_KEY", "sk_test_x")
-        r = await _checkout(c, {_sku(item): 100})
-        assert r.status == 200 and (await r.json())["website_prices"] == {_sku(item): 100}
+        await c.post("/shop/catalog/refresh", json={"items": [_sku(real)]}, headers=H)
+        full = await (await c.get("/shop/catalog", headers=H)).json()
+        assert sku not in [i["sku"] for i in full["items"]]  # never in the normal feed
+        test = await (await c.get("/shop/catalog?scope=test", headers=H)).json()
+        assert test["scope"] == "test" and [i["sku"] for i in test["items"]] == [sku]
+        rec = test["items"][0]
+        assert rec["ebay_listing_id"] == f"TEST-{sku}" and rec["price_cents"] == 100 and rec["available_quantity"] == 1
+        calls = fetch.await_count
+        r = await c.post("/shop/catalog/refresh", json={"items": [sku]}, headers=H)
+        assert (await r.json())["items"][0]["bot_status"] == "listed"
+        assert fetch.await_count == calls  # the test item never needs eBay
+        # on test keys a REAL item can't be bought
+        r = await _checkout(c, {_sku(real): 2200})
+        assert r.status == 409 and (await r.json())["unavailable_items"] == [_sku(real)]
+        r = await _checkout(c, {sku: 500})
+        assert (await r.json())["code"] == "price_changed"
+        r = await _checkout(c, {sku: 100})
+        data = await r.json()
+        assert r.status == 200 and data["subtotal_cents"] == 100 and data["livemode"] is False
+        r = await _checkout(c, {sku: 100})
+        assert (await r.json())["code"] == "not_available"  # held by the first
     _run(shop, steps)
+    assert shop.created[0]["line_items"][0]["price_data"]["unit_amount"] == 100
 
 
-def test_a_test_mode_payment_marks_sold_but_books_nothing(shop, monkeypatch):
+def test_test_item_is_unknown_on_live_keys(shop, monkeypatch):
+    item, _ = _test_item(shop, monkeypatch, keys="sk_live_x")
+    sku = _sku(item)
+
+    async def steps(c):
+        assert (await c.get("/shop/catalog?scope=test", headers=H)).status == 404
+        rec = (await (await c.post("/shop/catalog/refresh", json={"items": [sku]}, headers=H)).json())["items"][0]
+        assert rec["bot_status"] == "unavailable" and rec["ebay_checked_at"] is None and rec["price_cents"] is None
+        assert (await (await _checkout(c, {sku: 100})).json())["code"] == "not_available"
+    _run(shop, steps)
+    assert shop.created == []
+
+
+def test_test_payment_only_flips_the_test_item_and_reset_relists_it(shop, monkeypatch):
+    import shop_test_item
     import stripe_shop
     from tests.test_stripe_shop import _paid_session
-    item = _listed(shop.db)[0]
-    sid = asyncio.run(stripe_shop.start_checkout([item["id"]]))["session_id"]
+    item, _ = _test_item(shop, monkeypatch)
+    real = _listed(shop.db)[0]
+    sid = asyncio.run(stripe_shop.start_checkout([_sku(item)]))["session_id"]
     shop.db.update_stripe_checkout(sid, status="paid")
     monkeypatch.setattr(stripe_api, "retrieve_checkout_session",
                         AsyncMock(return_value={**_paid_session(sid), "livemode": False}))
     bot = _bot(shop.db)
     result = asyncio.run(stripe_shop.fulfill(bot, sid))
-    assert result["test_mode"] is True and bot.flow.calls == [(item["id"], "Website")]
-    assert shop.qb == [] and shop.db.get_stripe_checkout(sid)["sale_id"] is None
+    assert result["test_mode"] is True and shop.db.get_item(item["id"])["status"] == shop.db.STATUS_SOLD
+    assert bot.flow.calls == [] and shop.qb == []  # no cards, no sale, no QuickBooks
+    assert shop.db.get_stripe_checkout(sid)["sale_id"] is None
+
+    # a test payment for a real item never touches it
+    sid2 = asyncio.run(stripe_shop.start_checkout([real["id"]]))["session_id"]
+    shop.db.update_stripe_checkout(sid2, status="paid")
+    stripe_api.retrieve_checkout_session.return_value = {**_paid_session(sid2), "livemode": False}
+    assert asyncio.run(stripe_shop.fulfill(bot, sid2))["ok"] is False
+    assert shop.db.get_item(real["id"])["status"] == shop.db.STATUS_LISTED
+
+    # reset: listed again, an open test checkout cancelled
+    lines = asyncio.run(shop_test_item.reset(actor_id=1))
+    assert shop.db.get_item(item["id"])["status"] == shop.db.STATUS_LISTED and "Listed again" in lines[0]
+    sid3 = asyncio.run(stripe_shop.start_checkout([_sku(item)]))["session_id"]
+    asyncio.run(shop_test_item.reset(actor_id=1))
+    assert shop.db.get_stripe_checkout(sid3)["status"] == "expired"
+    assert shop.db.active_stripe_holds([item["id"]]) == {}
+    assert shop_test_item.create(actor_id=1)["id"] == item["id"]  # create is idempotent
+    assert shop_test_item.retire(actor_id=1) == [_sku(item)] and shop_test_item.test_skus() == {}

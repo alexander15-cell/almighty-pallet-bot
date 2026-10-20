@@ -222,6 +222,7 @@ async def start_checkout(refs: list, source: str = "website", delivery: str = "s
             await _cancel(session["id"])
             raise CheckoutError("Checkout prices didn't come out right - please try again.")
     return {"url": session.get("url"), "session_id": session["id"], "expires_at": expires_at.isoformat(),
+            "livemode": session.get("livemode", not session["id"].startswith("cs_test_")),
             "subtotal_cents": subtotal if subtotal is not None else sum(sent.values()),
             "unit_amounts": {ref: sent[item["id"]] for ref, item in zip(refs, items)}}
 
@@ -334,6 +335,8 @@ async def fulfill(bot, session_id: str) -> dict:
                                   stripe_fee=fee)
         items = [db.get_item(i) for i in checkout["item_ids"]]
         notes, problems = [], []
+        if session.get("livemode") is False:
+            return await _fulfill_test_payment(bot, checkout, session, items, total, tax, fee)
 
         # 1. Mark Sold (exactly like the Discord button), save the shipping address, end eBay.
         if not checkout["sold_marked"]:
@@ -365,17 +368,6 @@ async def fulfill(bot, session_id: str) -> dict:
             db.update_stripe_checkout(session_id, status="attention", note=CONFLICT + " " + " ".join(problems))
             await _notify(bot, checkout, session, total, tax, fee, notes + problems, attention=True)
             return {"ok": False, "message": " ".join(problems)}
-
-        # A Stripe TEST-mode payment (sk_test_ keys - see docs/website-checkout.md
-        # section 7) proves the flow but isn't money: nothing is logged as a
-        # sale or booked to QuickBooks.
-        if session.get("livemode") is False:
-            db.update_stripe_checkout(session_id, status="fulfilled",
-                                      note="TEST MODE payment - item marked sold, nothing booked")
-            if not checkout["notified"]:
-                await _notify(bot, checkout, session, total, tax, fee, notes + ["TEST MODE - nothing booked."])
-                db.update_stripe_checkout(session_id, notified=1)
-            return {"ok": True, "sale_id": None, "status": "fulfilled", "test_mode": True}
 
         # 2. Log the sale + Sales Receipt (Website Sales, no QuickBooks tax on top).
         sale_id = checkout["sale_id"]
@@ -411,6 +403,30 @@ async def fulfill(bot, session_id: str) -> dict:
             await _notify(bot, checkout, session, total, tax, fee, notes, attention=status != "fulfilled")
             db.update_stripe_checkout(session_id, notified=1)
         return {"ok": True, "sale_id": sale_id, "status": status}
+
+
+async def _fulfill_test_payment(bot, checkout, session, items, total, tax, fee) -> dict:
+    """A Stripe TEST-mode payment (docs/website-checkout.md section 7): only
+    the checkout test item may be affected, and only by flipping it to Sold.
+    No Discord cards, no eBay, no sale log, no QuickBooks, no buyer messages."""
+    import shop_test_item
+    session_id = checkout["session_id"]
+    test_ids = set(shop_test_item.test_skus().values())
+    stray = [i for i in items if i["id"] not in test_ids]
+    if stray:
+        note = ("TEST MODE payment for real item(s) " + ", ".join(f"#{i['item_number']}" for i in stray) +
+                " - left untouched.")
+        db.update_stripe_checkout(session_id, status="attention", note=note)
+        log.error(note)
+        return {"ok": False, "message": note, "test_mode": True}
+    for item in items:
+        if item["status"] == db.STATUS_LISTED:
+            db.update_status(item["id"], db.STATUS_SOLD, actor_id=SYSTEM_ACTOR, note="TEST checkout paid")
+    db.update_stripe_checkout(session_id, status="fulfilled", sold_marked=1,
+                              note="TEST MODE payment - test item marked sold, nothing booked")
+    db.release_stripe_holds(session_id)
+    log.info("Test-mode checkout %s fulfilled (test item only, nothing booked)", session_id)
+    return {"ok": True, "sale_id": None, "status": "fulfilled", "test_mode": True}
 
 
 def _split(total: float, weights: list) -> list:

@@ -84,8 +84,13 @@ async def catalog(request):
     """GET /shop/catalog - the full ebay-catalog-v1 snapshot."""
     if not _from_website_server(request):
         return _denied()
+    scope = request.query.get("scope")
+    if scope not in (None, "test"):
+        return _error(400, "bad_request", "scope must be omitted or 'test'.")
     try:
-        data = ebay_catalog.catalog()
+        data = ebay_catalog.catalog(scope)
+    except ebay_catalog.NotFound:
+        return _error(404, "not_found", "No test catalog while the bot is on live Stripe keys.")
     except ebay_catalog.CatalogUnavailable as e:
         return _error(503, "ebay_unavailable", str(e))
     return web.json_response(data, headers={"Cache-Control": "no-store"})
@@ -168,7 +173,7 @@ async def checkout(request):
     return web.json_response({
         "url": result["url"], "checkout_contract": WEBSITE_PRICES_CONTRACT, "currency": "usd",
         "subtotal_cents": result["subtotal_cents"], "website_prices": result["unit_amounts"],
-        "session_id": result["session_id"], "expires_at": result["expires_at"]},
+        "session_id": result["session_id"], "expires_at": result["expires_at"], "livemode": result["livemode"]},
         headers={"Cache-Control": "no-store"})
 
 

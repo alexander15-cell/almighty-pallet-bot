@@ -746,6 +746,12 @@ def init_db():
                 last_error_at   TEXT
             );
 
+            -- The disposable website-checkout test item(s) - see shop_test_item.py.
+            CREATE TABLE IF NOT EXISTS shop_test_items (
+                item_id     INTEGER PRIMARY KEY,
+                created_at  TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS stripe_events (
                 event_id     TEXT PRIMARY KEY,
                 event_type   TEXT,
@@ -2843,6 +2849,36 @@ def catalog_items() -> list:
     with get_conn() as conn:
         return [dict(r) for r in conn.execute(
             "SELECT id, pallet_id, item_number, status FROM items ORDER BY pallet_id, item_number, id")]
+
+
+# ---------------------------------------------- website checkout test item --
+
+def add_shop_test_item(item_id: int):
+    with get_conn() as conn:
+        conn.execute("INSERT OR IGNORE INTO shop_test_items (item_id, created_at) VALUES (?, ?)", (item_id, _now()))
+
+
+def shop_test_items() -> list:
+    """Registered test items that aren't deleted: id, pallet_id, item_number, status."""
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            """SELECT i.id, i.pallet_id, i.item_number, i.status FROM shop_test_items t
+               JOIN items i ON i.id = t.item_id WHERE i.status != ? ORDER BY i.id""", (STATUS_DELETED,))]
+
+
+def unused_negative_category_id() -> int:
+    """A pallets.category_id no real Discord category can have (they're positive)."""
+    with get_conn() as conn:
+        low = conn.execute("SELECT MIN(category_id) FROM pallets").fetchone()[0]
+        return min(-1, (low or 0) - 1)
+
+
+def open_stripe_checkouts_for_item(item_id: int) -> list:
+    """Checkouts still holding this item (open, or paid and processing)."""
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            """SELECT c.* FROM stripe_holds h JOIN stripe_checkouts c ON c.session_id = h.session_id
+               WHERE h.item_id = ? AND c.status IN ('open', 'processing')""", (item_id,))]
 
 
 # ------------------------------------------------------- web dashboard reads --

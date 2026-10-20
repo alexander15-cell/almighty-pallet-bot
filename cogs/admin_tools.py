@@ -31,6 +31,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 import backup
+import shop_test_item
 import config
 import database as db
 import discord_resilience
@@ -750,6 +751,33 @@ class AdminTools(commands.Cog):
         elif backup.last_copy:
             message += f"\n⚠️ Couldn't copy it to the backup copy folder: {backup.last_copy}"
         await interaction.followup.send(message, ephemeral=True)
+
+    @admin_group.command(name="checkout-test",
+                         description="The disposable $1 item for testing website checkout on Stripe test keys.")
+    @app_commands.describe(action="create it, reset it to Listed after a test, show it, or retire it")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="status", value="status"),
+        app_commands.Choice(name="create", value="create"),
+        app_commands.Choice(name="reset", value="reset"),
+        app_commands.Choice(name="retire", value="retire"),
+    ])
+    async def checkout_test_cmd(self, interaction: discord.Interaction, action: app_commands.Choice[str]):
+        if not await _require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if action.value == "create":
+            item = shop_test_item.create(interaction.user.id)
+            lines = [f"✅ Test item ready: `pallet-{item['pallet_id']}-item-{item['item_number']}` "
+                     f"(\"{shop_test_item.TITLE}\", ${shop_test_item.PRICE:.2f}). It lives in an archived pallet "
+                     "with no channels and is only sellable while the bot is on Stripe **test** keys."]
+        elif action.value == "reset":
+            lines = await shop_test_item.reset(interaction.user.id) or ["No test item to reset."]
+        elif action.value == "retire":
+            done = shop_test_item.retire(interaction.user.id)
+            lines = [f"Retired (soft-deleted): {', '.join(done)}" if done else "No test item to retire."]
+        else:
+            lines = shop_test_item.status_lines()
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     @admin_group.command(name="backups", description="List recent local backups.")
     async def backups(self, interaction: discord.Interaction):

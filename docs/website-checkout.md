@@ -165,18 +165,37 @@ POST /shop/checkout
 
 ## 7. Testing without touching real stock
 
-1. Bot owner: switch the bot to Stripe **test** keys (`sk_test_...` and the
-   test-mode webhook secret) and restart.
-2. Make a throwaway item in a test pallet in Discord, give it a small price
-   and mark it **Listed (Other)** - it has no eBay listing.
-3. Put its SKU in the bot's `.env`: `SHOP_TEST_SKUS=pallet-N-item-M`, restart.
-   That SKU then shows as available (bot price, quantity 1) - **only while
-   the bot is on test keys**; on live keys it's refused like any item
-   without an eBay listing.
-4. From the website: refresh → checkout → pay with card
-   `4242 4242 4242 4242`, any future date / CVC, a US address.
-5. Check: the item goes Sold in Discord, `/shop/session/...` says paid.
-   Also try a wrong price (409 price_changed), the same item twice (409
-   not_available), and letting a session expire (the reservation is released).
-6. Afterwards: `/item delete` the throwaway item, remove `SHOP_TEST_SKUS`,
-   switch back to live keys, restart.
+There's one bot; the "test configuration" is the bot running on Stripe
+**test** keys, plus one disposable item.
+
+**The test item** - `/admin checkout-test action:create` in Discord makes
+"TEST CHECKOUT ONLY", $1.00, in its own archived pallet with no Discord
+channels, and replies with its SKU (`pallet-N-item-1`; N is the next pallet
+number - pallet numbers can't be picked, so it won't be 999).
+
+**While the bot is on test keys** (`sk_test_...` + the test endpoint's
+webhook signing secret):
+- `GET /shop/catalog?scope=test` lists only the test item, with a
+  simulated listing (`ebay_listing_id: "TEST-pallet-N-item-1"`, price 100,
+  quantity 1, `ebay_checked_at` = response time). It is never in the normal
+  `GET /shop/catalog`.
+- refresh / checkout naming the test SKU use that simulated listing (no
+  eBay call). Stale price → `409 price_changed`; held → `409 not_available`.
+- **Every other item is refused at checkout** (`409 not_available`), so a
+  test payment can't reach real stock.
+- The checkout answer includes `"livemode": false` (and a `cs_test_` id).
+- A paid test session only flips the test item to Sold: no Discord cards,
+  no eBay changes, no sale log, no QuickBooks, no buyer messages. A
+  test-mode payment for any other item leaves it untouched and is flagged.
+- Cancel / expiry release the hold as normal (Stripe's expiry is ~30 min;
+  `reset` releases it immediately).
+
+**On live keys** the test SKU is treated as unknown everywhere
+(`?scope=test` → 404, refresh → unavailable record, checkout → refused).
+
+**Reset between tests:** `/admin checkout-test action:reset` - back to
+Listed, any open test checkout cancelled. `action:status` shows it;
+`action:retire` soft-deletes it when testing is finished.
+
+Card `4242 4242 4242 4242`, any future date / CVC, a US address. Afterwards
+switch the bot back to live keys and restart.
