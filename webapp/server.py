@@ -10,6 +10,8 @@ three things every request goes through -
      this site's own.
 """
 import logging
+import time
+from collections import defaultdict, deque
 import secrets
 from pathlib import Path
 
@@ -100,7 +102,64 @@ async def require_sign_in(request, handler):
 
 # ------------------------------------------------------------------ sign-in
 
+_login_tries = defaultdict(deque)  # client IP -> username sign-in attempt times
+LOGIN_TRIES, LOGIN_WINDOW = 10, 300
+
+
+def _login_page(message: str = "") -> str:
+    oauth = bool(config.DISCORD_CLIENT_ID and config.DISCORD_CLIENT_SECRET)
+    parts = ["<h1>4 Guys 1 Pallet</h1>"]
+    if message:
+        parts.append(f"<p class='error'>{esc(message)}</p>")
+    if config.WEB_USERNAME_LOGIN:
+        parts.append("<form method='post' action='/login/username' class='card'>"
+                     "<label for='username'>Your Discord username</label>"
+                     "<input id='username' name='username' type='text' autocomplete='username' "
+                     "autocapitalize='none' spellcheck='false' required maxlength='40' placeholder='e.g. alex15'>"
+                     "<button class='btn primary big'>Sign in</button></form>")
+    if oauth:
+        parts.append("<p class='muted'>" + ("Or sign in" if config.WEB_USERNAME_LOGIN else "Sign in") +
+                     " with the Discord account you use in the pallet server.</p>"
+                     "<p><a class='btn primary big' href='/login?go=1'>Sign in with Discord</a></p>")
+    return bare_page("Sign in", "".join(parts))
+
+
+def _start_session(discord_user: dict) -> web.HTTPFound:
+    token = auth.create_session(discord_user)
+    resp = web.HTTPFound("/")
+    resp.set_cookie(auth.SESSION_COOKIE, token, max_age=auth.SESSION_DAYS * 86400, httponly=True, samesite="Lax",
+                    secure=config.WEB_BASE_URL.startswith("https://"))
+    return resp
+
+
+async def username_login(request):
+    """POST /login/username - the owner-enabled no-password sign-in
+    (WEB_USERNAME_LOGIN): the typed username's CURRENT roles decide access."""
+    if not config.WEB_USERNAME_LOGIN:
+        raise web.HTTPNotFound()
+    origin = request.headers.get("Origin")
+    if origin and origin.rstrip("/") != config.WEB_BASE_URL.rstrip("/"):
+        raise web.HTTPForbidden(text="Cross-site request refused.")
+    ip, now = request.headers.get("CF-Connecting-IP") or request.remote or "?", time.monotonic()
+    tries = _login_tries[ip]
+    while tries and now - tries[0] > LOGIN_WINDOW:
+        tries.popleft()
+    if len(tries) >= LOGIN_TRIES:
+        return html_response(_login_page("Too many tries - wait a few minutes."), status=429)
+    tries.append(now)
+    form = await request.post()
+    member = await auth.member_by_username(bot_of(request), form.get("username", ""))
+    if member is None or not auth.role_names_for(member):
+        return html_response(_login_page("No pallet-server member with that username has any of the bot's roles."),
+                             status=403)
+    log.warning("Web dashboard USERNAME sign-in (no password) as %s (%s) from %s", member.name, member.id, ip)
+    raise _start_session({"id": member.id, "username": member.name,
+                          "global_name": getattr(member, "display_name", None)})
+
+
 async def login(request):
+    if config.WEB_USERNAME_LOGIN and request.query.get("go") != "1":
+        return html_response(_login_page())
     if not (config.DISCORD_CLIENT_ID and config.DISCORD_CLIENT_SECRET):
         return html_response(bare_page("Not set up", "<h1>Web sign-in isn't set up</h1><p>Add "
                                        "<code>DISCORD_CLIENT_ID</code> and <code>DISCORD_CLIENT_SECRET</code> to "
@@ -161,6 +220,7 @@ def create_app(bot) -> web.Application:
                           client_max_size=config.WEB_MAX_UPLOAD_MB * 1024 * 1024 * 10)
     app[BOT_KEY] = bot
     app.router.add_get("/login", login)
+    app.router.add_post("/login/username", username_login)
     app.router.add_get("/oauth/callback", oauth_callback)
     app.router.add_post("/logout", logout)
     app.router.add_get("/health", health)

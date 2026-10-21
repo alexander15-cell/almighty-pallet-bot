@@ -15,6 +15,7 @@ SHA-256 is stored (web_sessions), so a copy of the database can't be used
 to sign in. Each session also has its own CSRF token that every form/POST
 must echo back.
 """
+import asyncio
 import hashlib
 import logging
 import secrets
@@ -164,6 +165,23 @@ async def user_for_session(bot, session: dict):
         return None  # left the server or lost every bot role - signed out on the spot
     name = getattr(member, "display_name", None) or session["display_name"]
     return WebUser(session["discord_user_id"], name, session["csrf_token"], roles, member)
+
+
+async def member_by_username(bot, typed: str):
+    """The server member whose Discord USERNAME (not nickname) is `typed`,
+    ignoring case and a leading @, or None."""
+    name = (typed or "").strip().lstrip("@").lower()
+    guild = bot.get_guild(config.GUILD_ID) if bot else None
+    if not name or len(name) > 40 or guild is None:
+        return None
+    for member in guild.members:
+        if member.name.lower() == name:
+            return member
+    try:
+        found = await guild.query_members(query=name, limit=10)
+    except (discord.HTTPException, asyncio.TimeoutError):
+        return None
+    return next((m for m in found if m.name.lower() == name), None)
 
 
 def check_csrf(user: WebUser, supplied: str) -> bool:
