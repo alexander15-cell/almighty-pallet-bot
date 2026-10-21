@@ -26,6 +26,7 @@ import shop_test_item
 import config
 import database as db
 import price_sync
+import shipping
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +91,13 @@ def _fresh_checked_at() -> str:
     return checked_at
 
 
+def _shipping_cents(item):
+    if not item or not shipping.custom():
+        return None
+    full = db.get_item(item["id"]) or item
+    return shipping.per_item_cents(full)
+
+
 def _record(sku: str, item, listing, held: bool, checked_at) -> dict:
     status = BOT_STATUS.get(item["status"], "unavailable") if item else "unavailable"
     fixed_price = listing is not None and listing.get("listing_type") != "Chinese"
@@ -107,6 +115,7 @@ def _record(sku: str, item, listing, held: bool, checked_at) -> dict:
         "available_quantity": available,
         "bot_status": status,
         "ebay_checked_at": checked_at if item else None,
+        "shipping_cents": _shipping_cents(item) if listing is not None else None,
     }
 
 

@@ -36,6 +36,7 @@ import ebay_api
 import ebay_listing_rules
 import finance_utils
 import quickbooks
+import shipping
 import stripe_api
 
 log = logging.getLogger(__name__)
@@ -161,9 +162,9 @@ def build_session_params(sellable: list, delivery: str, expires_at: datetime, re
     if delivery == "ship":
         params["shipping_address_collection"] = {"allowed_countries": ["US"]}
         params["shipping_options"] = [{"shipping_rate_data": {
-            "type": "fixed_amount", "display_name": config.STRIPE_SHIPPING_LABEL[:100],
-            "fixed_amount": {"amount": _cents(config.STRIPE_SHIPPING_PRICE), "currency": "usd"},
-            "tax_behavior": "exclusive"}}]
+            "type": "fixed_amount", "display_name": shipping.label()[:100],
+            "fixed_amount": {"amount": shipping.order_cents(sellable, "ship"), "currency": "usd"},
+            "tax_behavior": "exclusive", "tax_code": config.STRIPE_SHIPPING_TAX_CODE}}]
     else:
         # Local pickup: tax from the billing address (a local buyer).
         params["billing_address_collection"] = "required"
@@ -245,6 +246,7 @@ async def start_checkout(refs: list, source: str = "website", delivery: str = "s
             raise CheckoutError("Checkout prices didn't come out right - please try again.")
     return {"url": session.get("url"), "session_id": session["id"], "expires_at": expires_at.isoformat(),
             "livemode": session.get("livemode", not session["id"].startswith("cs_test_")),
+            "delivery": delivery, "shipping_cents": shipping.order_cents(sellable, delivery),
             "subtotal_cents": subtotal if subtotal is not None else sum(sent.values()),
             "unit_amounts": {ref: sent[item["id"]] for ref, item in zip(refs, items)}}
 

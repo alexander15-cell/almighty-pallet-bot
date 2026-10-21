@@ -153,6 +153,10 @@ async def checkout(request):
         wanted = _website_prices(skus, body["items"], body.get("website_prices"))
     except ValueError as e:
         return _error(400, "bad_request", str(e))
+    delivery = body.get("delivery", "ship")
+    if delivery not in ("ship", "pickup") or (delivery == "pickup" and not config.SHIP_LOCAL_PICKUP):
+        return _error(400, "bad_request", "delivery must be \"ship\"" +
+                      (" or \"pickup\"." if config.SHIP_LOCAL_PICKUP else "."))
     try:
         check = await ebay_catalog.verify_for_checkout(skus, wanted)
     except ebay_catalog.CatalogUnavailable:
@@ -164,7 +168,7 @@ async def checkout(request):
         return _error(409, "price_changed", "Some prices have changed - refresh and try again.",
                       price_changes=check["price_changes"], current_prices=check["prices"])
     try:
-        result = await stripe_shop.start_checkout(skus, source="website", delivery="ship",
+        result = await stripe_shop.start_checkout(skus, source="website", delivery=delivery,
                                                   website_prices=check["prices"])
     except stripe_shop.CheckoutError as e:
         if e.skus:
@@ -173,7 +177,8 @@ async def checkout(request):
     return web.json_response({
         "url": result["url"], "checkout_contract": WEBSITE_PRICES_CONTRACT, "currency": "usd",
         "subtotal_cents": result["subtotal_cents"], "website_prices": result["unit_amounts"],
-        "session_id": result["session_id"], "expires_at": result["expires_at"], "livemode": result["livemode"]},
+        "session_id": result["session_id"], "expires_at": result["expires_at"], "livemode": result["livemode"],
+        "delivery": result["delivery"], "shipping_cents": result["shipping_cents"]},
         headers={"Cache-Control": "no-store"})
 
 

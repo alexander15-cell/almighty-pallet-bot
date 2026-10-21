@@ -130,6 +130,19 @@ STRIPE_SHOP_SERVER_KEY = os.getenv("STRIPE_SHOP_SERVER_KEY", "").strip()
 # Shipping charged at checkout, in dollars (0 = free shipping).
 STRIPE_SHIPPING_PRICE = float(os.getenv("STRIPE_SHIPPING_PRICE") or "0")
 STRIPE_SHIPPING_LABEL = os.getenv("STRIPE_SHIPPING_LABEL", "Free shipping").strip()
+# Shipping (shipping.py). flat = STRIPE_SHIPPING_PRICE per order (above);
+# custom = each item priced from its size + weight with these rates.
+SHIPPING_MODE = (os.getenv("SHIPPING_MODE") or "flat").strip().lower()
+SHIP_FIRST_LB = float(os.getenv("SHIP_FIRST_LB") or "6.00")         # first billable pound
+SHIP_PER_EXTRA_LB = float(os.getenv("SHIP_PER_EXTRA_LB") or "0.90")  # each pound after that
+SHIP_HANDLING = float(os.getenv("SHIP_HANDLING") or "1.00")          # box/packing per item
+SHIP_MIN = float(os.getenv("SHIP_MIN") or "5.99")
+SHIP_MAX = float(os.getenv("SHIP_MAX") or "0")                       # 0 = no cap
+SHIP_DEFAULT = float(os.getenv("SHIP_DEFAULT") or "14.99")           # item with no weight at all
+SHIP_DIM_DIVISOR = float(os.getenv("SHIP_DIM_DIVISOR") or "166")     # size-based weight: L x W x H / this
+SHIP_LABEL = os.getenv("SHIP_LABEL", "Standard shipping").strip()
+SHIP_LOCAL_PICKUP = (os.getenv("SHIP_LOCAL_PICKUP") or "true").strip().lower() in ("1", "true", "yes", "on")
+STRIPE_SHIPPING_TAX_CODE = os.getenv("STRIPE_SHIPPING_TAX_CODE", "txcd_92010001").strip()  # Stripe Tax: shipping
 # Stripe Tax product tax code - General Tangible Goods.
 STRIPE_TAX_CODE = os.getenv("STRIPE_TAX_CODE", "txcd_99999999").strip()
 # How long a website checkout holds its items (Stripe's minimum is 30), and

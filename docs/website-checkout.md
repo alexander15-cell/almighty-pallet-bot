@@ -68,6 +68,10 @@ X-Client-IP: <the shopper's IP>   (optional - gives each shopper their own rate 
   the item is `listed` in the bot, live on eBay as a fixed-price listing,
   and not reserved by another checkout. Sold / shipped / held items are 0
   even while eBay still shows them. Auctions report no price and 0.
+- **`shipping_cents`** - what shipping this item costs on its own when the
+  bot runs custom shipping (priced from the item's size and weight; same
+  price anywhere in the US). `null` in flat-rate mode or when the listing
+  isn't live. An order ships for the **sum** of its items; local pickup is $0.
 - **`ebay_checked_at`** is when the bot last *successfully* read the full
   active-listing list from eBay (refreshed every 20 minutes).
 - If that check is more than 60 minutes old, or has never succeeded:
@@ -142,10 +146,16 @@ POST /shop/checkout
 {"url": "https://checkout.stripe.com/g/pay/cs_test_...",
  "checkout_contract": "website-prices-v1", "currency": "usd",
  "subtotal_cents": 2200, "website_prices": {"pallet-1-item-96": 2200},
- "session_id": "cs_test_...", "expires_at": "2026-10-19T18:35:10+00:00"}
+ "session_id": "cs_test_...", "expires_at": "2026-10-19T18:35:10+00:00",
+ "livemode": false, "delivery": "ship", "shipping_cents": 900}
 ```
 
-- Shipping (free) and Indiana sales tax are added by Stripe on its page.
+- Optional `"delivery": "ship"` (default) or `"pickup"` (local pickup, $0
+  shipping, billing address instead of a shipping address).
+- `shipping_cents` in the answer is the shipping Stripe shows as its own line
+  (the sum of the items' `shipping_cents`; 0 for pickup). `subtotal_cents`
+  stays items only. Indiana sales tax is added by Stripe Tax on its page
+  (on shipping too).
 - `503 checkout_unavailable` if Stripe itself fails - try again later.
 - Reservations last 30 minutes and are released when Stripe reports the
   session expired. Fulfillment happens only on Stripe's signed webhook.

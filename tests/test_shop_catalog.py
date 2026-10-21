@@ -91,7 +91,8 @@ def test_catalog_reports_ebay_truth_and_bot_state(shop, monkeypatch):
         rec = {i["sku"]: i for i in data["items"]}
         assert rec[_sku(listed)] == {"sku": _sku(listed), "ebay_listing_id": "860012952535", "ebay_active": True,
                                      "price_cents": 2200, "currency": "usd", "available_quantity": 1,
-                                     "bot_status": "listed", "ebay_checked_at": rec[_sku(listed)]["ebay_checked_at"]}
+                                     "bot_status": "listed", "ebay_checked_at": rec[_sku(listed)]["ebay_checked_at"],
+                                     "shipping_cents": None}  # flat-rate mode: shipping is per order
         # matched by Custom label, not the old ID the bot had on file ("110011")
         assert rec[_sku(relisted)]["ebay_listing_id"] == "860000000002" and rec[_sku(relisted)]["price_cents"] == 5000
         assert rec[_sku(sold)]["available_quantity"] == 0 and rec[_sku(sold)]["bot_status"] == "sold"
