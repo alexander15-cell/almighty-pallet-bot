@@ -299,6 +299,10 @@ def test_confirm_splits_price_evenly_across_a_bundle(fresh_db, monkeypatch):
 
 
 def test_confirm_routes_ebay_to_the_ebay_sales_account_non_taxable(fresh_db, monkeypatch):
+    # No per-channel Item configured here - exercises the older fallback
+    # (shared cash-sales Item + account override). See
+    # test_sales_items_per_channel.py for the configured-Item behavior.
+    monkeypatch.setattr(config, "QUICKBOOKS_EBAY_SALES_ITEM_ID", "")
     pallet_id = fresh_db.create_pallet("Pallet A", category_id=1, created_by=1)
     item = fresh_db.get_item(fresh_db.create_item(pallet_id, "Widget", [], 1))
 
@@ -314,6 +318,10 @@ def test_confirm_routes_ebay_to_the_ebay_sales_account_non_taxable(fresh_db, mon
 
 
 def test_confirm_routes_facebook_to_the_sales_account_taxable(fresh_db, monkeypatch):
+    # No per-channel Item configured here - exercises the older fallback
+    # (shared cash-sales Item + account override). See
+    # test_sales_items_per_channel.py for the configured-Item behavior.
+    monkeypatch.setattr(config, "QUICKBOOKS_OTHER_SALES_ITEM_ID", "")
     pallet_id = fresh_db.create_pallet("Pallet A", category_id=1, created_by=1)
     item = fresh_db.get_item(fresh_db.create_item(pallet_id, "Widget", [], 1))
 

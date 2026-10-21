@@ -134,7 +134,7 @@ STRIPE_LINK_HOURS = max(1, min(int(os.getenv("STRIPE_LINK_HOURS") or "24"), 24))
 # Sales"), the liability Stripe-collected sales tax is owed to (e.g.
 # "Indiana Department of Revenue Payable"), and where Stripe's processing
 # fee goes (blank = the eBay fees account).
-QUICKBOOKS_WEBSITE_SALES_ITEM_ID = os.getenv("QUICKBOOKS_WEBSITE_SALES_ITEM_ID", "").strip()
+QUICKBOOKS_WEBSITE_SALES_ITEM_ID = os.getenv("QUICKBOOKS_WEBSITE_SALES_ITEM_ID", "6").strip()
 QUICKBOOKS_SALES_TAX_PAYABLE_ACCOUNT_ID = os.getenv("QUICKBOOKS_SALES_TAX_PAYABLE_ACCOUNT_ID", "").strip()
 QUICKBOOKS_STRIPE_FEES_ACCOUNT_ID = os.getenv("QUICKBOOKS_STRIPE_FEES_ACCOUNT_ID", "").strip()
 
@@ -771,9 +771,9 @@ QUICKBOOKS_EBAY_SALES_ACCOUNT_ID = os.getenv("QUICKBOOKS_EBAY_SALES_ACCOUNT_ID",
 # 114, Other Sale -> Other Sales 115). Blank = keep using
 # QUICKBOOKS_CASH_SALES_ITEM_ID for that channel, exactly as before.
 # "Other" covers every platform that isn't eBay or In Person.
-QUICKBOOKS_EBAY_SALES_ITEM_ID = os.getenv("QUICKBOOKS_EBAY_SALES_ITEM_ID", "").strip()
-QUICKBOOKS_IN_PERSON_SALES_ITEM_ID = os.getenv("QUICKBOOKS_IN_PERSON_SALES_ITEM_ID", "").strip()
-QUICKBOOKS_OTHER_SALES_ITEM_ID = os.getenv("QUICKBOOKS_OTHER_SALES_ITEM_ID", "").strip()
+QUICKBOOKS_EBAY_SALES_ITEM_ID = os.getenv("QUICKBOOKS_EBAY_SALES_ITEM_ID", "3").strip()
+QUICKBOOKS_IN_PERSON_SALES_ITEM_ID = os.getenv("QUICKBOOKS_IN_PERSON_SALES_ITEM_ID", "4").strip()
+QUICKBOOKS_OTHER_SALES_ITEM_ID = os.getenv("QUICKBOOKS_OTHER_SALES_ITEM_ID", "5").strip()
 QUICKBOOKS_COGS_ACCOUNT_ID = os.getenv("QUICKBOOKS_COGS_ACCOUNT_ID", "48")
 QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID = os.getenv("QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID", "24")
 # The business bank account (Old National checking once it's set in .env):
