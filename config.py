@@ -94,6 +94,10 @@ WEB_BASE_URL = os.getenv("WEB_BASE_URL", "http://localhost:8080").strip()
 # ID (same as the application ID) and Client Secret, and add
 # WEB_BASE_URL + "/oauth/callback" under Redirects.
 DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "").strip()
+# Owner's choice: sign in to the dashboard by typing a Discord username
+# (no password, no Discord login) - whoever types a member's username gets
+# that member's roles. Off unless set to true.
+WEB_USERNAME_LOGIN = (os.getenv("WEB_USERNAME_LOGIN") or "").strip().lower() in ("1", "true", "yes", "on")
 DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "").strip()
 # Largest single photo upload accepted from the phone intake page (MB).
 WEB_MAX_UPLOAD_MB = int(os.getenv("WEB_MAX_UPLOAD_MB") or "15")
