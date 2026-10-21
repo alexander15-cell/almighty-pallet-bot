@@ -118,7 +118,7 @@ def _uses_test_keys(items: list) -> bool:
         return True
     if not config.STRIPE_SECRET_KEY:
         raise CheckoutError("Online checkout isn't available right now.")
-    return config.STRIPE_SECRET_KEY.startswith("sk_test_")
+    return stripe_api.is_test_key(config.STRIPE_SECRET_KEY)
 
 
 def _photo(item: dict):

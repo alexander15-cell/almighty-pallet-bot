@@ -371,3 +371,13 @@ def test_payment_link_page_shows_stripes_reason(shop, monkeypatch):
     except stripe_shop.CheckoutError as e:
         assert "Tax off" in e.detail and "Tax off" not in str(e)  # shoppers never see the detail
     assert shop.db.active_stripe_holds([item["id"]]) == {}
+
+
+def test_restricted_test_keys_count_as_test_keys(monkeypatch):
+    import shop_test_item
+    assert stripe_api.is_test_key("rk_test_abc") and stripe_api.is_test_key("sk_test_abc")
+    assert not stripe_api.is_test_key("rk_live_abc") and not stripe_api.is_test_key("")
+    monkeypatch.setattr(config, "STRIPE_SECRET_KEY", "rk_live_a")
+    monkeypatch.setattr(config, "STRIPE_TEST_SECRET_KEY", "rk_test_b")
+    assert shop_test_item.test_mode() and not shop_test_item.whole_bot_on_test_keys()
+    assert stripe_api._key(True) == "rk_test_b"

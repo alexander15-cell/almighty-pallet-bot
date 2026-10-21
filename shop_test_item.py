@@ -32,12 +32,12 @@ PRICE = 1.00
 def test_mode() -> bool:
     """Test keys available for the test item: the separate
     STRIPE_TEST_SECRET_KEY, or the whole bot running on a sk_test_ key."""
-    return (config.STRIPE_TEST_SECRET_KEY or "").startswith("sk_test_") or \
-        (config.STRIPE_SECRET_KEY or "").startswith("sk_test_")
+    return stripe_api.is_test_key(config.STRIPE_TEST_SECRET_KEY) or \
+        stripe_api.is_test_key(config.STRIPE_SECRET_KEY)
 
 
 def whole_bot_on_test_keys() -> bool:
-    return (config.STRIPE_SECRET_KEY or "").startswith("sk_test_")
+    return stripe_api.is_test_key(config.STRIPE_SECRET_KEY)
 
 
 def test_skus() -> dict:

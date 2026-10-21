@@ -40,12 +40,17 @@ def _flatten(data, prefix="") -> list:
     return pairs
 
 
+def is_test_key(key: str) -> bool:
+    """A Stripe test-mode secret key: standard (sk_test_) or restricted (rk_test_)."""
+    return (key or "").strip().startswith(("sk_test_", "rk_test_"))
+
+
 def _key(test: bool) -> str:
     """The live key, or (test=True) the separate test key - falling back to
     STRIPE_SECRET_KEY when that itself is a sk_test_ key."""
     if test:
         key = config.STRIPE_TEST_SECRET_KEY or (
-            config.STRIPE_SECRET_KEY if config.STRIPE_SECRET_KEY.startswith("sk_test_") else "")
+            config.STRIPE_SECRET_KEY if is_test_key(config.STRIPE_SECRET_KEY) else "")
         if not key:
             raise StripeError("STRIPE_TEST_SECRET_KEY isn't set in .env (needed for the checkout test item).")
         return key
