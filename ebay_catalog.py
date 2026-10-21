@@ -216,7 +216,7 @@ async def verify_for_checkout(skus: list, website_prices: dict) -> dict:
     checked_at = await refresh_snapshot(CHECKOUT_REUSE_SECONDS) if real else None
     records = _records(skus, checked_at, test)
     await _sync_bot_prices([rec for rec in records if rec["sku"] not in test])
-    on_test_keys = shop_test_item.test_mode()
+    on_test_keys = shop_test_item.whole_bot_on_test_keys()
     unavailable, changes, prices = [], [], {}
     for record in records:
         sku = record["sku"]

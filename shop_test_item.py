@@ -30,6 +30,13 @@ PRICE = 1.00
 
 
 def test_mode() -> bool:
+    """Test keys available for the test item: the separate
+    STRIPE_TEST_SECRET_KEY, or the whole bot running on a sk_test_ key."""
+    return (config.STRIPE_TEST_SECRET_KEY or "").startswith("sk_test_") or \
+        (config.STRIPE_SECRET_KEY or "").startswith("sk_test_")
+
+
+def whole_bot_on_test_keys() -> bool:
     return (config.STRIPE_SECRET_KEY or "").startswith("sk_test_")
 
 
@@ -115,7 +122,7 @@ def retire(actor_id: int) -> list:
 
 
 def status_lines() -> list:
-    lines = [f"Stripe keys: **{'TEST' if test_mode() else 'LIVE'}** - the test item is "
+    lines = [f"Stripe test keys for the test item: **{'set' if test_mode() else 'NOT set'}** - it is "
              f"{'sellable' if test_mode() else 'hidden and refused'} right now."]
     for sku, item_id in test_skus().items():
         item = db.get_item(item_id)

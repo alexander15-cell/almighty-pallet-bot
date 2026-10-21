@@ -49,9 +49,10 @@ class CheckoutError(Exception):
     """Why a checkout can't start - safe to show the buyer. `skus`: the
     items it's about, when it's about particular items."""
 
-    def __init__(self, message: str, skus: list = None):
+    def __init__(self, message: str, skus: list = None, detail: str = None):
         super().__init__(message)
         self.skus = skus or []
+        self.detail = detail  # the underlying cause - for staff screens/logs, never shoppers
 
 
 def _cents(dollars: float) -> int:
@@ -99,6 +100,25 @@ def check_sellable(items: list) -> list:
             raise CheckoutError(f"\"{title}\" doesn't have a price yet.")
         out.append((item, listing))
     return out
+
+
+def _uses_test_keys(items: list) -> bool:
+    """The checkout test item always goes through the Stripe TEST keys and
+    real items always through the live ones - never mixed in one cart, and
+    never a test item on live keys (shop_test_item.py)."""
+    import shop_test_item
+    test_ids = set(shop_test_item.test_skus().values())
+    flags = {i["id"] in test_ids for i in items}
+    if flags == {True, False}:
+        raise CheckoutError("The checkout test item can't be in a cart with real items.")
+    if True in flags:
+        if not shop_test_item.test_mode():
+            raise CheckoutError("The checkout test item is only sellable with Stripe test keys "
+                                "(STRIPE_TEST_SECRET_KEY isn't set).")
+        return True
+    if not config.STRIPE_SECRET_KEY:
+        raise CheckoutError("Online checkout isn't available right now.")
+    return config.STRIPE_SECRET_KEY.startswith("sk_test_")
 
 
 def _photo(item: dict):
@@ -186,6 +206,7 @@ async def start_checkout(refs: list, source: str = "website", delivery: str = "s
     if not refs or len(refs) > 20:
         raise CheckoutError("The cart needs between 1 and 20 items.")
     items = resolve_items(refs)
+    test = _uses_test_keys(items)
     unit_amounts = _website_unit_amounts(refs, items, website_prices) if website_prices is not None else None
     key = ",".join(sorted(str(i["id"]) for i in items))
     async with _locks[key]:
@@ -200,10 +221,11 @@ async def start_checkout(refs: list, source: str = "website", delivery: str = "s
         sent = {item["id"]: line["price_data"]["unit_amount"]
                 for (item, _), line in zip(sellable, params["line_items"])}
         try:
-            session = await stripe_api.create_checkout_session(params)
+            session = await stripe_api.create_checkout_session(params, test=test)
         except stripe_api.StripeError as e:
-            log.error("Stripe checkout creation failed: %s", e)
-            raise CheckoutError("Checkout couldn't start - please try again in a minute.")
+            log.error("Stripe checkout creation failed (%s keys, items %s): %s",
+                      "TEST" if test else "LIVE", key, e)
+            raise CheckoutError("Checkout couldn't start - please try again in a minute.", detail=str(e))
         try:
             db.create_stripe_checkout(session["id"], source, [i["id"] for i in items], session.get("url"), delivery,
                                       expires_at.isoformat(), created_by=actor_id)

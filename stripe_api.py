@@ -40,10 +40,23 @@ def _flatten(data, prefix="") -> list:
     return pairs
 
 
-async def _request(method: str, path: str, params: dict = None, idempotency_key: str = None) -> dict:
+def _key(test: bool) -> str:
+    """The live key, or (test=True) the separate test key - falling back to
+    STRIPE_SECRET_KEY when that itself is a sk_test_ key."""
+    if test:
+        key = config.STRIPE_TEST_SECRET_KEY or (
+            config.STRIPE_SECRET_KEY if config.STRIPE_SECRET_KEY.startswith("sk_test_") else "")
+        if not key:
+            raise StripeError("STRIPE_TEST_SECRET_KEY isn't set in .env (needed for the checkout test item).")
+        return key
     if not config.STRIPE_SECRET_KEY:
         raise StripeError("STRIPE_SECRET_KEY isn't set in .env.")
-    headers = {"Authorization": f"Bearer {config.STRIPE_SECRET_KEY}"}
+    return config.STRIPE_SECRET_KEY
+
+
+async def _request(method: str, path: str, params: dict = None, idempotency_key: str = None,
+                   test: bool = False) -> dict:
+    headers = {"Authorization": f"Bearer {_key(test)}"}
     if config.STRIPE_API_VERSION:
         headers["Stripe-Version"] = config.STRIPE_API_VERSION
     if idempotency_key:
@@ -53,30 +66,35 @@ async def _request(method: str, path: str, params: dict = None, idempotency_key:
         if method == "GET":
             async with session.get(f"{API_BASE}{path}", params=pairs, headers=headers) as resp:
                 body = await resp.json(content_type=None)
-                status = resp.status
+                status, request_id = resp.status, resp.headers.get("Request-Id")
         else:
             async with session.request(method, f"{API_BASE}{path}", data=pairs, headers=headers) as resp:
                 body = await resp.json(content_type=None)
-                status = resp.status
+                status, request_id = resp.status, resp.headers.get("Request-Id")
     if status >= 300:
         err = (body or {}).get("error") or {}
-        raise StripeError(f"Stripe {method} {path} failed ({status}): {err.get('message') or body}")
+        raise StripeError(f"Stripe {method} {path} failed ({status}, request {request_id or '?'}): "
+                          f"{err.get('message') or body}")
     return body
 
 
-async def create_checkout_session(params: dict, idempotency_key: str = None) -> dict:
-    return await _request("POST", "/checkout/sessions", params, idempotency_key=idempotency_key)
+def is_test_session(session_id: str) -> bool:
+    return str(session_id).startswith("cs_test_")
+
+
+async def create_checkout_session(params: dict, idempotency_key: str = None, test: bool = False) -> dict:
+    return await _request("POST", "/checkout/sessions", params, idempotency_key=idempotency_key, test=test)
 
 
 async def retrieve_checkout_session(session_id: str) -> dict:
     """With the payment's charge and balance transaction, so the Stripe fee
     can be read (payment_intent.latest_charge.balance_transaction.fee)."""
     return await _request("GET", f"/checkout/sessions/{session_id}", {
-        "expand": ["payment_intent.latest_charge.balance_transaction"]})
+        "expand": ["payment_intent.latest_charge.balance_transaction"]}, test=is_test_session(session_id))
 
 
 async def expire_checkout_session(session_id: str) -> dict:
-    return await _request("POST", f"/checkout/sessions/{session_id}/expire")
+    return await _request("POST", f"/checkout/sessions/{session_id}/expire", test=is_test_session(session_id))
 
 
 def verify_webhook(payload: bytes, signature_header: str, secret: str, tolerance: int = 300, now: int = None) -> dict:

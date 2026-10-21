@@ -207,8 +207,8 @@ def _test_item(shop, monkeypatch, keys="sk_test_x"):
     monkeypatch.setattr(config, "STRIPE_SECRET_KEY", keys)
     live_create = stripe_api.create_checkout_session
 
-    async def test_create(params, idempotency_key=None):  # Stripe reports test sessions as livemode=false
-        session = await live_create(params, idempotency_key)
+    async def test_create(params, idempotency_key=None, test=False):  # Stripe reports test sessions as livemode=false
+        session = await live_create(params, idempotency_key, test)
         return {**session, "id": session["id"].replace("cs_live_", "cs_test_"), "livemode": False}
     monkeypatch.setattr(stripe_api, "create_checkout_session", test_create)
     item = shop_test_item.create(actor_id=1)
@@ -293,3 +293,81 @@ def test_test_payment_only_flips_the_test_item_and_reset_relists_it(shop, monkey
     assert shop.db.active_stripe_holds([item["id"]]) == {}
     assert shop_test_item.create(actor_id=1)["id"] == item["id"]  # create is idempotent
     assert shop_test_item.retire(actor_id=1) == [_sku(item)] and shop_test_item.test_skus() == {}
+
+
+# ------------------------------------- separate test keys (production stays live)
+
+def test_separate_test_keys_only_for_the_test_item(shop, monkeypatch):
+    import hashlib
+    import hmac as hmac_
+    import json as json_
+    import time as time_
+    import shop_test_item
+    import stripe_shop
+    real = _listed(shop.db, price=22.0)[0]
+    _setup(shop, monkeypatch, [_live(real, 22.0)])  # live keys
+    monkeypatch.setattr(config, "STRIPE_TEST_SECRET_KEY", "sk_test_separate")
+    monkeypatch.setattr(config, "STRIPE_TEST_WEBHOOK_SECRET", "whsec_testmode")
+    item = shop_test_item.create(actor_id=1)
+    modes = []
+    live_create = stripe_api.create_checkout_session
+
+    async def create(params, idempotency_key=None, test=False):
+        modes.append(test)
+        session = await live_create(params, idempotency_key, test)
+        return {**session, "id": session["id"].replace("cs_live_", "cs_test_" if test else "cs_live_"),
+                "livemode": not test}
+    monkeypatch.setattr(stripe_api, "create_checkout_session", create)
+
+    async def steps(c):
+        r = await _checkout(c, {_sku(real): 2200})  # real item: live keys, as normal
+        assert r.status == 200 and (await r.json())["livemode"] is True
+        r = await _checkout(c, {_sku(item): 100})  # test item: the test keys
+        data = await r.json()
+        assert r.status == 200 and data["livemode"] is False and data["subtotal_cents"] == 100
+        assert data["session_id"].startswith("cs_test_")
+        full = await (await c.get("/shop/catalog", headers=H)).json()
+        assert _sku(item) not in [i["sku"] for i in full["items"]]
+        assert (await c.get("/shop/catalog?scope=test", headers=H)).status == 200
+        # a webhook signed with the TEST endpoint's secret is accepted
+        body = json_.dumps({"id": "evt_t1", "type": "checkout.session.expired", "data": {"object": {
+            "id": data["session_id"], "object": "checkout.session"}}}).encode()
+        now = int(time_.time())
+        sig = hmac_.new(b"whsec_testmode", f"{now}.".encode() + body, hashlib.sha256).hexdigest()
+        r = await c.post("/stripe/webhook", data=body, headers={"Stripe-Signature": f"t={now},v1={sig}"})
+        assert r.status == 200 and shop.db.get_stripe_checkout(data["session_id"])["status"] == "expired"
+    _run(shop, steps)
+    assert modes == [False, True]
+
+    import pytest
+    with pytest.raises(stripe_shop.CheckoutError, match="real items"):
+        asyncio.run(stripe_shop.start_checkout([item["id"], real["id"]]))
+    monkeypatch.setattr(config, "STRIPE_TEST_SECRET_KEY", "")
+    with pytest.raises(stripe_shop.CheckoutError, match="test keys"):
+        asyncio.run(stripe_shop.start_checkout([item["id"]], source="link"))
+
+
+def test_stripe_key_choice_and_error_detail(monkeypatch):
+    import pytest
+    monkeypatch.setattr(config, "STRIPE_SECRET_KEY", "sk_live_a")
+    monkeypatch.setattr(config, "STRIPE_TEST_SECRET_KEY", "sk_test_b")
+    assert stripe_api._key(False) == "sk_live_a" and stripe_api._key(True) == "sk_test_b"
+    assert stripe_api.is_test_session("cs_test_1") and not stripe_api.is_test_session("cs_live_1")
+    monkeypatch.setattr(config, "STRIPE_TEST_SECRET_KEY", "")
+    with pytest.raises(stripe_api.StripeError, match="STRIPE_TEST_SECRET_KEY"):
+        stripe_api._key(True)
+
+
+def test_payment_link_page_shows_stripes_reason(shop, monkeypatch):
+    import shop_test_item
+    _setup(shop, monkeypatch, [])
+    monkeypatch.setattr(config, "STRIPE_TEST_SECRET_KEY", "sk_test_separate")
+    item = shop_test_item.create(actor_id=1)
+    monkeypatch.setattr(stripe_api, "create_checkout_session", AsyncMock(
+        side_effect=stripe_api.StripeError("Stripe POST /checkout/sessions failed (400, request req_1): Tax off")))
+    import stripe_shop
+    try:
+        asyncio.run(stripe_shop.start_checkout([item["id"]], source="link"))
+    except stripe_shop.CheckoutError as e:
+        assert "Tax off" in e.detail and "Tax off" not in str(e)  # shoppers never see the detail
+    assert shop.db.active_stripe_holds([item["id"]]) == {}

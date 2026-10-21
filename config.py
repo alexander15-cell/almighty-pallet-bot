@@ -110,7 +110,13 @@ WEB_MAX_UPLOAD_MB = int(os.getenv("WEB_MAX_UPLOAD_MB") or "15")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
 STRIPE_API_VERSION = os.getenv("STRIPE_API_VERSION", "").strip()  # blank = the account's default
-STRIPE_ENABLED = bool(STRIPE_SECRET_KEY)
+# Separate Stripe TEST keys used ONLY for the disposable checkout test item
+# (/admin checkout-test, shop_test_item.py) - so it can be tested end to end
+# while every real sale stays on the live keys above. Register a TEST-mode
+# webhook endpoint at the same URL; its signing secret goes here.
+STRIPE_TEST_SECRET_KEY = os.getenv("STRIPE_TEST_SECRET_KEY", "").strip()
+STRIPE_TEST_WEBHOOK_SECRET = os.getenv("STRIPE_TEST_WEBHOOK_SECRET", "").strip()
+STRIPE_ENABLED = bool(STRIPE_SECRET_KEY or STRIPE_TEST_SECRET_KEY)
 # Where Stripe sends the buyer afterwards (pages on the website).
 STRIPE_SUCCESS_URL = os.getenv("STRIPE_SUCCESS_URL", "https://4guys1palletoverstock.com/checkout/success").strip()
 STRIPE_CANCEL_URL = os.getenv("STRIPE_CANCEL_URL", "https://4guys1palletoverstock.com/cart").strip()

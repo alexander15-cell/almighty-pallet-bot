@@ -165,37 +165,32 @@ POST /shop/checkout
 
 ## 7. Testing without touching real stock
 
-There's one bot; the "test configuration" is the bot running on Stripe
-**test** keys, plus one disposable item.
+Production stays on the live keys. The disposable test item uses its own
+Stripe **test** keys (`STRIPE_TEST_SECRET_KEY` + `STRIPE_TEST_WEBHOOK_SECRET`,
+the signing secret of a test-mode endpoint at the same `/stripe/webhook`
+URL). Real items always use the live keys; the test item always uses the
+test keys and is refused if they aren't set; the two can't share a cart.
 
-**The test item** - `/admin checkout-test action:create` in Discord makes
-"TEST CHECKOUT ONLY", $1.00, in its own archived pallet with no Discord
-channels, and replies with its SKU (`pallet-N-item-1`; N is the next pallet
-number - pallet numbers can't be picked, so it won't be 999).
+**The test item** - `/admin checkout-test action:create` makes "TEST
+CHECKOUT ONLY", $1.00, in its own archived pallet with no channels, and
+replies with its SKU (`pallet-N-item-1`).
 
-**While the bot is on test keys** (`sk_test_...` + the test endpoint's
-webhook signing secret):
-- `GET /shop/catalog?scope=test` lists only the test item, with a
-  simulated listing (`ebay_listing_id: "TEST-pallet-N-item-1"`, price 100,
-  quantity 1, `ebay_checked_at` = response time). It is never in the normal
-  `GET /shop/catalog`.
-- refresh / checkout naming the test SKU use that simulated listing (no
-  eBay call). Stale price → `409 price_changed`; held → `409 not_available`.
-- **Every other item is refused at checkout** (`409 not_available`), so a
-  test payment can't reach real stock.
-- The checkout answer includes `"livemode": false` (and a `cs_test_` id).
+- `GET /shop/catalog?scope=test` - only the test item, with a simulated
+  listing (`ebay_listing_id: "TEST-<sku>"`, price 100, quantity 1,
+  `ebay_checked_at` = response time). Never in the normal `GET /shop/catalog`.
+  404 when no test key is set.
+- refresh / checkout naming the test SKU use the simulated listing (no eBay
+  call) and create the session with the test keys: `"livemode": false`,
+  `cs_test_` id. Stale price → `409 price_changed`; held → `409 not_available`.
+- The dashboard's **Send a payment link** on the test item works the same way.
 - A paid test session only flips the test item to Sold: no Discord cards,
-  no eBay changes, no sale log, no QuickBooks, no buyer messages. A
-  test-mode payment for any other item leaves it untouched and is flagged.
-- Cancel / expiry release the hold as normal (Stripe's expiry is ~30 min;
-  `reset` releases it immediately).
-
-**On live keys** the test SKU is treated as unknown everywhere
-(`?scope=test` → 404, refresh → unavailable record, checkout → refused).
+  no eBay changes, no sale log, no QuickBooks, no buyer messages.
+- Shipping: the bot's free-shipping rate (`STRIPE_SHIPPING_PRICE`, $0) as its
+  own line; tax: Stripe Tax on the test account (shown as its own line once
+  the test account's tax settings have a head office and an Indiana registration).
 
 **Reset between tests:** `/admin checkout-test action:reset` - back to
 Listed, any open test checkout cancelled. `action:status` shows it;
 `action:retire` soft-deletes it when testing is finished.
 
-Card `4242 4242 4242 4242`, any future date / CVC, a US address. Afterwards
-switch the bot back to live keys and restart.
+Card `4242 4242 4242 4242`, any future date / CVC, a US address.

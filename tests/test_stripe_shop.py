@@ -37,7 +37,7 @@ def shop(fresh_db, monkeypatch):
         monkeypatch.setattr(config, key, value)
     created = []
 
-    async def create(params, idempotency_key=None):
+    async def create(params, idempotency_key=None, test=False):
         created.append(params)
         return {"id": f"cs_test_{len(created)}", "url": f"https://checkout.stripe.com/c/pay/cs_test_{len(created)}"}
     monkeypatch.setattr(stripe_api, "create_checkout_session", create)
@@ -280,7 +280,7 @@ KEY = "k" * 40
 
 def _priced_stripe(monkeypatch, shop, subtotal_offset=0):
     """Fake Stripe that reports its own subtotal, like the real one."""
-    async def create(params, idempotency_key=None):
+    async def create(params, idempotency_key=None, test=False):
         shop.created.append(params)
         subtotal = sum(l["price_data"]["unit_amount"] for l in params["line_items"]) + subtotal_offset
         n = len(shop.created)

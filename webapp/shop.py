@@ -190,11 +190,18 @@ async def session_status(request):
 
 async def webhook(request):
     payload = await request.read()
-    try:
-        event = stripe_api.verify_webhook(payload, request.headers.get("Stripe-Signature", ""),
-                                          config.STRIPE_WEBHOOK_SECRET)
-    except stripe_api.StripeError as e:
-        log.warning("Rejected a Stripe webhook: %s", e)
+    event, error = None, None
+    # Live endpoint first; then the test-mode endpoint (checkout test item).
+    for secret in (config.STRIPE_WEBHOOK_SECRET, config.STRIPE_TEST_WEBHOOK_SECRET):
+        if not secret:
+            continue
+        try:
+            event = stripe_api.verify_webhook(payload, request.headers.get("Stripe-Signature", ""), secret)
+            break
+        except stripe_api.StripeError as e:
+            error = e
+    if event is None:
+        log.warning("Rejected a Stripe webhook: %s", error or "no webhook secret configured")
         return web.Response(status=400, text="bad signature")
     try:
         outcome = await stripe_shop.handle_event(bot_of(request), event)
@@ -217,7 +224,9 @@ async def payment_link(request):
         result = await stripe_shop.start_checkout([item["id"]], source="link", delivery=delivery,
                                                   actor_id=user.discord_id)
     except stripe_shop.CheckoutError as e:
-        raise web.HTTPSeeOther(f"/items/{item['id']}?{qs(msg=str(e))}")
+        # Staff only - show what actually went wrong (Stripe's own message).
+        message = f"{e} ({e.detail})" if e.detail else str(e)
+        raise web.HTTPSeeOther(f"/items/{item['id']}?{qs(msg=message[:400])}")
     until = result["expires_at"][:16].replace("T", " ")
     body = (f"<p><a href='/items/{item['id']}'>‹ Back to the item</a></p><h1>Payment link ready</h1>"
             f"<div class='card'><p>Send this to the buyer. It's for this one item only, works once, and holds the item "
