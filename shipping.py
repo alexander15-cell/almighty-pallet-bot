@@ -16,10 +16,16 @@ zones) - set the rates to cover the average.
 
 An order ships for the sum of its items. Local pickup is always $0.
 """
+import asyncio
 import math
+import re
+import secrets
+from datetime import datetime, timedelta, timezone
 
 import config
 import database as db
+import ebay_listing_rules
+import shippo_api
 
 
 def _cents(dollars: float) -> int:
@@ -61,6 +67,78 @@ def custom() -> bool:
     return config.SHIPPING_MODE == "custom"
 
 
+def live_rates() -> bool:
+    return config.SHIPPING_MODE == "shippo"
+
+
+class QuoteError(Exception):
+    """Why shipping couldn't be quoted - safe to show."""
+
+
+def _default_parcel() -> dict:
+    try:
+        l, w, h, lb = (float(x) for x in re.split(r"[x,\s]+", config.SHIP_DEFAULT_PARCEL.lower()) if x)
+    except ValueError:
+        l, w, h, lb = 14.0, 12.0, 10.0, 8.0
+    return {"length": l, "width": w, "height": h, "weight": lb}
+
+
+def parcel_for(item: dict, listing: dict) -> tuple:
+    """(parcel, source) - the item's packed size/weight, else the default box."""
+    weight, dims, source = _measure(item, listing)
+    default = _default_parcel()
+    if weight is None:
+        return default, "default"
+    if not dims:
+        dims = (default["length"], default["width"], default["height"])
+    return {"length": dims[0], "width": dims[1], "height": dims[2], "weight": weight}, source
+
+
+def _charge_cents(carrier_dollars: float) -> int:
+    return int(round((carrier_dollars * (1 + config.SHIPPO_MARKUP_PERCENT / 100) + config.SHIPPO_HANDLING) * 100))
+
+
+async def quote(items_with_listings: list, zip_code: str) -> dict:
+    """
+    Live shipping for these items to a US ZIP: each item's cheapest Shippo
+    rate (one box per item) + markup/handling, summed. Saved so checkout can
+    use exactly this amount. Returns {'quote_id', 'zip', 'shipping_cents',
+    'expires_at', 'items': [{item_id, sku, shipping_cents, carrier,
+    service, days, parcel}]}. Raises QuoteError.
+    """
+    zip5 = (zip_code or "").strip()[:5]
+    if not re.fullmatch(r"\d{5}", zip5):
+        raise QuoteError("Enter a 5-digit US ZIP code.")
+    parcels = [parcel_for(item, listing) for item, listing in items_with_listings]
+    try:
+        all_rates = await asyncio.gather(*(shippo_api.get_rates(p, zip5) for p, _ in parcels))
+    except shippo_api.ShippoError as e:
+        raise QuoteError(f"Couldn't get shipping rates right now ({e}).")
+    lines = []
+    for (item, _), (parcel, source), rates in zip(items_with_listings, parcels, all_rates):
+        best = rates[0]
+        lines.append({"item_id": item["id"], "sku": ebay_listing_rules.custom_label(item),
+                      "shipping_cents": _charge_cents(best["amount"]), "carrier": best["provider"],
+                      "service": best["service"], "days": best["days"], "parcel": source})
+    total = sum(line["shipping_cents"] for line in lines)
+    quote_id = "shq_" + secrets.token_urlsafe(12)
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=config.SHIPPO_QUOTE_MINUTES)).isoformat()
+    db.save_shipping_quote(quote_id, [i["id"] for i, _ in items_with_listings], zip5, total, lines, expires_at)
+    return {"quote_id": quote_id, "zip": zip5, "shipping_cents": total, "expires_at": expires_at, "items": lines}
+
+
+def usable_quote(quote_id: str, item_ids: list) -> dict:
+    """The saved quote, if it's still valid for exactly these items."""
+    quote_row = db.get_shipping_quote(quote_id) if quote_id else None
+    if not quote_row:
+        raise QuoteError("Get a shipping quote for this cart first.")
+    if quote_row["expires_at"] < datetime.now(timezone.utc).isoformat():
+        raise QuoteError("That shipping quote expired - get a new one.")
+    if sorted(quote_row["item_ids"]) != sorted(item_ids):
+        raise QuoteError("That shipping quote is for a different cart - get a new one.")
+    return quote_row
+
+
 def per_item_cents(item: dict, listing: dict = None):
     """What the website shows next to an item: its own shipping in custom
     mode, None in flat mode (the flat price is per order, not per item)."""
@@ -71,12 +149,16 @@ def order_cents(items_with_listings: list, delivery: str) -> int:
     """Shipping for a whole order: [(item, listing)]."""
     if delivery == "pickup":
         return 0
+    if live_rates():
+        raise QuoteError("Shipping needs a live quote (ZIP code) first.")
     if not custom():
         return _cents(config.STRIPE_SHIPPING_PRICE)
     return sum(item_shipping(item, listing)["cents"] for item, listing in items_with_listings)
 
 
 def label() -> str:
+    if live_rates():
+        return config.SHIP_LABEL
     if not custom():
         return config.STRIPE_SHIPPING_LABEL
     return config.SHIP_LABEL

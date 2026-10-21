@@ -160,6 +160,41 @@ POST /shop/checkout
 - Reservations last 30 minutes and are released when Stripe reports the
   session expired. Fulfillment happens only on Stripe's signed webhook.
 
+## 4b. Live shipping (when the bot runs `SHIPPING_MODE=shippo`)
+
+Shipping depends on where the box goes, so the cart asks for the buyer's
+ZIP code **before** checkout (Stripe's page can't re-price shipping after the
+address is typed).
+
+```
+POST /shop/shipping/quote
+{"items": ["pallet-1-item-96", "pallet-1-item-113"], "zip": "46201"}
+```
+→
+```json
+{"quote_id": "shq_...", "zip": "46201", "shipping_cents": 2160,
+ "expires_at": "2026-10-21T19:40:00+00:00",
+ "items": [{"sku": "pallet-1-item-96", "shipping_cents": 940, "carrier": "USPS",
+            "service": "Ground Advantage", "days": 3, "parcel": "listing"},
+           {"sku": "pallet-1-item-113", "shipping_cents": 1220, "carrier": "USPS",
+            "service": "Ground Advantage", "days": 4, "parcel": "default"}]}
+```
+
+- Each item ships as its own box (its saved size and weight; `parcel:
+  "default"` = no measurements saved, a standard box was used); the price is
+  the cheapest live carrier rate plus the business's handling/markup.
+- `400 bad_request` for a bad ZIP; `503 shipping_unavailable` if rates can't
+  be fetched - don't show a made-up price. `404` when live shipping is off.
+- Quotes last 60 minutes and are for exactly that set of items. Then send
+  `"shipping_quote_id": "shq_..."` with the checkout (delivery `ship`). A
+  missing, expired or different-cart quote → `409 shipping_quote_required`
+  (re-quote). Stripe charges exactly `shipping_cents` as its own line.
+- If the buyer then types a different ZIP on Stripe's page the order still
+  goes through and the bot flags it for the owner.
+- `"delivery": "pickup"` needs no quote ($0 shipping).
+- In this mode the catalog's per-item `shipping_cents` is `null` (it
+  depends on the ZIP).
+
 ## 5. Pages Stripe sends the buyer back to
 
 - Success: `https://4guys1palletoverstock.com/checkout/success?session_id={CHECKOUT_SESSION_ID}`

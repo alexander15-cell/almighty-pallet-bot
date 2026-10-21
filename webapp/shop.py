@@ -26,6 +26,7 @@ from aiohttp import web
 import config
 import database as db
 import ebay_catalog
+import shipping
 import stripe_api
 import stripe_shop
 from webapp.layout import csrf_input, esc, money, page, qs
@@ -169,10 +170,13 @@ async def checkout(request):
                       price_changes=check["price_changes"], current_prices=check["prices"])
     try:
         result = await stripe_shop.start_checkout(skus, source="website", delivery=delivery,
-                                                  website_prices=check["prices"])
+                                                  website_prices=check["prices"],
+                                                  shipping_quote_id=body.get("shipping_quote_id"))
     except stripe_shop.CheckoutError as e:
         if e.skus:
             return _error(409, "not_available", str(e), unavailable_items=[s for s in e.skus if s in skus])
+        if e.code:
+            return _error(409, e.code, str(e))
         return _error(503, "checkout_unavailable", str(e))
     return web.json_response({
         "url": result["url"], "checkout_contract": WEBSITE_PRICES_CONTRACT, "currency": "usd",
@@ -180,6 +184,33 @@ async def checkout(request):
         "session_id": result["session_id"], "expires_at": result["expires_at"], "livemode": result["livemode"],
         "delivery": result["delivery"], "shipping_cents": result["shipping_cents"]},
         headers={"Cache-Control": "no-store"})
+
+
+async def shipping_quote(request):
+    """POST /shop/shipping/quote {"items": [sku...], "zip": "46201"} - live
+    shipping (SHIPPING_MODE=shippo) for this cart to that ZIP. The answer's
+    quote_id goes into the checkout request as shipping_quote_id."""
+    if not _from_website_server(request):
+        return _denied()
+    if _rate_limited(request):
+        return _error(429, "rate_limited", "Too many tries - wait a minute.")
+    if not shipping.live_rates():
+        return _error(404, "not_found", "Live shipping quotes aren't turned on.")
+    body = await _json_body(request)
+    try:
+        skus = ebay_catalog.parse_skus((body or {}).get("items"))
+        items = stripe_shop.resolve_items(skus)
+    except (ValueError, stripe_shop.CheckoutError) as e:
+        return _error(400, "bad_request", str(e))
+    try:
+        result = await shipping.quote([(i, db.get_ebay_listing_data(i["id"]) or {}) for i in items],
+                                      str((body or {}).get("zip") or ""))
+    except shipping.QuoteError as e:
+        bad_zip = "ZIP" in str(e) and "5-digit" in str(e)
+        return _error(400 if bad_zip else 503, "bad_request" if bad_zip else "shipping_unavailable", str(e))
+    for line in result["items"]:
+        line.pop("item_id", None)
+    return web.json_response(result, headers={"Cache-Control": "no-store"})
 
 
 async def session_status(request):
@@ -225,17 +256,25 @@ async def payment_link(request):
         raise web.HTTPNotFound()
     form = await request.post()
     delivery = "pickup" if form.get("delivery") == "pickup" else "ship"
+    quote_id = None
+    if delivery == "ship" and shipping.live_rates():
+        try:
+            quoted = await shipping.quote([(item, db.get_ebay_listing_data(item["id"]) or {})], form.get("zip", ""))
+        except shipping.QuoteError as e:
+            raise web.HTTPSeeOther(f"/items/{item['id']}?{qs(msg=str(e)[:400])}")
+        quote_id = quoted["quote_id"]
     try:
         result = await stripe_shop.start_checkout([item["id"]], source="link", delivery=delivery,
-                                                  actor_id=user.discord_id)
+                                                  actor_id=user.discord_id, shipping_quote_id=quote_id)
     except stripe_shop.CheckoutError as e:
         # Staff only - show what actually went wrong (Stripe's own message).
         message = f"{e} ({e.detail})" if e.detail else str(e)
         raise web.HTTPSeeOther(f"/items/{item['id']}?{qs(msg=message[:400])}")
     until = result["expires_at"][:16].replace("T", " ")
+    how = "local pickup" if delivery == "pickup" else f"shipped, shipping ${result['shipping_cents'] / 100:.2f}"
     body = (f"<p><a href='/items/{item['id']}'>‹ Back to the item</a></p><h1>Payment link ready</h1>"
             f"<div class='card'><p>Send this to the buyer. It's for this one item only, works once, and holds the item "
-            f"until {esc(until)} UTC ({'local pickup' if delivery == 'pickup' else 'shipped'}; tax added at checkout).</p>"
+            f"until {esc(until)} UTC ({how}; tax added at checkout).</p>"
             f"<input type='text' readonly value='{esc(result['url'])}' id='pay-link'>"
             f"<div class='actions'><button type='button' class='btn primary' data-copy='pay-link'>Copy link</button>"
             f"<a class='btn' href='{esc(result['url'])}' target='_blank' rel='noopener'>Open it</a></div></div>"
@@ -254,6 +293,8 @@ def payment_link_form(user, item: dict) -> str:
             '(e.g. on Facebook): a Stripe page for just this item. Card, Apple Pay or Google Pay; tax is added.</p>'
             '<select name="delivery"><option value="ship">Ship it to them</option>'
             '<option value="pickup">Local pickup</option></select>'
+            + ('<input name="zip" inputmode="numeric" maxlength="10" placeholder="Buyer\'s ZIP (for shipping)">'
+               if shipping.live_rates() else '') +
             '<button class="btn primary">Create payment link</button></form>')
 
 
@@ -284,6 +325,7 @@ def add_routes(app: web.Application):
     app.router.add_get("/shop/catalog", catalog)
     app.router.add_post("/shop/catalog/refresh", catalog_refresh)
     app.router.add_post("/shop/checkout", checkout)
+    app.router.add_post("/shop/shipping/quote", shipping_quote)
     app.router.add_get(r"/shop/session/{session_id:cs_[A-Za-z0-9_]+}", session_status)
     app.router.add_post("/stripe/webhook", webhook)
     app.router.add_post(r"/items/{item_id:\d+}/payment-link", payment_link)

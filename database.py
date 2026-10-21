@@ -752,6 +752,25 @@ def init_db():
                 created_at  TEXT NOT NULL
             );
 
+            -- Live shipping quotes (Shippo) the website got for a cart + ZIP,
+            -- and which checkout used which quote.
+            CREATE TABLE IF NOT EXISTS shipping_quotes (
+                quote_id    TEXT PRIMARY KEY,
+                item_ids    TEXT NOT NULL,      -- JSON list
+                zip         TEXT NOT NULL,
+                cents       INTEGER NOT NULL,
+                detail      TEXT,               -- JSON: per item carrier/service/days/cents
+                created_at  TEXT NOT NULL,
+                expires_at  TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS checkout_shipping (
+                session_id  TEXT PRIMARY KEY,
+                quote_id    TEXT,
+                zip         TEXT,
+                cents       INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS stripe_events (
                 event_id     TEXT PRIMARY KEY,
                 event_type   TEXT,
@@ -2879,6 +2898,38 @@ def open_stripe_checkouts_for_item(item_id: int) -> list:
         return [dict(r) for r in conn.execute(
             """SELECT c.* FROM stripe_holds h JOIN stripe_checkouts c ON c.session_id = h.session_id
                WHERE h.item_id = ? AND c.status IN ('open', 'processing')""", (item_id,))]
+
+
+# ---------------------------------------------------------- shipping quotes --
+
+def save_shipping_quote(quote_id: str, item_ids: list, zip_code: str, cents: int, detail: list, expires_at: str):
+    with get_conn() as conn:
+        conn.execute("INSERT INTO shipping_quotes (quote_id, item_ids, zip, cents, detail, created_at, expires_at) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (quote_id, json.dumps(sorted(item_ids)), zip_code, cents, json.dumps(detail), _now(), expires_at))
+
+
+def get_shipping_quote(quote_id: str):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM shipping_quotes WHERE quote_id = ?", (quote_id,)).fetchone()
+    if not row:
+        return None
+    out = dict(row)
+    out["item_ids"] = json.loads(out["item_ids"])
+    out["detail"] = json.loads(out["detail"] or "[]")
+    return out
+
+
+def save_checkout_shipping(session_id: str, quote_id, zip_code, cents: int):
+    with get_conn() as conn:
+        conn.execute("INSERT OR REPLACE INTO checkout_shipping (session_id, quote_id, zip, cents) VALUES (?, ?, ?, ?)",
+                     (session_id, quote_id, zip_code, cents))
+
+
+def get_checkout_shipping(session_id: str):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM checkout_shipping WHERE session_id = ?", (session_id,)).fetchone()
+        return dict(row) if row else None
 
 
 # ------------------------------------------------------- web dashboard reads --

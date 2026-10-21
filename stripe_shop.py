@@ -50,9 +50,10 @@ class CheckoutError(Exception):
     """Why a checkout can't start - safe to show the buyer. `skus`: the
     items it's about, when it's about particular items."""
 
-    def __init__(self, message: str, skus: list = None, detail: str = None):
+    def __init__(self, message: str, skus: list = None, detail: str = None, code: str = None):
         super().__init__(message)
         self.skus = skus or []
+        self.code = code  # a machine-readable reason for the website, when there is one
         self.detail = detail  # the underlying cause - for staff screens/logs, never shoppers
 
 
@@ -131,7 +132,7 @@ def _photo(item: dict):
 
 
 def build_session_params(sellable: list, delivery: str, expires_at: datetime, reference: str,
-                         unit_amounts: dict = None) -> dict:
+                         unit_amounts: dict = None, shipping_cents: int = None) -> dict:
     """unit_amounts: {item_id: cents} to charge instead of the bot's price
     (the website's own prices - see start_checkout)."""
     line_items = []
@@ -163,7 +164,8 @@ def build_session_params(sellable: list, delivery: str, expires_at: datetime, re
         params["shipping_address_collection"] = {"allowed_countries": ["US"]}
         params["shipping_options"] = [{"shipping_rate_data": {
             "type": "fixed_amount", "display_name": shipping.label()[:100],
-            "fixed_amount": {"amount": shipping.order_cents(sellable, "ship"), "currency": "usd"},
+            "fixed_amount": {"amount": shipping_cents if shipping_cents is not None
+                             else shipping.order_cents(sellable, "ship"), "currency": "usd"},
             "tax_behavior": "exclusive", "tax_code": config.STRIPE_SHIPPING_TAX_CODE}}]
     else:
         # Local pickup: tax from the billing address (a local buyer).
@@ -191,7 +193,7 @@ def _website_unit_amounts(refs: list, items: list, website_prices) -> dict:
 
 
 async def start_checkout(refs: list, source: str = "website", delivery: str = "ship", actor_id: int = None,
-                         website_prices: dict = None) -> dict:
+                         website_prices: dict = None, shipping_quote_id: str = None) -> dict:
     """
     Holds the items and creates the Stripe Checkout page. Returns
     {'url', 'session_id', 'expires_at', 'subtotal_cents', 'unit_amounts'
@@ -217,8 +219,18 @@ async def start_checkout(refs: list, source: str = "website", delivery: str = "s
             expires_at = now + timedelta(hours=config.STRIPE_LINK_HOURS) - timedelta(minutes=1)
         else:
             expires_at = now + timedelta(minutes=config.STRIPE_HOLD_MINUTES, seconds=30)
+        quote_row, ship_cents = None, 0
+        if delivery == "ship":
+            try:
+                if shipping.live_rates():
+                    quote_row = shipping.usable_quote(shipping_quote_id, [i["id"] for i in items])
+                    ship_cents = quote_row["cents"]
+                else:
+                    ship_cents = shipping.order_cents(sellable, "ship")
+            except shipping.QuoteError as e:
+                raise CheckoutError(str(e), code="shipping_quote_required")
         params = build_session_params(sellable, delivery, expires_at, reference=f"{source}-{key}",
-                                      unit_amounts=unit_amounts)
+                                      unit_amounts=unit_amounts, shipping_cents=ship_cents)
         sent = {item["id"]: line["price_data"]["unit_amount"]
                 for (item, _), line in zip(sellable, params["line_items"])}
         try:
@@ -238,6 +250,8 @@ async def start_checkout(refs: list, source: str = "website", delivery: str = "s
                 log.exception("Couldn't expire Stripe session %s after losing an item race", session["id"])
             raise CheckoutError("Someone else is checking out one of these items right now.",
                                 skus=[ebay_listing_rules.custom_label(i) for i in items])
+        db.save_checkout_shipping(session["id"], quote_row["quote_id"] if quote_row else None,
+                                  quote_row["zip"] if quote_row else None, ship_cents)
         # What Stripe will actually charge before tax/shipping - from Stripe's
         # own answer, not just what we asked for.
         subtotal = session.get("amount_subtotal")
@@ -246,7 +260,7 @@ async def start_checkout(refs: list, source: str = "website", delivery: str = "s
             raise CheckoutError("Checkout prices didn't come out right - please try again.")
     return {"url": session.get("url"), "session_id": session["id"], "expires_at": expires_at.isoformat(),
             "livemode": session.get("livemode", not session["id"].startswith("cs_test_")),
-            "delivery": delivery, "shipping_cents": shipping.order_cents(sellable, delivery),
+            "delivery": delivery, "shipping_cents": ship_cents,
             "subtotal_cents": subtotal if subtotal is not None else sum(sent.values()),
             "unit_amounts": {ref: sent[item["id"]] for ref, item in zip(refs, items)}}
 
@@ -366,6 +380,10 @@ async def fulfill(bot, session_id: str) -> dict:
         if not checkout["sold_marked"]:
             flow = bot.get_cog("ItemFlow") if bot else None
             address = _addr(session) if checkout["delivery"] == "ship" else None
+            quoted = db.get_checkout_shipping(session_id)
+            if address and quoted and quoted.get("zip") and (address["postal_code"] or "")[:5] != quoted["zip"]:
+                notes.append(f"Shipping was quoted to ZIP {quoted['zip']} but the buyer shipped to "
+                             f"{address['postal_code']} - check the label cost before buying it.")
             for item in items:
                 if item["status"] == db.STATUS_LISTED:
                     if flow is None:

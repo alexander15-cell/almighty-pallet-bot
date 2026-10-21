@@ -141,6 +141,23 @@ SHIP_MAX = float(os.getenv("SHIP_MAX") or "0")                       # 0 = no ca
 SHIP_DEFAULT = float(os.getenv("SHIP_DEFAULT") or "14.99")           # item with no weight at all
 SHIP_DIM_DIVISOR = float(os.getenv("SHIP_DIM_DIVISOR") or "166")     # size-based weight: L x W x H / this
 SHIP_LABEL = os.getenv("SHIP_LABEL", "Standard shipping").strip()
+# SHIPPING_MODE=shippo: live carrier rates from Shippo (shippo_api.py) for
+# the buyer's ZIP - the website asks POST /shop/shipping/quote first.
+SHIPPO_API_TOKEN = os.getenv("SHIPPO_API_TOKEN", "").strip()
+SHIPPO_CARRIERS = tuple(c.strip() for c in (os.getenv("SHIPPO_CARRIERS") or "").split(",") if c.strip())  # blank = any
+SHIPPO_HANDLING = float(os.getenv("SHIPPO_HANDLING") or "1.00")          # added per item, dollars
+SHIPPO_MARKUP_PERCENT = float(os.getenv("SHIPPO_MARKUP_PERCENT") or "0")  # on top of the carrier rate
+SHIPPO_QUOTE_MINUTES = int(os.getenv("SHIPPO_QUOTE_MINUTES") or "60")     # how long a quote can be used
+# Box used when an item has no weight/size saved: "L x W x H x lb".
+SHIP_DEFAULT_PARCEL = os.getenv("SHIP_DEFAULT_PARCEL", "14x12x10x8").strip()
+# Where packages ship from (Shippo needs it for rates).
+SHIP_FROM_NAME = os.getenv("SHIP_FROM_NAME", "Four Guys One Pallet Overstock").strip()
+SHIP_FROM_STREET1 = os.getenv("SHIP_FROM_STREET1", "").strip()
+SHIP_FROM_STREET2 = os.getenv("SHIP_FROM_STREET2", "").strip()
+SHIP_FROM_CITY = os.getenv("SHIP_FROM_CITY", "").strip()
+SHIP_FROM_STATE = os.getenv("SHIP_FROM_STATE", "IN").strip()
+SHIP_FROM_ZIP = os.getenv("SHIP_FROM_ZIP", "").strip()
+SHIP_FROM_PHONE = os.getenv("SHIP_FROM_PHONE", "").strip()
 SHIP_LOCAL_PICKUP = (os.getenv("SHIP_LOCAL_PICKUP") or "true").strip().lower() in ("1", "true", "yes", "on")
 STRIPE_SHIPPING_TAX_CODE = os.getenv("STRIPE_SHIPPING_TAX_CODE", "txcd_92010001").strip()  # Stripe Tax: shipping
 # Stripe Tax product tax code - General Tangible Goods.
