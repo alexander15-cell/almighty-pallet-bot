@@ -57,7 +57,7 @@ def _bot_with(flow):
     return bot
 
 
-def test_paid_shipped_order_goes_to_shippo_once_and_skips_pirate_ship(shop, monkeypatch, shippo_on):
+def test_paid_shipped_order_goes_to_shippo_once(shop, monkeypatch, shippo_on):
     item = _listed(shop.db, price=25.0)[0]
     shop.db.save_ebay_listing_data(item["id"], "Brass Lamp", "1", "1500", 25.0, {}, weight_lb=3.0, length_in=10,
                                    width_in=8, height_in=6)
@@ -74,7 +74,6 @@ def test_paid_shipped_order_goes_to_shippo_once_and_skips_pirate_ship(shop, monk
     assert line["sku"] == f"pallet-{item['pallet_id']}-item-{item['item_number']}"
     assert "box 10x8x6 in, 3 lb" in line["title"] and line["weight"] == "3.00"
     assert shop.db.get_shippo_order(sid)["status"] == "open"
-    assert item["id"] not in [i["id"] for i in shop.db.get_unexported_other_platform_sales()]
 
 
 def test_pickup_and_turned_off_never_go_to_shippo(shop, monkeypatch, shippo_on):
@@ -85,17 +84,15 @@ def test_pickup_and_turned_off_never_go_to_shippo(shop, monkeypatch, shippo_on):
     sid2 = _paid(shop, monkeypatch, [b])
     asyncio.run(stripe_shop.fulfill(_bot_with(_Flow(shop.db)), sid2))
     assert shippo_on == [] and shop.db.get_shippo_order(sid2) is None
-    assert b["id"] in [i["id"] for i in shop.db.get_unexported_other_platform_sales()]
 
 
-def test_failed_send_is_retried_and_stays_in_pirate_ship_meanwhile(shop, monkeypatch, shippo_on):
+def test_failed_send_is_retried(shop, monkeypatch, shippo_on):
     item = _listed(shop.db)[0]
     sid = _paid(shop, monkeypatch, [item])
     monkeypatch.setattr(shippo_api, "create_order", AsyncMock(side_effect=shippo_api.ShippoError("down")))
     flow = _Flow(shop.db)
     asyncio.run(stripe_shop.fulfill(_bot_with(flow), sid))
     assert shop.db.get_shippo_order(sid)["status"] == "failed"
-    assert item["id"] in [i["id"] for i in shop.db.get_unexported_other_platform_sales()]
 
     monkeypatch.setattr(shippo_api, "create_order", AsyncMock(return_value={"object_id": "ord_9"}))
     assert asyncio.run(shippo_orders.retry_failed(_bot_with(flow))) == 1
@@ -128,3 +125,34 @@ def test_bought_label_marks_shipped_saves_tracking_and_charges_the_pallet(shop, 
     costs = [c for c in shop.db.get_pallet_costs(a["pallet_id"]) if c["source"] == "shippo"]
     assert sorted(c["amount"] for c in costs) == [3.0, 9.0]  # split 30:10
     assert asyncio.run(shippo_orders.sync_labels(_bot_with(flow))) == 0  # done once only
+
+
+def test_in_person_sale_goes_to_shippo_once_its_address_is_saved(shop, monkeypatch, shippo_on):
+    item = _listed(shop.db, price=40.0)[0]
+    shop.db.record_sale_platform(item["id"], "In Person", actor_id=1)
+    shop.db.update_status(item["id"], shop.db.STATUS_SOLD, actor_id=1)
+    shop.db.record_item_sale(item["id"], 40.0, "In Person", actor_id=1)
+
+    note = asyncio.run(shippo_orders.send_for_item(shop.db.get_item(item["id"])))
+    assert "incomplete" in note and shippo_on == []  # no address yet
+
+    shop.db.set_shipping_info(item["id"], "Pat Buyer", "9 Elm St", "", "Muncie", "IN", "47304", "US", actor_id=1)
+    note = asyncio.run(shippo_orders.send_for_item(shop.db.get_item(item["id"])))
+    assert note.startswith("Sent to Shippo") and len(shippo_on) == 1
+    order = shippo_on[0]
+    assert order["to_address"] == {"name": "Pat Buyer", "street1": "9 Elm St", "street2": "", "city": "Muncie",
+                                   "state": "IN", "zip": "47304", "country": "US"}
+    assert order["line_items"][0]["total_price"] == "40.00" and order["order_number"].endswith(
+        f"pallet-{item['pallet_id']}-item-{item['item_number']}")
+    assert asyncio.run(shippo_orders.send_for_item(shop.db.get_item(item["id"]))) == ""  # only once
+    assert shop.db.get_shippo_order(f"item-{item['id']}")["status"] == "open"
+
+
+def test_ebay_and_unsold_items_never_go_to_shippo(shop, monkeypatch, shippo_on):
+    listed, ebay_sold = _listed(shop.db, number_of_items=2)
+    shop.db.record_sale_platform(ebay_sold["id"], "eBay", actor_id=1)
+    shop.db.update_status(ebay_sold["id"], shop.db.STATUS_SOLD, actor_id=1)
+    for item in (listed, ebay_sold):
+        shop.db.set_shipping_info(item["id"], "Pat", "9 Elm St", "", "Muncie", "IN", "47304", "US", actor_id=1)
+        assert asyncio.run(shippo_orders.send_for_item(shop.db.get_item(item["id"]))) == ""
+    assert shippo_on == []

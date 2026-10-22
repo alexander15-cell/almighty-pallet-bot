@@ -97,12 +97,12 @@ ENTRIES = (
         ("mark sold", "mark shipped", "sold item", "shipped item"),
     ),
     HelpEntry(
-        "/pirate-ship export-batch",
-        "Export every sold non-eBay item that hasn't shipped yet, as a CSV for Pirate Ship's batch import.",
-        ("shipping csv", "pirate ship", "export shipping"),
+        "Shipping labels (Shippo)",
+        "Website orders, and in-person/other sales once /finance set-shipping-info saves the address, are created as orders in Shippo (SHIPPO_ORDERS=true). Buy the label there - the bot then marks the item Shipped, keeps the tracking number and records the label cost on the pallet. eBay labels are bought through eBay.",
+        ("shipping label", "shippo", "pirate ship", "make a label", "ship an order"),
     ),
     HelpEntry(
-        "/pirate-ship purge-buyer-data [days] [confirm]",
+        "/admin purge-buyer-data [days] [confirm]",
         "Preview or clear old buyer name/address data past the retention window.",
         ("delete buyer data", "purge buyer", "buyer privacy"),
     ),
@@ -178,7 +178,7 @@ ENTRIES = (
     ),
     HelpEntry(
         "Website checkout (Stripe)",
-        "Website orders are paid on Stripe's checkout page (tax added automatically). When one's paid the bot marks the item sold, ends its eBay listing, saves the shipping address for the Pirate Ship export, and books the sale, sales tax and Stripe's fee to QuickBooks - see '🛒 Website order paid' in #ebay-orders. On the web dashboard, a Listed item's page has 'Send a payment link' for one-off buyers (ship or local pickup); Finance → Website lists orders.",
+        "Website orders are paid on Stripe's checkout page (tax added automatically). When one's paid the bot marks the item sold, ends its eBay listing, sends the order to Shippo for the label, and books the sale, sales tax and Stripe's fee to QuickBooks - see '🛒 Website order paid' in #ebay-orders. On the web dashboard, a Listed item's page has 'Send a payment link' for one-off buyers (ship or local pickup); Finance → Website lists orders.",
         ("stripe", "website order", "payment link", "card payment", "checkout", "sales tax website"),
     ),
     HelpEntry(
@@ -208,7 +208,7 @@ ENTRIES = (
     ),
     HelpEntry(
         "/finance set-shipping-info",
-        "Capture a non-eBay buyer's recipient/address for Pirate Ship.",
+        "Capture a non-eBay buyer's recipient/address - the bot then creates the Shippo order for the label.",
         ("buyer address", "shipping info", "recipient"),
     ),
     HelpEntry(

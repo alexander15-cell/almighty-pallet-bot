@@ -84,9 +84,9 @@ Every item's card always shows which pallet it belongs to.
   packaged dimensions (L x W x H, in inches) - all pre-filled with the AI's
   suggestions when there are any, always editable - and freeform item
   specifics (brand/size/color/etc). Title/category/condition/format/price/
-  weight/dimensions are all required - weight/dimensions feed the Pirate
-  Ship export (eBay's own CSV upload doesn't carry shipping data at all,
-  see below); specifics can be filled in later.
+  weight/dimensions are all required - weight/dimensions feed eBay's
+  Calculated shipping and Shippo (quotes via `shipping.py`, orders via
+  `shippo_orders.py`, see below); specifics can be filled in later.
   Description and photos are reused as-is from Data Entry. (None of these
   dropdowns pre-check an option: Discord's mobile client doesn't reliably register a
   tap on an option that's already marked selected, so the "recommended"
@@ -106,9 +106,9 @@ Every item's card always shows which pallet it belongs to.
   - **Mark Listed (Other)** - manual path for anywhere else entirely (a
     website, in person, etc.) - moves straight to #listed. For any non-eBay
     sale, **Finance Management** can also run `/finance set-shipping-info`
-    once a buyer's address is known, feeding `/pirate-ship export-batch`
-    (see below) - eBay sales never need this, since Pirate Ship pulls those
-    directly via its own native eBay integration.
+    once a buyer's address is known, which creates its Shippo order (see
+    "Shipping labels (Shippo)" below) - eBay sales never need this, since
+    their labels are bought through eBay itself.
 
   (The old eBay CSV batch upload and Facebook Marketplace CSV paths, with
   their `#pending-ebay-upload` / `#pending-fb-marketplace-upload` stages,
@@ -190,9 +190,10 @@ and type a number:
   - `/finance history` - lists a pallet's recent refunds/expenses/reversals.
   - `/finance set-shipping-info` - opens a two-step form for a buyer's
     recipient name and structured address (address lines, city, state,
-    postal code, country) on a non-eBay sale, feeding `/pirate-ship
-    export-batch`. Separate from logging the sale, since the address often
-    isn't known until after the price is agreed on.
+    postal code, country) on a non-eBay sale; once saved, a sale that ships
+    is created as a Shippo order (see "Shipping labels (Shippo)" below).
+    Separate from logging the sale, since the address often isn't known
+    until after the price is agreed on.
   - `/finance override-count` / `/finance clear-count-override` - manually
     corrects the "items received" figure if the real/accounting count needs
     to differ from what's been logged in Data Entry (e.g. junk that was
@@ -558,7 +559,7 @@ channel - visible to everyone regardless of role, but only a Pallet Admin
 can post in it - and posts a multi-part guide (`information_content.py`)
 covering what the bot does, the pipeline stage by stage, what each role can
 do, and every slash command grouped by category (`/ebay`, `/finance`,
-`/pirate-ship`, pallet/item management, `/admin`/`/setup`). Point anyone new
+pallet/item management, `/admin`/`/setup`). Point anyone new
 at it before they ask "how does this work?" in chat.
 
 Safe to re-run any time - it clears its own previous guide messages first
@@ -1007,7 +1008,8 @@ web dashboard on, since Stripe and the website reach the bot through it.
   that one item, shipped or local pickup, open `STRIPE_LINK_HOURS`.
 - **When it's paid** (`checkout.session.completed` webhook, signature
   checked): the item is marked Sold via the same `ItemFlow.do_mark_sold` as
-  Discord, the buyer's address is saved for the Pirate Ship export, the
+  Discord, the buyer's address is saved and a Shippo order is created for
+  it (see "Shipping labels (Shippo)"), the
   eBay listing is withdrawn (bot-made listings; others are flagged to end in
   Seller Hub), the sale is logged with a **non-taxable** Sales Receipt to
   the Website Sale item, and one Journal Entry books Stripe's collected tax
@@ -1033,6 +1035,26 @@ web dashboard on, since Stripe and the website reach the bot through it.
 3. QuickBooks: a **Website Sales** income account (under Sales) and a
    **Website Sale** product pointing at it → `QUICKBOOKS_WEBSITE_SALES_ITEM_ID`.
 4. Restart, then pay with a Stripe test card (4242 4242 4242 4242).
+
+### Shipping labels (Shippo)
+
+Labels for non-eBay sales go through **Shippo** (`shippo_orders.py`, on
+with `SHIPPO_ORDERS=true`). eBay sales' labels are bought through eBay
+itself and are never sent to Shippo.
+
+- **Orders are created for you:** a paid website/payment-link order
+  becomes a Shippo order automatically; an in-person/other sale that ships
+  becomes one as soon as its buyer's address is saved with `/finance
+  set-shipping-info`. Weight/dimensions come from the item's listing data.
+- **Staff buy the label in Shippo.** Every ~10 minutes the bot checks
+  Shippo; once a label exists it marks the items **Shipped**, keeps the
+  tracking number, records the label cost on the pallet (`pallet_costs`,
+  source `shippo`), and posts a notice in #ebay-orders.
+
+(The old Pirate Ship CSV export was removed. Its archive folder,
+`data/pirate_ship_exports/` (`PIRATE_SHIP_EXPORT_ARCHIVE_DIR`), is kept as
+history - still backed up and still redacted by `/admin
+purge-buyer-data` - but nothing new is written there.)
 
 ### Refunds, account charges, payouts, and true pallet profit
 
@@ -1199,15 +1221,15 @@ UI after a restart (a Discord client caching quirk, not a bug here).
     the entry ✅. The pinned card updates: revenue, profit/loss, and
     cost-recovery bar.
     For a non-eBay sale, once the buyer's address is known, also run
-    `/finance set-shipping-info` - that feeds `/pirate-ship export-batch`
-    later. eBay sales don't need this at all.
-11. Once shipped, click **Mark as Shipped** in `#sold`.
+    `/finance set-shipping-info` - that creates its Shippo order. eBay
+    sales don't need this at all.
+11. Buy the label in Shippo - within ~10 minutes the bot marks the items
+    Shipped, keeps the tracking number, and posts in `#ebay-orders` (see
+    "Shipping labels (Shippo)"). For a sale that isn't shipped through
+    Shippo, click **Mark as Shipped** in `#sold` once it's out the door.
 12. If anything sits in `#listed` for 10+ days, `#10-day-alerts` pings,
     naming the pallet.
-13. Anytime, a Pallet Admin runs `/pirate-ship export-batch` to grab a
-    shipping CSV for whatever non-eBay sales are waiting, for Pirate Ship's
-    batch order import.
-14. Anytime, check the pinned message at the top of a pallet's
+13. Anytime, check the pinned message at the top of a pallet's
     `#pallet-discussion` for full current status, or run `/finance summary`
     for a fresh non-pinned copy.
 
@@ -1266,18 +1288,6 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   via eBay's live Taxonomy API when available (falling back to local
   keyword search against `ebay_taxonomy.py`'s bundled ~18,000-category
   taxonomy otherwise).
-- `/pirate-ship export-batch` - exports every sold item on a non-eBay
-  platform ("Other"/website, logged via `/finance
-  log-sale`) that hasn't been exported yet, as a CSV for Pirate Ship's
-  batch/spreadsheet order import, then marks them exported so a re-run
-  doesn't duplicate them. Recipient name/address come from `/finance
-  set-shipping-info`; items missing that get flagged in the response but
-  are still included. Weight/package dimensions reuse the same data
-  captured on Queue Review's eBay listing form (see above) - the
-  human-confirmed value from approval when the item went through that flow,
-  else Automated Review's AI estimate; still left blank for items that
-  predate both. eBay sales are never included - Pirate Ship pulls those
-  directly via its own native eBay integration.
 - `/admin backup-now` - creates and verifies a local backup immediately (see
   "Backups" below); `/admin backups` lists recent ones with size and age.
 - `/admin purge-old-photos [days] [confirm]` - only meaningful if R2 is
@@ -1300,12 +1310,12 @@ UI after a restart (a Discord client caching quirk, not a bug here).
 - `/admin bind-role <role_name> <role>` / `/admin unbind-role <role_name>` /
   `/admin role-bindings` - optional role-ID bindings (see "Role bindings" below),
   editable live from Discord, no restart needed.
-- `/pirate-ship purge-buyer-data [days] [confirm]` - previews (default) or,
+- `/admin purge-buyer-data [days] [confirm]` - previews (default) or,
   with `confirm:True`, clears recipient name/address from shipped items
   past `BUYER_DATA_RETENTION_DAYS` (default 90) days, and redacts matching
-  rows in already-exported Pirate Ship CSV archives. Inventory identity,
-  sale price, and audit history are never touched - only buyer contact
-  info. CSVs/Discord attachments downloaded before a purge still have the
+  rows in the old Pirate Ship CSV archives (`buyer_data.py`). Inventory
+  identity, sale price, and audit history are never touched - only buyer
+  contact info. CSVs/Discord attachments downloaded before a purge still have the
   old data; that needs separate manual cleanup.
 - `/finance connect-quickbooks` - see "QuickBooks Online integration" above.
 
@@ -1325,9 +1335,10 @@ by name again rather than breaking outright.
 
 ## Backups
 
-A verified zip snapshot (database, photos, eBay/Pirate Ship CSV archives)
-is created automatically every `BACKUP_INTERVAL_HOURS` (default 24) while
-the bot is running, and saved under `BACKUP_DIR` (default `backups/`).
+A verified zip snapshot (database, photos, old eBay/Pirate Ship CSV
+archives) is created automatically every `BACKUP_INTERVAL_HOURS` (default
+24) while the bot is running, and saved under `BACKUP_DIR` (default
+`backups/`).
 `BACKUP_KEEP_COUNT`/`BACKUP_MAX_AGE_DAYS` (defaults: 14 snapshots / 14
 days) bound how many pile up - whichever limit is hit first prunes the
 oldest. The database is captured with SQLite's own backup API, not a plain
@@ -1360,8 +1371,8 @@ python backup.py restore path/to/backup.zip --destination path/to/new-data
 Restore only ever writes into a new, empty directory - it refuses to touch
 one that already has files in it, so a bad restore can't overwrite a
 working installation. The restored directory has the same layout as
-`data/` (`pallet_tracker.db`, `photos/`, `pirate_ship_exports/`, plus the
-old `ebay_batch_archive/` CSVs if you have any); point `DATABASE_PATH`/`PHOTO_DIR`/etc at it, or
+`data/` (`pallet_tracker.db`, `photos/`, plus the old
+`pirate_ship_exports/` and `ebay_batch_archive/` CSVs if you have any); point `DATABASE_PATH`/`PHOTO_DIR`/etc at it, or
 move its contents into your real `data/` directory, then restart the bot.
 
 ---
@@ -1378,9 +1389,7 @@ behavior (pallets/items, financials including refunds/expenses/reversals,
 structured shipping addresses, buyer-data retention, R2 photo retention
 after a sale, `wipe_database`'s table-by-table scope), `r2_storage.py`'s
 deletion helpers (mocked boto3 client, no real network calls),
-`ai_review.py`'s fallback shape and timeout path, `pirate_ship_csv.py`'s
-row-building (including the legacy-address fallback and buyer-data
-redaction), `ebay_listing_rules.py`, the eBay API listing / order sync /
+`ai_review.py`'s fallback shape and timeout path, `ebay_listing_rules.py`, the eBay API listing / order sync /
 order automation / fee / item-specifics features, `runtime_settings.py`'s role-ID bindings,
 `quickbooks.py`'s OAuth token exchange/refresh (rotation included) and API
 request shaping (all against a fake `aiohttp.ClientSession`, no real
@@ -1433,8 +1442,9 @@ Tables:
 - **finance_transactions** - refunds/expenses/reversals logged via
   `/finance refund`/`/finance expense`/`/finance reverse-sale`
 - **pallet_costs** - itemized costs allocated to a pallet from the
-  QuickBooks/Pirate Ship workflows (one row per cost, typed as
-  `credit_card`/`shipping`/`supplies`/`misc`) - additive on top of
+  QuickBooks/Shippo workflows (one row per cost, typed as
+  `credit_card`/`shipping`/`supplies`/`misc`; Shippo label costs carry
+  source `shippo`) - additive on top of
   `pallets.pallet_cost`, not a replacement; see "QuickBooks Online
   integration" above
 - **awaiting_pallet_charges** - QuickBooks charges allocated to "New
@@ -1456,13 +1466,15 @@ Tables:
 the removed eBay CSV batch path - kept so nothing is deleted; any CSVs it
 archived stay in `data/ebay_batch_archive/` (and Facebook's in
 `data/fb_marketplace_batch_archive/`) and are still included in backups.
-Pirate Ship exports are written straight to `data/pirate_ship_exports/`
-by each `/pirate-ship export-batch` (see `pirate_ship_csv.py`).
+Likewise, the old Pirate Ship CSV exports stay in
+`data/pirate_ship_exports/` (`PIRATE_SHIP_EXPORT_ARCHIVE_DIR`) as history
+- still backed up and redacted by `/admin purge-buyer-data`, but nothing
+new is written there now that labels go through Shippo.
 
 ### Backing this up
 Since this is the only copy of your item/financial history, set up a
 periodic backup of the `data/` folder (database, all saved item photos, and
-the Pirate Ship export archive) - a daily
+the old Pirate Ship export archive) - a daily
 `cron` job copying it elsewhere, or syncing to cloud storage, is enough at
 this scale.
 
@@ -1537,7 +1549,7 @@ this scale.
   it's a starting point pre-filled on the eBay listing form at Queue Review
   approval, always human-confirmed or corrected before Approve, never
   treated as authoritative. A wrong value here has a real dollar cost via
-  eBay's Calculated shipping and the Pirate Ship export (wrong weight/dims
+  eBay's Calculated shipping and Shippo quotes/orders (wrong weight/dims
   → wrong shipping cost). Items approved before weight/dimensions became
   required fields have neither a human-confirmed nor an AI-estimated value
   - fix them with **Edit Details** before listing.
@@ -1545,9 +1557,7 @@ this scale.
   city, state, postal code, country) as of the fields themselves, but none
   of it is validated against a real address database - a typo'd city or zip
   saves exactly as typed. Items shipped before this structured form existed
-  only have the old freeform address blob, which is still split into
-  address lines best-effort for
-  the CSV (city/state/zip are left blank for those older rows).
+  only have the old freeform address blob.
 - **QuickBooks watches at most one credit-card account, by design** - and
   none right now, since the business has no card account
   (`QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID` blank). Other accounts in the

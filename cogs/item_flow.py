@@ -641,8 +641,8 @@ class EbayListingModal(discord.ui.Modal, title="eBay Listing Details"):
     modal cap.
 
     Weight/dimensions are mandatory (not optional like specifics) because
-    the eBay API listing's Calculated shipping and the Pirate Ship CSV
-    export (pirate_ship_csv.py) both need them, and every approved item
+    the eBay API listing's Calculated shipping and Shippo shipping
+    (shipping.py / shippo_orders.py) both need them, and every approved item
     reaches this same modal regardless of where it eventually sells.
 
     EditListingDetailsModal (the Awaiting Listing card's "Edit Details")

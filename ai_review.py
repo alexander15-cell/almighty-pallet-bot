@@ -185,7 +185,7 @@ def _build_system_prompt() -> str:
 # and a blunt, repeated null-over-guess rule for every numeric field, since
 # a confidently wrong number is the costliest failure mode here (a bad
 # weight/dimension guess becomes a real shipping-label purchase - see
-# pirate_ship_csv.py).
+# Shippo orders, shippo_orders.py).
 OLLAMA_SYSTEM_PROMPT = """You write short, honest resale listing drafts from a photo and a \
 warehouse note. Follow these rules exactly.
 
@@ -246,8 +246,8 @@ a type hint, not text to copy. Respond with ONLY this JSON object, no other text
 # weight/dimensions rule in OLLAMA_SYSTEM_PROMPT) are visual guesses from
 # the photo, same "never authoritative" status as suggested_price - the
 # eBay listing modal pre-fills these fields but always requires a human to
-# confirm or correct them before Approve, since the Pirate Ship CSV export
-# (pirate_ship_csv.py) uses this weight/dimensions to buy real shipping
+# confirm or correct them before Approve, since Shippo shipping quotes and
+# orders (shipping.py / shippo_orders.py) use this weight/dimensions to buy real shipping
 # labels - a wildly wrong AI guess here has a real dollar cost, not just a
 # cosmetic one.
 

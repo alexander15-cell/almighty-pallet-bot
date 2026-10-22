@@ -496,7 +496,7 @@ INSTANCE_LOCK_PATH = os.getenv("INSTANCE_LOCK_PATH", "data/.bot.lock")
 # ---- Non-secret runtime settings editable from Discord (see runtime_settings.py) ----
 SETTINGS_PATH = os.getenv("SETTINGS_PATH", "data/settings.json")
 
-# ---- Buyer data retention (see /pirate-ship purge-buyer-data) ----
+# ---- Buyer data retention (see /admin purge-buyer-data) ----
 # How many days after an item ships before its buyer's name/address is
 # eligible for removal. Only recipient_name/shipping_address/structured
 # address fields are cleared - inventory identity, sale price, and audit
@@ -703,14 +703,10 @@ EBAY_TYPE_KEYWORDS = {
     "carbon monoxide": "Carbon Monoxide Detector",
 }
 
-# ---- Pirate Ship CSV export (see pirate_ship_csv.py) ----
-# Only for "Other"-platform sales (website, etc.) that were sold outside
-# eBay - eBay sales don't need this, since Pirate Ship pulls those directly
-# via its own native eBay integration. There's no separate "add to batch"
-# step: /pirate-ship export-batch queries
-# the database directly for sold-but-not-yet-exported "Other" items each
-# time it runs, so nothing needs accumulating on disk between exports - only
-# where the resulting CSV gets archived for a paper trail.
+# ---- Old Pirate Ship CSV exports (history only) ----
+# The bot no longer makes these (labels go through Shippo - shippo_orders.py),
+# but the CSVs exported before are kept here, backed up (backup.py) and still
+# redacted by /admin purge-buyer-data (buyer_data.py).
 PIRATE_SHIP_EXPORT_ARCHIVE_DIR = os.getenv("PIRATE_SHIP_EXPORT_ARCHIVE_DIR", "data/pirate_ship_exports")
 
 # ---- QuickBooks Online (optional, see quickbooks.py) ----

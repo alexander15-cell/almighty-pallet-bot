@@ -52,7 +52,7 @@ log = logging.getLogger(__name__)
 
 CATEGORY_LABELS = {"fees": "eBay fees", "shipping": "eBay shipping labels", "ads": "eBay ad/listing fees"}
 # pallet_costs.cost_type for each category - 'shipping' is the existing
-# type, so eBay labels sit alongside Pirate Ship shipping in pallet-summary.
+# type, so eBay labels sit alongside Shippo label costs in pallet-summary.
 COST_TYPES = {"fees": "ebay_fees", "shipping": "shipping", "ads": "ebay_ads"}
 
 # One click at a time per order, so a double-click can't post two Journal

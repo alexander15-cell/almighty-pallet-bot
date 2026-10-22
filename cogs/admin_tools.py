@@ -31,6 +31,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 import backup
+import buyer_data
 import shop_test_item
 import config
 import database as db
@@ -751,6 +752,57 @@ class AdminTools(commands.Cog):
         elif backup.last_copy:
             message += f"\n⚠️ Couldn't copy it to the backup copy folder: {backup.last_copy}"
         await interaction.followup.send(message, ephemeral=True)
+
+    @admin_group.command(
+        name="purge-buyer-data",
+        description="Preview, or (confirm:True) clear, buyer names/addresses past the retention window.",
+    )
+    @app_commands.describe(
+        days=f"Days after shipment before buyer data is eligible (default {config.BUYER_DATA_RETENTION_DAYS})",
+        confirm="Set True to actually clear the data - default is preview-only",
+    )
+    async def purge_buyer_data(self, interaction: discord.Interaction, days: int = None, confirm: bool = False):
+        if not await _require_admin(interaction):
+            return
+
+        days = config.BUYER_DATA_RETENTION_DAYS if days is None else days
+        if days < 0:
+            await interaction.response.send_message("Days can't be negative.", ephemeral=True)
+            return
+
+        candidates = db.get_buyer_data_purge_candidates(days)
+        if not candidates:
+            await interaction.response.send_message(
+                f"No shipped items have buyer data eligible for removal (shipped more than {days} day(s) ago).",
+                ephemeral=True,
+            )
+            return
+
+        numbers = ", ".join(f"#{item['item_number']}" for item in candidates[:25])
+        if len(candidates) > 25:
+            numbers += f", and {len(candidates) - 25} more"
+
+        if not confirm:
+            await interaction.response.send_message(
+                f"**Preview only** - {len(candidates)} item(s) shipped more than {days} day(s) ago still "
+                f"have buyer data on file: {numbers}.\nInventory identity, sale price, and audit history "
+                f"are never touched - only recipient name/address. Run again with `confirm:True` to "
+                f"actually clear it (also redacts matching rows in the old Pirate Ship CSV archives).",
+                ephemeral=True,
+            )
+            return
+
+        db.purge_buyer_data([item["id"] for item in candidates], actor_id=interaction.user.id)
+        order_numbers = {buyer_data.order_number(item) for item in candidates}
+        redacted_rows = buyer_data.redact_archived_buyer_data(order_numbers)
+
+        await interaction.response.send_message(
+            f"🗑️ Cleared buyer data for {len(candidates)} item(s): {numbers}.\n"
+            f"Also redacted {redacted_rows} matching row(s) in the old Pirate Ship CSV "
+            f"archives. Files/Discord attachments downloaded before this point may still contain "
+            f"the old data - those need separate manual removal.",
+            ephemeral=True,
+        )
 
     @admin_group.command(name="website-hold",
                          description="Why a website item shows 0 available: its checkout holds, checked with Stripe.")

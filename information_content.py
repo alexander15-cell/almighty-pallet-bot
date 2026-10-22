@@ -132,7 +132,7 @@ def _roles_embed() -> discord.Embed:
     )
     embed.add_field(name="Data Entry", value="Posts new items in #data-entry.", inline=True)
     embed.add_field(name="Queue Review", value="Approves/edits/rejects items in #queue-review.", inline=True)
-    embed.add_field(name="Listing Management", value="Lists approved items in #awaiting-listing; runs `/ebay` and `/pirate-ship` commands.", inline=True)
+    embed.add_field(name="Listing Management", value="Lists approved items in #awaiting-listing; runs `/ebay` commands; buys shipping labels in Shippo.", inline=True)
     embed.add_field(name="Purchase Management", value="Sets a pallet's total cost with `/finance setprice`; submits invoices in #submit-invoices.", inline=True)
     embed.add_field(name="Finance Management", value="Records sales, refunds, expenses, shipping info - everything under `/finance`.", inline=True)
     embed.add_field(name="Pallet Admin", value="Full access everywhere, plus `/admin`, `/item`, `/pallet`, and `/setup` commands.", inline=True)
@@ -180,7 +180,7 @@ def _finance_commands_embed() -> discord.Embed:
     embed.add_field(name="refund / expense", value="Log a refund against a sale, or an expense against a pallet.", inline=False)
     embed.add_field(name="sales [pallet_name] [platform]", value="List logged sales with their Sales Receipt (or whether QuickBooks failed / it was reversed). `platform:In Person` for yard sales.", inline=False)
     embed.add_field(name="reverse-sale", value="Undo an item's recorded sale (duplicate entry, fell through). Already in QuickBooks? Void its Sales Receipt there first, then add `quickbooks_voided:True` - reverses the whole sale.", inline=False)
-    embed.add_field(name="set-shipping-info", value="Capture a non-eBay buyer's recipient/address for Pirate Ship.", inline=False)
+    embed.add_field(name="set-shipping-info", value="Capture a non-eBay buyer's recipient/address - the bot then creates the Shippo order for the label.", inline=False)
     embed.add_field(name="history", value="List a pallet's recent refunds/expenses/reversals.", inline=False)
     embed.add_field(name="override-count / clear-count-override", value="Manually correct the \"items received\" figure, or revert to automatic.", inline=False)
     embed.add_field(name="summary", value="Post a fresh copy of a pallet's financial/status card.", inline=False)
@@ -305,18 +305,20 @@ def _website_shop_embed() -> discord.Embed:
 
 
 def _shipping_commands_embed() -> discord.Embed:
-    embed = discord.Embed(title="💬 Commands - Shipping (`/pirate-ship ...`)", color=COLOR)
+    embed = discord.Embed(title="📦 Shipping (Shippo)", color=COLOR)
     embed.add_field(
-        name="export-batch",
-        value="Export every sold non-eBay item that hasn't shipped yet, as a CSV for Pirate Ship's batch import.",
+        name="Labels",
+        value="Website orders - and in-person/other sales once `/finance set-shipping-info` saves the address - "
+              "show up as orders in Shippo. Buy the label there; the bot marks the item Shipped, keeps the "
+              "tracking number and records the label cost on the pallet.",
         inline=False,
     )
     embed.add_field(
-        name="purge-buyer-data [days] [confirm]",
+        name="/admin purge-buyer-data [days] [confirm]",
         value="Preview or clear old buyer name/address data past the retention window.",
         inline=False,
     )
-    embed.set_footer(text="eBay sales never need this - Pirate Ship pulls those directly via its own eBay integration.")
+    embed.set_footer(text="eBay labels are bought through eBay - those sales never go to Shippo.")
     return embed
 
 

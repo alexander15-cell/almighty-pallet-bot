@@ -57,6 +57,7 @@ import discord_resilience
 import ebay_books
 import finance_utils
 import quickbooks
+import shippo_orders
 import runtime_settings
 import shop_values
 
@@ -194,9 +195,17 @@ class ShippingPostalModal(discord.ui.Modal, title="Shipping Address (2/2)"):
             country=self.country.value.strip() or "US",
             actor_id=interaction.user.id,
         )
+        note = ""
+        if shippo_orders.enabled():
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            note = await shippo_orders.send_for_item(db.get_item(self.item_id))
+            await interaction.followup.send(
+                f"📦 Shipping address saved for item #{self.item_number}." + (f" {note}" if note else ""),
+                ephemeral=True)
+            return
         await interaction.response.send_message(
-            f"📦 Shipping address saved for item #{self.item_number}. It'll go out in the next "
-            f"`/pirate-ship export-batch`.",
+            f"📦 Shipping address saved for item #{self.item_number}. Make its label in Shippo "
+            "(turn on SHIPPO_ORDERS to have the bot create the order there).",
             ephemeral=True,
         )
 

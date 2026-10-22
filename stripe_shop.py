@@ -8,8 +8,8 @@ Website sales through Stripe Checkout (hosted page) with Stripe Tax.
   handle_event()     - Stripe webhooks (signature-checked by the caller):
                        paid -> fulfill(); expired/failed -> release the hold.
   fulfill()          - marks the items Sold (same ItemFlow.do_mark_sold as
-                       the Discord button), saves the buyer's shipping
-                       address for the Pirate Ship export, ends the eBay
+                       the Discord button), saves the buyer's
+                       shipping address (for Shippo), ends the eBay
                        listings, logs the sale (non-taxable Sales Receipt to
                        Website Sales), and books Stripe's sales tax to the
                        tax-payable account and Stripe's fee to the fees
@@ -569,7 +569,7 @@ async def _notify(bot, checkout: dict, session: dict, total: float, tax: float, 
     names = ", ".join(f"{(db.get_pallet(i['pallet_id']) or {}).get('name', '?')} #{i['item_number']}" for i in items)
     address = _addr(session)
     sent = db.get_shippo_order(checkout["session_id"])
-    label_tool = "in Shippo" if sent and sent["status"] != "failed" else "in the Pirate Ship export"
+    label_tool = "sent to Shippo" if sent and sent["status"] != "failed" else "make the label in Shippo"
     where = (f"ship to {address['name']}, {address['city']}, {address['state']} ({label_tool})"
              if address else "local pickup")
     head = "⚠️ **Website order needs attention**" if attention else "🛒 **Website order paid**"

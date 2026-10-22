@@ -1,8 +1,8 @@
 """
 Field-level eBay listing rules shared by the direct API listing path
 (ebay_api.py's create_listing) and everything that maps an eBay SKU back
-to a tracked item (order sync, order automation, fee reporting, Pirate Ship
-import).
+to a tracked item (order sync, order automation, fee reporting, the
+website catalog).
 
 These used to live in ebay_csv.py alongside the CSV batch upload path,
 which has since been removed (every eBay listing now goes through the

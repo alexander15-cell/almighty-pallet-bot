@@ -771,7 +771,8 @@ def init_db():
                 cents       INTEGER NOT NULL
             );
 
-            -- Paid website orders sent to Shippo to buy the label there.
+            -- Sales sent to Shippo to buy the label there. session_id is the
+            -- Stripe checkout session, or "item-<id>" for an in-person/other sale.
             CREATE TABLE IF NOT EXISTS shippo_orders (
                 session_id    TEXT PRIMARY KEY,
                 order_id      TEXT,
@@ -3296,9 +3297,8 @@ def set_shipping_info(item_id: int, recipient_name: str, address_line1: str, add
     - decoupled from record_item_sale the same way price-recording is
     decoupled from the operational Mark as Sold click, since a buyer's
     address often isn't known until after the sale price is agreed on.
-    Feeds /pirate-ship export-batch (see pirate_ship_csv.py); eBay sales
-    never need this, since Pirate Ship pulls those directly via its own
-    native eBay integration.
+    Feeds the item's Shipping label order in Shippo (shippo_orders.py); eBay
+    sales never need this - their labels are bought through eBay.
 
     Structured fields (address_line1/city/state/postal_code/country) replace
     the old single freeform shipping_address text block - that column is
@@ -3316,49 +3316,6 @@ def set_shipping_info(item_id: int, recipient_name: str, address_line1: str, add
             "INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp) "
             "VALUES (?, NULL, (SELECT status FROM items WHERE id = ?), ?, ?, ?)",
             (item_id, item_id, actor_id, f"Shipping info recorded for {recipient_name}", _now()),
-        )
-
-
-def get_unexported_other_platform_sales():
-    """
-    Items sold (status = sold, not yet shipped) on any platform other than
-    eBay, that haven't gone out in a /pirate-ship export-batch yet - what
-    that command exports. eBay sales are excluded regardless of export
-    status, since Pirate Ship pulls those directly via its own native eBay
-    integration and never needs this CSV.
-
-    Each row also carries resolved pirate_ship_weight_lb/length_in/width_in/
-    height_in columns for pirate_ship_csv.py to fill in the export's
-    Weight/Length/Width/Height columns: ebay_listing_data's weight/dims (set
-    on Queue Review approval, human-confirmed - see EbayListingModal in
-    item_flow.py) take priority when present, since most other-platform
-    sales never went through that flow and only have the AI's automated-
-    review estimate (items.ai_suggested_*) to fall back on.
-    """
-    with get_conn() as conn:
-        rows = conn.execute(
-            """SELECT items.*,
-                      COALESCE(eld.weight_lb, items.ai_suggested_weight_lb) AS pirate_ship_weight_lb,
-                      COALESCE(eld.length_in, items.ai_suggested_length_in) AS pirate_ship_length_in,
-                      COALESCE(eld.width_in, items.ai_suggested_width_in) AS pirate_ship_width_in,
-                      COALESCE(eld.height_in, items.ai_suggested_height_in) AS pirate_ship_height_in
-               FROM items
-               LEFT JOIN ebay_listing_data eld ON eld.item_id = items.id
-               WHERE items.status = ? AND items.pirate_ship_exported = 0
-               AND items.sale_platform IS NOT NULL AND LOWER(items.sale_platform) != 'ebay'
-               AND items.id NOT IN (SELECT value FROM shippo_orders, json_each(shippo_orders.item_ids)
-                                    WHERE shippo_orders.status != 'failed')
-               ORDER BY items.pallet_id, items.item_number""",
-            (STATUS_SOLD,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def mark_pirate_ship_exported(item_ids: list):
-    with get_conn() as conn:
-        conn.executemany(
-            "UPDATE items SET pirate_ship_exported = 1 WHERE id = ?",
-            [(item_id,) for item_id in item_ids],
         )
 
 
