@@ -771,6 +771,21 @@ def init_db():
                 cents       INTEGER NOT NULL
             );
 
+            -- Paid website orders sent to Shippo to buy the label there.
+            CREATE TABLE IF NOT EXISTS shippo_orders (
+                session_id    TEXT PRIMARY KEY,
+                order_id      TEXT,
+                status        TEXT NOT NULL,      -- open / labelled / failed
+                item_ids      TEXT NOT NULL,      -- JSON list
+                attempts      INTEGER NOT NULL DEFAULT 0,
+                last_error    TEXT,
+                tracking      TEXT,
+                tracking_url  TEXT,
+                label_cost    REAL,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS stripe_events (
                 event_id     TEXT PRIMARY KEY,
                 event_type   TEXT,
@@ -2932,6 +2947,48 @@ def get_checkout_shipping(session_id: str):
         return dict(row) if row else None
 
 
+# ------------------------------------------------------------ shippo orders --
+
+def save_shippo_order(session_id: str, order_id, status: str, item_ids: list, error: str = None):
+    now = _now()
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO shippo_orders (session_id, order_id, status, item_ids, attempts, last_error,
+                   created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+               ON CONFLICT(session_id) DO UPDATE SET order_id = excluded.order_id, status = excluded.status,
+                   attempts = shippo_orders.attempts + 1, last_error = excluded.last_error,
+                   updated_at = excluded.updated_at""",
+            (session_id, order_id, status, json.dumps(item_ids), error, now, now))
+
+
+def _shippo_row(row) -> dict:
+    out = dict(row)
+    out["item_ids"] = json.loads(out["item_ids"] or "[]")
+    return out
+
+
+def get_shippo_order(session_id: str):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM shippo_orders WHERE session_id = ?", (session_id,)).fetchone()
+        return _shippo_row(row) if row else None
+
+
+def shippo_orders_with_status(status: str, limit: int = 100) -> list:
+    with get_conn() as conn:
+        return [_shippo_row(r) for r in conn.execute(
+            "SELECT * FROM shippo_orders WHERE status = ? ORDER BY created_at LIMIT ?", (status, limit))]
+
+
+def update_shippo_order(session_id: str, **fields):
+    allowed = {"status", "tracking", "tracking_url", "label_cost", "last_error"}
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    if not fields:
+        return
+    with get_conn() as conn:
+        conn.execute(f"UPDATE shippo_orders SET {', '.join(f'{k} = ?' for k in fields)}, updated_at = ? "
+                     "WHERE session_id = ?", (*fields.values(), _now(), session_id))
+
+
 # ------------------------------------------------------- web dashboard reads --
 
 def web_status_counts() -> dict:
@@ -3296,6 +3353,8 @@ def get_unexported_other_platform_sales():
                LEFT JOIN ebay_listing_data eld ON eld.item_id = items.id
                WHERE items.status = ? AND items.pirate_ship_exported = 0
                AND items.sale_platform IS NOT NULL AND LOWER(items.sale_platform) != 'ebay'
+               AND items.id NOT IN (SELECT value FROM shippo_orders, json_each(shippo_orders.item_ids)
+                                    WHERE shippo_orders.status != 'failed')
                ORDER BY items.pallet_id, items.item_number""",
             (STATUS_SOLD,),
         ).fetchall()
