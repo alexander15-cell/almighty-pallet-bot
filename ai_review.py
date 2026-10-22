@@ -286,6 +286,27 @@ def _strip_json_fences(text: str) -> str:
     return text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
 
 
+def _parse_json_object(text: str) -> dict:
+    """The JSON object in a model reply - tolerating code fences and any
+    chatter before/after it. Raises ValueError saying what came back."""
+    cleaned = _strip_json_fences(text or "")
+    if not cleaned:
+        raise ValueError("the AI sent back an empty reply")
+    try:
+        parsed = json.loads(cleaned)
+    except ValueError:
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start == -1 or end <= start:
+            raise ValueError(f"the AI replied without JSON: {cleaned[:120]!r}")
+        try:
+            parsed = json.loads(cleaned[start:end + 1])
+        except ValueError as e:
+            raise ValueError(f"the AI's JSON was broken ({e}): {cleaned[start:start + 120]!r}")
+    if not isinstance(parsed, dict):
+        raise ValueError(f"the AI replied with {type(parsed).__name__}, not an object")
+    return parsed
+
+
 def _guess_media_type(path: str) -> str:
     lower = path.lower()
     if lower.endswith(".png"):
@@ -342,7 +363,7 @@ def _call_anthropic(content_blocks: list) -> str:
     """
     message = _client.messages.create(
         model=config.ANTHROPIC_MODEL,
-        max_tokens=1000,
+        max_tokens=2000,
         system=_build_system_prompt(),
         messages=[{"role": "user", "content": content_blocks}],
     )
@@ -373,12 +394,20 @@ async def _review_item_anthropic(photo_paths: list[str], raw_description: str) -
         }
     )
 
-    try:
-        text = await asyncio.to_thread(_call_anthropic, content_blocks)
-        return json.loads(_strip_json_fences(text))
-    except Exception as e:
-        print(f"[ai_review] Anthropic review failed, returning fallback: {e}")
-        return _fallback(raw_description, str(e))
+    last_error = None
+    for attempt in range(2):  # one retry - a reply without usable JSON is usually a one-off
+        blocks = content_blocks if attempt == 0 else content_blocks + [{
+            "type": "text", "text": "Reply with ONLY the JSON object described in the instructions - no other text."}]
+        try:
+            text = await asyncio.to_thread(_call_anthropic, blocks)
+            return _parse_json_object(text)
+        except ValueError as e:
+            last_error = e
+            print(f"[ai_review] Anthropic reply unusable (attempt {attempt + 1}): {e}")
+        except Exception as e:
+            print(f"[ai_review] Anthropic review failed, returning fallback: {e!r}")
+            return _fallback(raw_description, str(e) or type(e).__name__)
+    return _fallback(raw_description, str(last_error))
 
 
 # ------------------------------------------------------------------ ollama --
@@ -445,7 +474,7 @@ async def _review_item_ollama(photo_paths: list[str], raw_description: str) -> d
 
     try:
         text = await asyncio.to_thread(_call_ollama, prompt, images_b64)
-        return json.loads(_strip_json_fences(text))
+        return _parse_json_object(text)
     except Exception as e:
         print(f"[ai_review] Ollama review failed, returning fallback: {e}")
         return _fallback(raw_description, str(e))
@@ -528,8 +557,7 @@ async def fill_item_aspects(photo_paths: list[str], title: str, description: str
         text = await asyncio.wait_for(
             asyncio.to_thread(_call_anthropic_aspects, content_blocks), timeout=config.AI_TIMEOUT_SECONDS
         )
-        parsed = json.loads(_strip_json_fences(text))
-        return parsed if isinstance(parsed, dict) else {}
+        return _parse_json_object(text)
     except Exception as e:
         print(f"[ai_review] item specifics fill failed, skipping the pre-fill: {e!r}")
         return {}

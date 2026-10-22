@@ -9,6 +9,8 @@ import asyncio
 import json
 import time
 
+import pytest
+
 import ai_review
 import config
 
@@ -184,3 +186,25 @@ def test_call_ollama_sends_the_ollama_specific_prompt_not_claudes(monkeypatch):
 
     assert captured["payload"]["system"] == ai_review.OLLAMA_SYSTEM_PROMPT
     assert captured["payload"]["system"] != ai_review.SYSTEM_PROMPT_TEMPLATE
+
+
+# ------------------------------------------- replies that aren't plain JSON
+
+def test_json_is_found_inside_chatter_and_fences():
+    assert ai_review._parse_json_object('Sure! Here it is:\n```json\n{"a": 1}\n```') == {"a": 1}
+    assert ai_review._parse_json_object('Here you go: {"a": {"b": 2}} Hope that helps.') == {"a": {"b": 2}}
+    for bad, words in (("", "empty reply"), ("I can't tell what this is.", "without JSON"),
+                       ('{"a": ', "without JSON"), ("[1, 2]", "not an object")):
+        with pytest.raises(ValueError, match=words):
+            ai_review._parse_json_object(bad)
+
+
+def test_anthropic_review_retries_once_then_falls_back(monkeypatch):
+    replies = iter(["", '{"suggested_title": "Ceiling Fan"}'])
+    monkeypatch.setattr(ai_review, "_client", object())
+    monkeypatch.setattr(ai_review, "_call_anthropic", lambda blocks: next(replies))
+    assert asyncio.run(ai_review._review_item_anthropic([], "fan"))["suggested_title"] == "Ceiling Fan"
+
+    monkeypatch.setattr(ai_review, "_call_anthropic", lambda blocks: "No idea, sorry.")
+    result = asyncio.run(ai_review._review_item_anthropic([], "fan"))
+    assert "without JSON" in result["flags"][0] and "No idea" in result["flags"][0]
