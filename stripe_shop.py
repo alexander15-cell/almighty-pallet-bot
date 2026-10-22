@@ -400,7 +400,8 @@ async def fulfill(bot, session_id: str) -> dict:
                 listing = db.get_ebay_listing_data(item["id"]) or {}
                 if listing.get("ebay_item_id"):
                     try:
-                        notes.append(f"#{item['item_number']}: " + await ebay_api.end_listing_for_item(item))
+                        notes.append(f"#{item['item_number']}: " + await ebay_api.end_listing_for_item(
+                            item, listing_id=listing["ebay_item_id"]))
                     except ebay_api.EbayAPIError as e:
                         notes.append(f"#{item['item_number']}: couldn't end the eBay listing ({e}) - end it in "
                                      "Seller Hub NOW so it can't sell twice.")

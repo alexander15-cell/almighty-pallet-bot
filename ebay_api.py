@@ -793,12 +793,46 @@ def _require_publish_config():
         )
 
 
-async def end_listing_for_item(item: dict) -> str:
+# Trading API errors that mean "it's already over" - nothing left to end.
+_ALREADY_ENDED_CODES = {"1047"}  # "Auction has already been closed"
+
+
+async def end_fixed_price_listing(listing_id: str) -> str:
+    """Ends a fixed-price listing by its eBay item ID (Trading API
+    EndFixedPriceItem) - works for listings made by hand in Seller Hub, which
+    the Inventory API can't touch. Returns a short note; raises EbayAPIError."""
+    import xml.etree.ElementTree as ET
+    token = await get_access_token()
+    headers = {"X-EBAY-API-CALL-NAME": "EndFixedPriceItem", "X-EBAY-API-SITEID": "0",
+               "X-EBAY-API-COMPATIBILITY-LEVEL": "1349", "X-EBAY-API-IAF-TOKEN": token, "Content-Type": "text/xml"}
+    body = ('<?xml version="1.0" encoding="utf-8"?>'
+            '<EndFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+            f"<ItemID>{int(listing_id)}</ItemID><EndingReason>NotAvailable</EndingReason>"
+            "</EndFixedPriceItemRequest>")
+    async with aiohttp.ClientSession() as session:
+        async with session.post(_trading_url(), data=body.encode(), headers=headers) as resp:
+            text = await resp.text()
+            if resp.status >= 300:
+                raise EbayAPIError(f"eBay EndFixedPriceItem failed ({resp.status}): {text[:300]}")
+    root = ET.fromstring(text)
+    ns = _TRADING_NS
+    if (root.findtext(f"{ns}Ack") or "") in ("Failure", "PartialFailure"):
+        codes = {e.findtext(f"{ns}ErrorCode") for e in root.iter(f"{ns}Errors")
+                 if e.findtext(f"{ns}SeverityCode") == "Error"}
+        if codes and codes <= _ALREADY_ENDED_CODES:
+            return "eBay listing had already ended."
+        msg = root.findtext(f"{ns}Errors/{ns}LongMessage") or text[:300]
+        raise EbayAPIError(f"eBay EndFixedPriceItem failed: {msg}")
+    return "eBay listing ended."
+
+
+async def end_listing_for_item(item: dict, listing_id: str = None) -> str:
     """
-    Ends this item's live eBay listing (withdraws its published offer) -
-    used when it sells somewhere else, so it can't sell twice. Only works
-    for listings the bot created (they carry the bot's SKU); returns a
-    short note saying what happened. Raises EbayAPIError on failure.
+    Ends this item's live eBay listing - used when it sells somewhere else,
+    so it can't sell twice. Bot-made listings (Inventory API, found by the
+    bot's SKU) are withdrawn; anything else - e.g. listed by hand in Seller
+    Hub - is ended by its listing ID (Trading API). Returns a short note
+    saying what happened. Raises EbayAPIError on failure.
     """
     if not config.EBAY_ENABLED:
         return "eBay API isn't enabled - end the listing in Seller Hub."
@@ -806,15 +840,19 @@ async def end_listing_for_item(item: dict) -> str:
     try:
         offers = (await _request("GET", f"/offer?sku={urllib.parse.quote(sku)}")).get("offers") or []
     except EbayAPIError as e:
-        if "25713" in str(e) or "404" in str(e):  # no offer for this SKU = not a bot-made listing
-            return "Not a bot-made listing - end it in Seller Hub."
-        raise
+        if "25713" not in str(e) and "404" not in str(e):  # anything but "no offer for this SKU"
+            raise
+        offers = []
     ended = 0
     for offer in offers:
         if offer.get("status") == "PUBLISHED" and offer.get("offerId"):
             await _request("POST", f"/offer/{offer['offerId']}/withdraw")
             ended += 1
-    return "eBay listing ended." if ended else "No live eBay listing found for it."
+    if ended:
+        return "eBay listing ended."
+    if listing_id:
+        return await end_fixed_price_listing(listing_id)
+    return "No live eBay listing found for it."
 
 
 async def create_listing(item: dict, listing: dict) -> dict:
