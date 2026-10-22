@@ -797,6 +797,16 @@ def init_db():
                 new_listing_id  TEXT
             );
 
+            -- eBay cards the bot tried to book by itself (once each - a
+            -- failed attempt is left to a person, never retried).
+            CREATE TABLE IF NOT EXISTS auto_book_attempts (
+                kind        TEXT NOT NULL,
+                card_key    TEXT NOT NULL,
+                outcome     TEXT,
+                tried_at    TEXT NOT NULL,
+                PRIMARY KEY (kind, card_key)
+            );
+
             CREATE TABLE IF NOT EXISTS stripe_events (
                 event_id     TEXT PRIMARY KEY,
                 event_type   TEXT,
@@ -3022,6 +3032,20 @@ def mark_hold_ebay_relisted(item_id: int, new_listing_id: str):
     with get_conn() as conn:
         conn.execute("UPDATE ebay_hold_ends SET relisted_at = ?, new_listing_id = ? WHERE item_id = ?",
                      (_now(), str(new_listing_id), item_id))
+
+
+def claim_auto_book(kind: str, card_key: str) -> bool:
+    """True the first time a card is auto-booked; False ever after."""
+    with get_conn() as conn:
+        cur = conn.execute("INSERT OR IGNORE INTO auto_book_attempts (kind, card_key, tried_at) VALUES (?, ?, ?)",
+                           (kind, card_key, _now()))
+        return cur.rowcount == 1
+
+
+def finish_auto_book(kind: str, card_key: str, outcome: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE auto_book_attempts SET outcome = ? WHERE kind = ? AND card_key = ?",
+                     (outcome[:300], kind, card_key))
 
 
 # ------------------------------------------------------- web dashboard reads --

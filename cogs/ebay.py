@@ -182,6 +182,54 @@ class EbayOrderConfirmButton(discord.ui.DynamicItem[discord.ui.Button], template
         await interaction.followup.send(result["message"], ephemeral=True)
 
 
+AUTO_ACTOR = 0  # actor_id recorded for anything the bot books by itself
+
+
+def _auto_allowed(amount) -> bool:
+    return config.EBAY_AUTO_BOOK and amount is not None and abs(float(amount)) <= config.EBAY_AUTO_BOOK_MAX
+
+
+def _mark_auto(embed: discord.Embed, text: str) -> discord.Embed:
+    embed.color = discord.Color.green()
+    embed.set_footer(text=f"✅ Booked automatically - {text}"[:2000])
+    return embed
+
+
+def _mark_manual(embed: discord.Embed, reason: str) -> discord.Embed:
+    embed.add_field(name="Needs a person", value=reason[:1000], inline=False)
+    return embed
+
+
+def _order_auto_reason(order: dict, matched: list):
+    """None when an order can be logged automatically, else why not."""
+    if not config.EBAY_AUTO_BOOK:
+        return "automatic booking is off"
+    if order.get("payment_status") != "PAID":
+        return f"eBay says the order isn't paid yet ({order.get('payment_status') or 'unknown'})"
+    if order.get("cancel_state") not in (None, "NONE_REQUESTED"):
+        return f"there's a cancellation on it ({order['cancel_state']})"
+    if len(matched) != len(order["line_items"]) or any((li.get("quantity") or 1) != 1 for li in order["line_items"]):
+        return "not every line matches exactly one tracked item"
+    if not _auto_allowed(order["total_price"]):
+        return f"it's over the ${config.EBAY_AUTO_BOOK_MAX:,.0f} automatic limit"
+    return None
+
+
+async def _handle_new_order(bot: discord.Client, order: dict, matched_items: list):
+    """A newly seen eBay order: logged automatically when it checks out
+    (paid, no cancellation, every line matched, under the limit),
+    otherwise posted with its Confirm & log sale button as before."""
+    reason = _order_auto_reason(order, matched_items)
+    if reason is None and db.claim_auto_book("sale", order["order_id"]):
+        result = await log_ebay_order_sale(bot, order["order_id"], AUTO_ACTOR)
+        db.finish_auto_book("sale", order["order_id"], result["message"])
+        if result.get("sale_id"):
+            await _post_ebay_order_match(bot, order, matched_items, auto_note=result["message"])
+            return
+        reason = result["message"]
+    await _post_ebay_order_match(bot, order, matched_items, manual_reason=reason)
+
+
 def _match_order_line_items(order: dict) -> list:
     """
     Resolves an eBay order's line items back to tracked items - by this
@@ -207,9 +255,10 @@ def _match_order_line_items(order: dict) -> list:
     return matched
 
 
-async def _post_ebay_order_match(bot: discord.Client, order: dict, matched_items: list):
-    """Posts one newly-seen eBay order to #ebay-orders with its Confirm &
-    log sale button - see order_poll_loop that calls this."""
+async def _post_ebay_order_match(bot: discord.Client, order: dict, matched_items: list, auto_note: str = None,
+                                 manual_reason: str = None):
+    """Posts one newly-seen eBay order to #ebay-orders - with its Confirm &
+    log sale button, or (auto_note) as already logged by the bot."""
     channel_id = db.get_shared_channel_id("ebay-orders")
     if not channel_id:
         log.warning("eBay order %s seen but #ebay-orders isn't set up - run /setup shared-channels.", order["order_id"])
@@ -233,7 +282,13 @@ async def _post_ebay_order_match(bot: discord.Client, order: dict, matched_items
     )
     embed.add_field(name=f"{n} item(s)", value="\n".join(lines), inline=False)
     embed.add_field(name="Total", value=f"${order['total_price']:.2f}", inline=True)
+    if auto_note:
+        _mark_auto(embed, auto_note.replace("✅ ", ""))
+        await channel.send(embed=embed)
+        return
     embed.set_footer(text="Nothing is sent to QuickBooks until you confirm.")
+    if manual_reason and config.EBAY_AUTO_BOOK:
+        _mark_manual(embed, manual_reason)
     view = discord.ui.View(timeout=None)
     view.add_item(EbayOrderConfirmButton(order["order_id"]))
     await channel.send(embed=embed, view=view)
@@ -317,16 +372,46 @@ class EbayFeeConfirmButton(discord.ui.DynamicItem[discord.ui.Button], template=r
         )
 
 
+async def _auto_fees(bot: discord.Client, breakdown: dict):
+    """Books one order's fee card by itself if allowed. Returns (embed note,
+    manual reason) - exactly one is set."""
+    order_id = breakdown["order_id"]
+    if not _auto_allowed(breakdown["totals"]["total"]):
+        return None, (f"it's over the ${config.EBAY_AUTO_BOOK_MAX:,.0f} automatic limit"
+                      if config.EBAY_AUTO_BOOK else None)
+    if not db.claim_auto_book("fees", order_id):
+        return None, "the bot already tried this one - check it by hand"
+    result = await ebay_fee_expenses.confirm_order_fees(order_id, actor_id=AUTO_ACTOR)
+    db.finish_auto_book("fees", order_id, result.get("message") or f"JE {result.get('je_doc')}")
+    if not result["ok"]:
+        return None, result["message"]
+    for pallet_id in result["pallet_ids"]:
+        await finance_utils.refresh_finance_message(bot, pallet_id)
+    totals = result["breakdown"]["totals"]
+    await finance_utils.post_to_finance_audit_log(
+        bot, f"💸 **eBay fees** for order `{order_id}` - {_money(totals['total'])} booked automatically "
+             f"(Journal Entry `{result['je_doc']}`; credited Undeposited Funds)")
+    return f"Journal Entry {result['je_doc']}, added to the pallet's cost.", None
+
+
 async def _post_fee_card(bot: discord.Client, breakdown: dict) -> bool:
     channel_id = db.get_shared_channel_id("ebay-orders")
     channel = bot.get_channel(channel_id) if channel_id else None
     if channel is None:
         log.warning("eBay fee card for order %s not posted - #ebay-orders isn't set up.", breakdown["order_id"])
         return False
-    view = discord.ui.View(timeout=None)
-    view.add_item(EbayFeeConfirmButton(breakdown["order_id"]))
+    embed = build_fee_card_embed(breakdown)
+    auto_note, reason = await _auto_fees(bot, breakdown) if config.EBAY_AUTO_BOOK else (None, None)
+    view = None
+    if auto_note:
+        _mark_auto(embed, auto_note)
+    else:
+        if reason:
+            _mark_manual(embed, reason)
+        view = discord.ui.View(timeout=None)
+        view.add_item(EbayFeeConfirmButton(breakdown["order_id"]))
     try:
-        await channel.send(embed=build_fee_card_embed(breakdown), view=view)
+        await channel.send(embed=embed, view=view)
     except discord_resilience.TRANSIENT_DISCORD_ERRORS:
         log.exception("Couldn't post eBay fee card for order %s - will retry next run", breakdown["order_id"])
         return False
@@ -523,7 +608,7 @@ async def _ensure_order_card(bot: discord.Client, order_id: str) -> bool:
         db.mark_ebay_order_seen(order_id)
         return False
     try:
-        await _post_ebay_order_match(bot, order, matched)
+        await _handle_new_order(bot, order, matched)
     except discord_resilience.TRANSIENT_DISCORD_ERRORS:
         log.exception("Couldn't post eBay order %s's sale card - will retry next poll", order_id)
         return False
@@ -898,23 +983,86 @@ async def _post_book_card(bot: discord.Client, embed: discord.Embed, button) -> 
     return True
 
 
+async def _auto_book(bot: discord.Client, kind: str, key: str, amount, confirm, audit):
+    """Shared by the refund / account / payout cards: books it by itself once
+    if allowed. Returns (embed note, manual reason)."""
+    if not config.EBAY_AUTO_BOOK:
+        return None, None
+    if not _auto_allowed(amount):
+        return None, f"it's over the ${config.EBAY_AUTO_BOOK_MAX:,.0f} automatic limit"
+    if not db.claim_auto_book(kind, key):
+        return None, "the bot already tried this one - check it by hand"
+    result = await confirm()
+    db.finish_auto_book(kind, key, result.get("message") or "booked")
+    if not result["ok"]:
+        return None, result["message"]
+    for pallet_id in result.get("pallet_ids") or []:
+        await finance_utils.refresh_finance_message(bot, pallet_id)
+    note = audit(result)
+    await finance_utils.post_to_finance_audit_log(bot, note[1])
+    return note[0], None
+
+
 async def post_refund_card(bot: discord.Client, b: dict) -> bool:
-    if await _post_book_card(bot, build_refund_card_embed(b), EbayRefundConfirmButton(b["order_id"])):
+    embed = build_refund_card_embed(b)
+    auto_note, reason = await _auto_book(
+        bot, "refund", b["order_id"], b["total"],
+        lambda: ebay_books.confirm_order_refund(b["order_id"], actor_id=AUTO_ACTOR),
+        lambda r: (f"Journal Entry {r['je_doc']}; the pallet's revenue is lowered to match.",
+                   f"↩️ **eBay refund** for order `{b['order_id']}` - {_money(b['total'])} booked automatically "
+                   f"(Journal Entry `{r['je_doc']}`)"))
+    if auto_note:
+        _mark_auto(embed, auto_note)
+    elif reason:
+        _mark_manual(embed, reason)
+    if await _post_book_card(bot, embed, None if auto_note else EbayRefundConfirmButton(b["order_id"])):
         db.mark_ebay_book_carded("refund", ebay_books.refund_card_keys(b))
         return True
     return False
 
 
 async def post_account_card(bot: discord.Client, b: dict) -> bool:
-    if await _post_book_card(bot, build_account_card_embed(b), EbayAccountChargesButton(b["month"])):
+    embed = build_account_card_embed(b)
+    auto_note, reason = await _auto_book(
+        bot, "account", b["month"], b["totals"]["total"],
+        lambda: ebay_books.confirm_account_charges(b["month"], actor_id=AUTO_ACTOR),
+        lambda r: (f"Journal Entry {r['je_doc']}.",
+                   f"🧾 **eBay account charges** for {b['month']} - {_money(b['totals']['total'])} booked "
+                   f"automatically (Journal Entry `{r['je_doc']}`)"))
+    if auto_note:
+        _mark_auto(embed, auto_note)
+    elif reason:
+        _mark_manual(embed, reason)
+    if await _post_book_card(bot, embed, None if auto_note else EbayAccountChargesButton(b["month"])):
         db.mark_ebay_book_carded("account", ebay_books.account_card_keys(b))
         return True
     return False
 
 
+def _payout_note(r: dict) -> tuple:
+    kind = "Bank Deposit" if r["txn_type"] == "Deposit" else "Journal Entry"
+    extra = (" QuickBooks wouldn't take a linked deposit, so it's a Journal Entry - don't deposit these Sales "
+             "Receipts again on QuickBooks' Bank Deposit screen." if r["fallback"] else "")
+    return (f"{kind} {r['doc']} into the bank account - Match it to the bank-feed deposit in QuickBooks.{extra}",
+            f"🏦 **eBay payout** `{r['breakdown']['payout_id']}` - {_money(r['breakdown']['amount'])} recorded "
+            f"automatically ({kind} `{r['doc']}`)")
+
+
 async def post_payout_card(bot: discord.Client, b: dict) -> bool:
-    button = None if b["deposit"] else EbayPayoutConfirmButton(b["payout_id"])
-    if await _post_book_card(bot, build_payout_card_embed(b), button):
+    auto_note = reason = None
+    if not b["deposit"] and b["ready"]:
+        auto_note, reason = await _auto_book(
+            bot, "payout", b["payout_id"], b["amount"],
+            lambda: ebay_books.confirm_payout(b["payout_id"], actor_id=AUTO_ACTOR), _payout_note)
+        if auto_note:
+            b = ebay_books.payout_breakdown(b["payout_id"])
+    embed = build_payout_card_embed(b)
+    if auto_note:
+        _mark_auto(embed, auto_note)
+    elif reason:
+        _mark_manual(embed, reason)
+    button = None if (b["deposit"] or auto_note) else EbayPayoutConfirmButton(b["payout_id"])
+    if await _post_book_card(bot, embed, button):
         db.mark_ebay_book_carded("payout", [b["payout_id"]])
         return True
     return False
@@ -1074,7 +1222,7 @@ class Ebay(commands.Cog):
                 db.mark_ebay_order_seen(order["order_id"])
                 continue
             try:
-                await _post_ebay_order_match(self.bot, order, matched_items)
+                await _handle_new_order(self.bot, order, matched_items)
             except discord_resilience.TRANSIENT_DISCORD_ERRORS:
                 log.exception("Failed to post eBay order %s - will retry next poll", order["order_id"])
                 continue

@@ -859,6 +859,12 @@ QUICKBOOKS_REFUNDS_ACCOUNT_ID = os.getenv("QUICKBOOKS_REFUNDS_ACCOUNT_ID", "").s
 # which records the QuickBooks Bank Deposit from Undeposited Funds into
 # QUICKBOOKS_BANK_ACCOUNT_ID. Same start date as the fee cards.
 EBAY_PAYOUT_CARDS = os.getenv("EBAY_PAYOUT_CARDS", "true").strip().lower() == "true"
+# Book eBay sale / fee / refund / account-charge / payout cards automatically
+# when their numbers check out (the same checks the Confirm buttons run);
+# anything that doesn't - or is over EBAY_AUTO_BOOK_MAX dollars - is posted
+# with its button as before. Each card is tried automatically only once.
+EBAY_AUTO_BOOK = os.getenv("EBAY_AUTO_BOOK", "true").strip().lower() == "true"
+EBAY_AUTO_BOOK_MAX = float(os.getenv("EBAY_AUTO_BOOK_MAX") or "500")
 
 # ---- Cloudflare R2 image hosting (optional, see r2_storage.py) ----
 # Gives each Data Entry photo a durable public URL for the eBay CSV batch's

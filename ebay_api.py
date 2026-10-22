@@ -602,6 +602,8 @@ def _parse_order(raw_order: dict):
         "sale_date": sale_date,
         "total_price": float(total),
         "line_items": line_items,
+        "payment_status": raw_order.get("orderPaymentStatus"),
+        "cancel_state": (raw_order.get("cancelStatus") or {}).get("cancelState"),
     }
 
 

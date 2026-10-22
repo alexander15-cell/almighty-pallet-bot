@@ -20,6 +20,9 @@ os.environ["PRESERVE_DISCORD_HISTORY"] = "false"
 # defaults off in production (see config.WEBSITE_MARKERS_ENABLED) so the
 # standalone bot's real cards don't show unused marker fields.
 os.environ["WEBSITE_MARKERS_ENABLED"] = "true"
+# Automatic booking of eBay cards (on in real deployments) is exercised by
+# tests/test_ebay_auto_book.py; everywhere else the cards keep their buttons.
+os.environ["EBAY_AUTO_BOOK"] = "false"
 # The eBay order automation (on by default in real deployments) makes its
 # own eBay call at the end of every order poll - off for the upstream
 # order-sync tests, which only fake get_orders(); test_ebay_order_automation.py

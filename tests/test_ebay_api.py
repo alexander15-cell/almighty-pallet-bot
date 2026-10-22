@@ -417,6 +417,7 @@ def test_get_orders_parses_the_minimal_shape_needed(monkeypatch):
         "sale_date": "2026-02-03",
         "total_price": 25.50,
         "line_items": [{"sku": "pallet-5-item-3", "quantity": 1}],
+        "payment_status": None, "cancel_state": None,
     }]
 
 
@@ -524,6 +525,7 @@ def test_get_order_parses_a_single_order(monkeypatch):
         "sale_date": "2026-02-03",
         "total_price": 25.50,
         "line_items": [{"sku": "pallet-5-item-3", "quantity": 1}],
+        "payment_status": None, "cancel_state": None,
     }
 
 
