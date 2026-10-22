@@ -40,7 +40,7 @@ class Channel:
 
 @pytest.fixture
 def case(fresh_db, tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "COMBINED_MODE", True, raising=False)
+    monkeypatch.setattr(config, "WEBSITE_SHOP_ENABLED", True)
     monkeypatch.setattr(config, "PRESERVE_DISCORD_HISTORY", True)
     photo_root = tmp_path / "photos"
     monkeypatch.setattr(config, "PHOTO_DIR", str(photo_root))
@@ -255,14 +255,3 @@ def test_source_id_collision_never_changes_an_unowned_review(case):
     assert run(case.adapter.reconcile())["blocked"] == 1
     assert case.store.system_get_review(str(case.item_id)) == foreign
     assert case.channel.sent == []
-
-
-def test_combined_ordinary_listed_and_hold_cards_cannot_bypass_shop(case):
-    import cogs.item_flow as flow
-    from website_contract import FOOTER_PREFIX
-    run(flow.send_item_card(case.channel, case.db.get_item(case.item_id)))
-    assert str(case.item_id) in case.channel.sent[-1][1]["embeds"][0].footer.text
-    run(flow.send_website_hold_notice(case.channel, case.db.get_item(case.item_id)))
-    for _, sent in case.channel.sent:
-        embeds = sent.get("embeds") or [sent["embed"]]
-        assert all(FOOTER_PREFIX not in json.dumps(embed.to_dict()) for embed in embeds)

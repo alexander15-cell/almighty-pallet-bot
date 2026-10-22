@@ -57,15 +57,8 @@ class IntakeAdapter:
 
         # Constructed by bot.py, integrated via cogs/website_shop.py
         # (config.WEBSITE_SHOP_ENABLED) - see that config constant's comment.
-        # combined_scope (COMBINED_MODE + PRESERVE_DISCORD_HISTORY) is
-        # permanently False now that the separate standalone deployment
-        # that used to set COMBINED_MODE was removed - kept here rather
-        # than deleted since this file's own tests still exercise it as a
-        # documented security invariant (an ordinary card must never carry
-        # website markers when COMBINED_MODE is set).
-        combined_scope = getattr(config, "COMBINED_MODE", False) and config.PRESERVE_DISCORD_HISTORY
         integrated_scope = getattr(config, "WEBSITE_SHOP_ENABLED", False)
-        if (not (combined_scope or integrated_scope)
+        if (not integrated_scope
                 or str(settings.guild_id) != store.guild_id
                 or str(settings.channels["website_shop"]) != store.shop_channel_id
                 or type(settings.item_id_floor) is not int

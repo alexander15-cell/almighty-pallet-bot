@@ -29,7 +29,7 @@ SECRET = "whsec_test"
 @pytest.fixture
 def shop(fresh_db, monkeypatch):
     for key, value in {"STRIPE_SECRET_KEY": "sk_test_x", "STRIPE_ENABLED": True, "STRIPE_WEBHOOK_SECRET": SECRET,
-                       "STRIPE_SHOP_ORIGINS": ("https://shop.test",), "STRIPE_SHIPPING_PRICE": 0.0,
+                       "STRIPE_SHIPPING_PRICE": 0.0,
                        "QUICKBOOKS_WEBSITE_SALES_ITEM_ID": "6", "QUICKBOOKS_SALES_TAX_PAYABLE_ACCOUNT_ID": "111",
                        "QUICKBOOKS_STRIPE_FEES_ACCOUNT_ID": "83", "QUICKBOOKS_UNDEPOSITED_FUNDS_ACCOUNT_ID": "24",
                        "QUICKBOOKS_ENABLED": True, "EBAY_ENABLED": True, "WEB_BASE_URL": "http://dash.test",

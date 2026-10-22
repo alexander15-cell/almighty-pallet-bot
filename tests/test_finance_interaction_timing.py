@@ -80,7 +80,6 @@ def test_pallet_level_commands_defer_before_refresh_and_use_followup(fresh_db, c
 
 
 @pytest.mark.parametrize("method,args_factory", [
-    ("record_sale", lambda item_number: (item_number, 25.0, "eBay")),
     ("refund", lambda item_number: (item_number, 5.0, "damaged")),
     ("expense", lambda item_number: (10.0, "packaging", None)),
 ])

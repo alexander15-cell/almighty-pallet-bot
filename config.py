@@ -6,16 +6,7 @@ import os
 import re
 from dotenv import load_dotenv
 
-# FOUR_GUYS_COMBINED is never set by anything in this repo anymore (the
-# separate standalone combined_bot.py deployment that used to set it before
-# importing config was removed - see cogs/website_shop.py for the
-# integrated website-shop feature that replaced it). COMBINED_MODE stays
-# permanently False here; combined_intake.py's own COMBINED_MODE branch is
-# effectively dead but left in place since it's shared, tested code.
-if os.environ.get("FOUR_GUYS_COMBINED") != "1":
-    load_dotenv()
-
-COMBINED_MODE = os.environ.get("FOUR_GUYS_COMBINED") == "1"
+load_dotenv()
 
 # ---- Secrets (set these in a .env file, never hardcode them) ----
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -120,9 +111,6 @@ STRIPE_ENABLED = bool(STRIPE_SECRET_KEY or STRIPE_TEST_SECRET_KEY)
 # Where Stripe sends the buyer afterwards (pages on the website).
 STRIPE_SUCCESS_URL = os.getenv("STRIPE_SUCCESS_URL", "https://4guys1palletoverstock.com/checkout/success").strip()
 STRIPE_CANCEL_URL = os.getenv("STRIPE_CANCEL_URL", "https://4guys1palletoverstock.com/cart").strip()
-# Websites allowed to start a checkout from the browser (comma-separated origins).
-STRIPE_SHOP_ORIGINS = tuple(o.strip().rstrip("/") for o in
-                            os.getenv("STRIPE_SHOP_ORIGINS", "https://4guys1palletoverstock.com").split(",") if o.strip())
 # Shared secret the website's SERVER sends (header X-Shop-Key) when it
 # forwards a cart to /shop/checkout - lets the bot trust its X-Client-IP
 # header for per-shopper rate limiting. Same value in the website's env.
@@ -240,7 +228,6 @@ else:
     AI_ENABLED = False
 
 # ---- Fixed channel name used for the "click to start a new pallet" button ----
-HUB_CHANNEL_NAME = "new-pallet-tracking"
 
 # ---- Channel architecture -------------------------------------------------
 # Discord servers cap out at 500 channels total. Creating a full set of stage
@@ -250,11 +237,8 @@ HUB_CHANNEL_NAME = "new-pallet-tracking"
 # every pallet at once, with each item's card clearly labeled by pallet.
 
 # Created fresh inside every new pallet's category:
+# (cogs/pallet_setup.py makes this one and "data-entry").
 DISCUSSION_CHANNEL_NAME = "pallet-discussion"  # created first, so it's the top channel in the category
-PER_PALLET_CHANNELS = [
-    DISCUSSION_CHANNEL_NAME,
-    "data-entry",
-]
 
 # Created ONCE for the whole server (via /setup shared-channels), shared by
 # every pallet. An item's embed always shows which pallet it belongs to.
@@ -308,7 +292,7 @@ INFORMATION_CHANNEL_NAME = "information"
 
 # Full pipeline order, per-pallet + shared combined, in the order an item
 # actually moves through them. Used wherever code needs "all stages" (the
-# NewPalletModal only creates PER_PALLET_CHANNELS itself - shared ones must
+# NewPalletModal only creates the pallet's own two channels - shared ones must
 # already exist via /setup shared-channels).
 STAGE_CHANNELS = ["data-entry"] + SHARED_STAGE_CHANNELS
 

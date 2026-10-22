@@ -175,7 +175,6 @@ def _partners_embed() -> discord.Embed:
 def _finance_commands_embed() -> discord.Embed:
     embed = discord.Embed(title="💬 Commands - Finance (`/finance ...`)", color=COLOR)
     embed.add_field(name="setprice <cost>", value="Set a pallet's total cost. Purchase Management or Finance Management.", inline=False)
-    embed.add_field(name="record-sale", value="Manually correct an item's sale price/platform - log-sale below sets these normally.", inline=False)
     embed.add_field(name="log-sale <items> <total_price>", value="Log a sale (single item or cross-pallet bundle) and book a Sales Receipt to QuickBooks - no per-item cost entry, no COGS journal entry (cash basis: a pallet's cost was already expensed in full at purchase). See #accounting below.", inline=False)
     embed.add_field(name="retry-sale <sale_id>", value="Retry pushing a saved sale to QuickBooks after an earlier API failure - nothing is ever lost.", inline=False)
     embed.add_field(name="refund / expense", value="Log a refund against a sale, or an expense against a pallet.", inline=False)
@@ -192,7 +191,6 @@ def _finance_commands_embed() -> discord.Embed:
     embed.add_field(name="overview", value="Business-wide snapshot: bank and Undeposited Funds balances (plus a card if set), month-to-date spend/revenue, pallets in progress vs sold out.", inline=False)
     embed.add_field(name="connect-quickbooks", value="Admin: link QuickBooks Online - sales receipts, eBay fee entries, pallet purchase expenses and balances.", inline=False)
     embed.add_field(name="list-accounts", value="Admin: list QuickBooks accounts and their IDs, for the QUICKBOOKS_* settings in .env (e.g. QUICKBOOKS_BANK_ACCOUNT_ID).", inline=False)
-    embed.add_field(name="import-pirateship <csv>", value="Admin: import a Pirate Ship shipping export and allocate its costs to pallets/items.", inline=False)
     return embed
 
 

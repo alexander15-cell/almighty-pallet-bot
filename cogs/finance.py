@@ -6,13 +6,6 @@ Purchase Management and Finance Management commands.
             just overwrite it), so Purchase can also use it to correct a
             mistake without needing Finance's help for that specific case.
 
-/finance record-sale       - Finance Management or Admin. Records (or
-                              corrects) an item's actual sale price and
-                              platform. Deliberately independent of the
-                              operational "Mark as Sold" button, so
-                              Listing Management never has to stop and
-                              type a price - Finance does this at their
-                              own pace, whenever the numbers are known.
 /finance override-count    - Finance Management or Admin. Manually sets
                               the pallet's "items received" figure, for
                               when the physical/accounting count needs to
@@ -22,9 +15,9 @@ Purchase Management and Finance Management commands.
 /finance set-shipping-info  - Finance Management or Admin. Records a buyer's
                               recipient name/address for a non-eBay ("Other"
                               platform) sale, feeding /pirate-ship
-                              export-batch. Deliberately independent of
-                              record-sale too, since the address often isn't
-                              known until after the price is agreed on.
+                              export-batch. Separate from logging the
+                              sale, since the address often isn't known
+                              until after the price is agreed on.
 /finance refund            - Finance Management or Admin. Logs a refund
                               against an item's sale. Doesn't touch the
                               original sale_price (that sale still
@@ -63,7 +56,6 @@ import database as db
 import discord_resilience
 import ebay_books
 import finance_utils
-import pirate_ship_import
 import quickbooks
 import runtime_settings
 import shop_values
@@ -615,45 +607,6 @@ async def _post_credit_card_charge(bot: discord.Client, txn: dict):
     await channel.send(embed=embed, view=view)
 
 
-async def _handle_unmatched_shipping_assignment(interaction: discord.Interaction, row_label: str,
-                                                  amount: float, pallet_choice: str):
-    """The logic behind UnmatchedShippingSelect - pulled out for direct
-    testing, same reasoning as _handle_allocation_choice above."""
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    pallet_id = int(pallet_choice)
-    pallet = db.get_pallet(pallet_id)
-    if not pallet:
-        await interaction.followup.send("That pallet no longer exists.", ephemeral=True)
-        return
-
-    db.add_pallet_cost(
-        pallet_id=pallet_id, cost_type="shipping", amount=amount, source="pirateship",
-        description=f"Pirate Ship shipping (manually assigned) - {row_label}",
-        actor_id=interaction.user.id,
-    )
-    await finance_utils.refresh_finance_message(interaction.client, pallet_id)
-    await interaction.followup.send(f"📦 Assigned ${amount:.2f} shipping to **{pallet['name']}**.", ephemeral=True)
-
-
-class UnmatchedShippingSelect(discord.ui.Select):
-    """One picker per unmatched Pirate Ship CSV row (see /finance
-    import-pirateship) - lets a human assign a shipping cost that couldn't
-    be auto-matched to a specific item's pallet-<id>-item-<number>
-    reference. No "New Pallet" option here (unlike the credit-card
-    Allocate flow) since a shipping cost only ever exists for an item that
-    already sold, which means its pallet already exists."""
-
-    def __init__(self, row_label: str, amount: float, pallets: list):
-        options = [discord.SelectOption(label=p["name"][:100], value=str(p["id"])) for p in pallets]
-        placeholder = f"Assign ${amount:.2f} ({row_label}) to..."
-        super().__init__(placeholder=placeholder[:150], options=options, min_values=1, max_values=1)
-        self.row_label = row_label
-        self.amount = amount
-
-    async def callback(self, interaction: discord.Interaction):
-        await _handle_unmatched_shipping_assignment(interaction, self.row_label, self.amount, self.values[0])
-
-
 # --------------------------------------------------------------- log-sale --
 # /finance log-sale (below) - logs a sale (single item or a bundle, possibly
 # across different pallets) and books it to QuickBooks: a Sales Receipt
@@ -1088,41 +1041,6 @@ class Finance(commands.Cog):
         await finance_utils.refresh_finance_message(self.bot, pallet["id"])
         await interaction.followup.send(
             f"💵 Set **{pallet['name']}** cost to ${cost:.2f}. Live card updated.", ephemeral=True
-        )
-
-    @finance_group.command(name="record-sale", description="Record (or correct) an item's actual sale price. Run inside that pallet's category.")
-    @app_commands.describe(
-        item_number="The item's number shown on its card (e.g. 3)",
-        price="Actual sale price",
-        platform="Where it sold (eBay, In Person, Other: <name>)",
-    )
-    async def record_sale(self, interaction: discord.Interaction, item_number: int, price: float, platform: str):
-        if not await _require_any_role(interaction, [config.ROLE_FINANCE_MGMT]):
-            return
-        pallet = _get_pallet_or_none(interaction)
-        if not pallet:
-            await interaction.response.send_message(
-                "Run this inside one of the pallet's own channels, not somewhere else.", ephemeral=True
-            )
-            return
-        item = db.get_item_by_pallet_and_number(pallet["id"], item_number)
-        if not item:
-            await interaction.response.send_message(f"No item #{item_number} found in **{pallet['name']}**.", ephemeral=True)
-            return
-        if price < 0:
-            await interaction.response.send_message("Price can't be negative.", ephemeral=True)
-            return
-
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        was_already_priced = item["sale_price"] is not None
-        db.record_item_sale(item["id"], price, platform.strip(), actor_id=interaction.user.id)
-        await finance_utils.refresh_finance_message(self.bot, pallet["id"])
-
-        verb = "Corrected" if was_already_priced else "Recorded"
-        await interaction.followup.send(
-            f"💰 {verb} sale price for **{pallet['name']}** item #{item_number}: "
-            f"${price:.2f} on {platform.strip()}. Live card updated.",
-            ephemeral=True,
         )
 
     @finance_group.command(
@@ -1808,66 +1726,6 @@ class Finance(commands.Cog):
         )
         embed.set_footer(text="Copy an ID into the matching QUICKBOOKS_* setting in .env (e.g. QUICKBOOKS_BANK_ACCOUNT_ID for the bank account), then restart the bot.")
         await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @finance_group.command(
-        name="import-pirateship",
-        description="Admin: import a Pirate Ship shipping export CSV and allocate its costs to pallets.",
-    )
-    @app_commands.describe(csv_file="Pirate Ship's order/shipping export CSV")
-    async def import_pirateship(self, interaction: discord.Interaction, csv_file: discord.Attachment):
-        if not _is_admin(interaction):
-            await interaction.response.send_message("You need **Pallet Admin** to do that.", ephemeral=True)
-            return
-        if not csv_file.filename.lower().endswith(".csv"):
-            await interaction.response.send_message("That doesn't look like a CSV file.", ephemeral=True)
-            return
-
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        csv_bytes = await csv_file.read()
-        parsed = pirate_ship_import.parse_shipping_costs(csv_bytes)
-
-        matched_count = 0
-        still_unmatched = list(parsed["unmatched"])
-        affected_pallets = set()
-        for row in parsed["matched"]:
-            item = db.get_item_by_pallet_and_number(row["pallet_id"], row["item_number"])
-            if not item:
-                still_unmatched.append({"row_label": row["row_label"], "amount": row["amount"]})
-                continue
-            db.add_pallet_cost(
-                pallet_id=row["pallet_id"], cost_type="shipping", amount=row["amount"], source="pirateship",
-                description=f"Pirate Ship shipping - item #{row['item_number']}", item_id=item["id"],
-                actor_id=interaction.user.id,
-            )
-            affected_pallets.add(row["pallet_id"])
-            matched_count += 1
-
-        for pallet_id in affected_pallets:
-            await finance_utils.refresh_finance_message(self.bot, pallet_id)
-
-        lines = [f"✅ Allocated shipping cost to {matched_count} item(s) across {len(affected_pallets)} pallet(s)."]
-
-        view = None
-        if still_unmatched:
-            lines.append(
-                f"⚠️ {len(still_unmatched)} row(s) couldn't be matched to an item automatically - "
-                f"use the menu(s) below to assign them by hand (or ignore rows that aren't from this business)."
-            )
-            assignable = [row for row in still_unmatched if row["amount"] is not None]
-            active_pallets = db.get_all_pallets(include_archived=False)[:24]
-            if assignable and active_pallets:
-                view = discord.ui.View(timeout=600)
-                # Discord caps a message at 5 component rows - one Select
-                # per row, so only the first 5 unmatched rows get a picker
-                # here; anything past that needs /finance expense by hand.
-                for row in assignable[:5]:
-                    view.add_item(UnmatchedShippingSelect(row["row_label"][:60], row["amount"], active_pallets))
-                if len(assignable) > 5:
-                    lines.append(f"(Showing pickers for the first 5 of {len(assignable)} assignable rows.)")
-            elif assignable and not active_pallets:
-                lines.append("No active pallets exist to assign them to yet.")
-
-        await interaction.followup.send("\n".join(lines), view=view, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

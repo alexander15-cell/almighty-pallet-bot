@@ -167,9 +167,6 @@ and type a number:
 
 - **Purchase Management** sets a pallet's total cost with `/finance setprice`.
 - **Finance Management** does everything Purchase can, plus:
-  - `/finance record-sale` - records (or corrects) an item's actual sale
-    price + platform, whenever the price is actually known. Not tied to the
-    Mark as Sold click at all.
   - `/finance refund` - logs a refund against an item's sale. Doesn't touch
     the original sale price (that sale still happened) - refunds net out
     separately against revenue everywhere it's shown.
@@ -194,7 +191,7 @@ and type a number:
   - `/finance set-shipping-info` - opens a two-step form for a buyer's
     recipient name and structured address (address lines, city, state,
     postal code, country) on a non-eBay sale, feeding `/pirate-ship
-    export-batch`. Decoupled from record-sale too, since the address often
+    export-batch`. Separate from logging the sale, since the address often
     isn't known until after the price is agreed on.
   - `/finance override-count` / `/finance clear-count-override` - manually
     corrects the "items received" figure if the real/accounting count needs
@@ -274,16 +271,6 @@ not built without an explicit spec).
   broken down by type) - not a replacement, so `/finance setprice` keeps
   working exactly as it always has for pallets that never touch these
   newer workflows.
-- **Pirate Ship shipping costs**: `/finance import-pirateship <csv>`
-  (Pallet Admin) uploads a Pirate Ship order/shipping export; rows are
-  matched to a specific sold item via the same `pallet-<id>-item-<number>`
-  reference already used internally for eBay/Pirate Ship exports, and that
-  shipping cost is allocated to the item's pallet automatically. Pirate
-  Ship's exact export column names weren't available to pin down when this
-  was built, so matching is deliberately flexible (scans every column for
-  the reference and for a cost-looking value/header) rather than assuming
-  one fixed layout; unmatched rows get a manual pallet-picker in the
-  response instead of being silently dropped or guessed at.
 - **Reporting**: `/finance pallet-summary [pallet_name]` shows one
   pallet's cost basis broken down by type, revenue, and profit/margin.
   `/finance overview` shows the bank, Undeposited Funds (and card, if set)
@@ -484,8 +471,8 @@ physically present for intake, so remote members can hold any of these
 roles freely.
 
 ### Create the hub channel
-Create a text channel named exactly `new-pallet-tracking` (matches
-`HUB_CHANNEL_NAME` in `config.py`). This is where the "Start New Pallet"
+Create a text channel such as `new-pallet-tracking` and run `/setup hub`
+in it. This is where the "Start New Pallet"
 button lives - it doesn't need to be inside any category.
 
 ### Create the bot application
@@ -1280,8 +1267,8 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   keyword search against `ebay_taxonomy.py`'s bundled ~18,000-category
   taxonomy otherwise).
 - `/pirate-ship export-batch` - exports every sold item on a non-eBay
-  platform ("Other"/website, recorded via `/finance
-  record-sale`) that hasn't been exported yet, as a CSV for Pirate Ship's
+  platform ("Other"/website, logged via `/finance
+  log-sale`) that hasn't been exported yet, as a CSV for Pirate Ship's
   batch/spreadsheet order import, then marks them exported so a re-run
   doesn't duplicate them. Recipient name/address come from `/finance
   set-shipping-info`; items missing that get flagged in the response but
@@ -1321,8 +1308,6 @@ UI after a restart (a Discord client caching quirk, not a bug here).
   info. CSVs/Discord attachments downloaded before a purge still have the
   old data; that needs separate manual cleanup.
 - `/finance connect-quickbooks` - see "QuickBooks Online integration" above.
-- `/finance import-pirateship <csv_file>` - see "QuickBooks Online
-  integration" above.
 
 ## Role bindings
 
@@ -1401,7 +1386,7 @@ order automation / fee / item-specifics features, `runtime_settings.py`'s role-I
 request shaping (all against a fake `aiohttp.ClientSession`, no real
 network calls), the credit-card charge → pallet allocation workflow and
 awaiting-pallet-charge claiming (cogs/finance.py, cogs/pallet_setup.py),
-`pirate_ship_import.py`'s flexible CSV column-scanning, the new financial
+the new financial
 reporting queries (cost-by-type breakdown, month-to-date spend/revenue,
 pallet in-progress/sold-out counts, the auto-flag early warnings, pending
 sale value), the Awaiting Listing card's List on eBay / Edit Details,
@@ -1567,13 +1552,6 @@ this scale.
   none right now, since the business has no card account
   (`QUICKBOOKS_CREDIT_CARD_ACCOUNT_ID` blank). Other accounts in the
   QuickBooks company are never touched.
-- **Pirate Ship CSV matching is flexible/best-guess, not pinned to a known
-  column layout.** No real Pirate Ship export sample was available when
-  this was built, so `pirate_ship_import.py` scans every column for a
-  `pallet-<id>-item-<number>` reference and a cost-looking value/header
-  rather than trusting one fixed schema. If a real export's columns don't
-  match well in practice, tighten the matching in that module rather than
-  guessing further - don't widen it speculatively.
 - **The partner ledger is a record, not a payment system.** `/partners`
   tracks money in, reimbursements and payouts and splits profit equally,
   but never moves money or posts to QuickBooks - pay people outside the

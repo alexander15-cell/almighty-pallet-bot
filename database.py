@@ -20,7 +20,7 @@ Item status values (stored as plain strings, see STATUS_* constants):
 
 Note: pallet cost and item sale price ARE tracked here again (Purchase
 Management sets cost via /finance setprice, Finance Management records sale
-prices via /finance record-sale) - this is a deliberate reversal of an earlier
+prices via /finance log-sale) - this is a deliberate reversal of an earlier
 decision to keep pricing out of Discord entirely. The difference this time:
 recording a sale price is fully decoupled from the operational "Mark as
 Sold" button, so warehouse-side clicking stays instant - only Finance
@@ -924,12 +924,6 @@ def get_all_pallets(include_archived: bool = True):
         return [dict(r) for r in rows]
 
 
-def get_all_channel_ids_for_pallet(pallet_id: int) -> list[int]:
-    with get_conn() as conn:
-        rows = conn.execute("SELECT channel_id FROM channel_map WHERE pallet_id = ?", (pallet_id,)).fetchall()
-        return [r["channel_id"] for r in rows]
-
-
 def archive_pallet(pallet_id: int):
     """
     Marks a pallet archived. Does NOT delete anything from the database -
@@ -1274,17 +1268,6 @@ def get_item_by_pallet_and_number(pallet_id: int, item_number: int):
             (pallet_id, item_number),
         ).fetchone()
         return dict(row) if row else None
-
-
-def get_items_by_status_for_pallet(pallet_id: int, status: str):
-    """Used by /ebay confirm-listed and /fb-marketplace confirm-listed's
-    bulk (whole-pallet) mode."""
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM items WHERE pallet_id = ? AND status = ? ORDER BY item_number",
-            (pallet_id, status),
-        ).fetchall()
-        return [dict(r) for r in rows]
 
 
 def get_all_items(status: str = None, include_deleted: bool = False) -> list:
@@ -1753,7 +1736,7 @@ def clear_items_received_override(pallet_id: int):
 def record_item_sale(item_id: int, price: float, platform: str, actor_id: int):
     """
     Sets (or overwrites/corrects) an item's sale price and platform. Used by
-    /finance record-sale for both the first recording and later corrections -
+    /finance log-sale (and the eBay order cards) for the first recording and later corrections -
     deliberately NOT tied to the item's pipeline status, since Finance may
     record or fix a price at a different pace than the operational Mark as
     Sold click.

@@ -157,13 +157,9 @@ async def send_item_card(channel: discord.TextChannel, item: dict, view: discord
 
     status = destination_status or item["status"]
     contract = None
-    # Never in combined mode - its #website_shop review flow (shop_discord.py)
-    # is the sole source of truth for what's actually approved for the
-    # website; an ordinary card here must never carry these markers, or it
-    # could be mistaken for one that went through that approval flow.
-    # Outside combined mode, config.WEBSITE_MARKERS_ENABLED (off by default)
-    # gates it - see that constant's own comment.
-    if status in WEBSITE_STATUSES and not getattr(config, "COMBINED_MODE", False) and config.WEBSITE_MARKERS_ENABLED:
+    # config.WEBSITE_MARKERS_ENABLED (off by default) gates it - see that
+    # constant's own comment.
+    if status in WEBSITE_STATUSES and config.WEBSITE_MARKERS_ENABLED:
         try:
             contract = build_website_contract(
                 item, db.get_ebay_listing_data(item["id"]), status=status,
@@ -190,8 +186,6 @@ async def send_item_card(channel: discord.TextChannel, item: dict, view: discord
         for field in contract["fields"]:
             main_embed.add_field(**field)
         main_embed.set_footer(text=FOOTER_PREFIX + (f" | {extra_text[:200]}" if extra_text else ""))
-    elif getattr(config, "COMBINED_MODE", False):
-        main_embed.set_footer(text=f"New inventory ID {item['id']}" + (f" | {extra_text[:150]}" if extra_text else ""))
     elif extra_text:
         main_embed.set_footer(text=extra_text[:200])
 
@@ -218,13 +212,6 @@ async def send_website_hold_notice(channel: discord.TextChannel, item: dict):
     staff identifiers, flags, or attachments. A later successful resolution
     posts a newer complete listing card and supersedes this notice.
     """
-    if getattr(config, "COMBINED_MODE", False):
-        # Combined publishing is driven by the durable shop gate/lifecycle
-        # adapter, not an ordinary channel card that could bypass approval.
-        return await channel.send(
-            embed=discord.Embed(title="Item on hold", description="This item is not available for sale."),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
     if not config.WEBSITE_MARKERS_ENABLED:
         # Standalone bot with no website integration turned on - nothing to
         # withdraw, so post nothing (see config.WEBSITE_MARKERS_ENABLED).

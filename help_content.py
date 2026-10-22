@@ -112,11 +112,6 @@ ENTRIES = (
         ("pallet cost", "set price", "purchase price", "total cost"),
     ),
     HelpEntry(
-        "/finance record-sale",
-        "Manually correct an item's sale price/platform - /finance log-sale sets these normally.",
-        ("record sale", "sale price", "how much did it sell", "correct sale"),
-    ),
-    HelpEntry(
         "/finance log-sale <items> <total_price>",
         "Log a sale (single item or cross-pallet bundle) and book a Sales Receipt to QuickBooks - cash basis, so there's no separate COGS journal entry (the pallet's cost was already expensed at purchase).",
         ("log sale", "book sale", "cogs", "cost of goods sold", "sales receipt", "sales tax"),
@@ -270,11 +265,6 @@ ENTRIES = (
         "/finance list-accounts",
         "Admin: list QuickBooks accounts and their IDs, for the QUICKBOOKS_* settings in .env (e.g. QUICKBOOKS_BANK_ACCOUNT_ID). Use account_type:All account types for income/expense accounts.",
         ("quickbooks account id", "find account id", "list quickbooks accounts", "bank account id", "expense account id", "credit card account id"),
-    ),
-    HelpEntry(
-        "/finance import-pirateship <csv>",
-        "Admin: import a Pirate Ship shipping export and allocate its costs to pallets/items.",
-        ("import pirate ship", "allocate shipping cost"),
     ),
     HelpEntry(
         "Post in #submit-invoices",

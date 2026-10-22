@@ -44,7 +44,6 @@ def run(coro):
 @pytest.fixture
 def integrated_case(fresh_db, tmp_path, monkeypatch):
     monkeypatch.setattr(config, "WEBSITE_SHOP_ENABLED", True)
-    monkeypatch.setattr(config, "COMBINED_MODE", False, raising=False)
     monkeypatch.setattr(config, "PRESERVE_DISCORD_HISTORY", False)
     photo_root = tmp_path / "photos"
     monkeypatch.setattr(config, "PHOTO_DIR", str(photo_root))
