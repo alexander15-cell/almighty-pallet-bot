@@ -2907,6 +2907,16 @@ def unused_negative_category_id() -> int:
         return min(-1, (low or 0) - 1)
 
 
+def stripe_holds_for_item(item_id: int) -> list:
+    """Every hold row on this item with its checkout (any status) - for
+    /admin website-hold."""
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            """SELECT h.item_id, h.session_id, h.expires_at AS hold_expires_at, c.status, c.source, c.created_at
+               FROM stripe_holds h LEFT JOIN stripe_checkouts c ON c.session_id = h.session_id
+               WHERE h.item_id = ?""", (item_id,))]
+
+
 def open_stripe_checkouts_for_item(item_id: int) -> list:
     """Checkouts still holding this item (open, or paid and processing)."""
     with get_conn() as conn:

@@ -323,6 +323,49 @@ async def handle_event(bot, event: dict) -> str:
     return "ignored"
 
 
+async def reconcile_session(bot, session_id: str) -> str:
+    """
+    Asks Stripe where a checkout the bot still thinks is open/processing
+    actually stands, and applies it - the safety net for a missed or
+    rejected webhook. Guarded and idempotent:
+      - expired (and not paid)  -> marked expired, ITS holds released;
+      - complete + paid         -> marked paid and fulfilled (missed payment event);
+      - anything else           -> left alone (the hold stays).
+    Returns a short description.
+    """
+    checkout = db.get_stripe_checkout(session_id)
+    if not checkout:
+        return "not a bot checkout"
+    if checkout["status"] not in ("open", "processing"):
+        return f"already {checkout['status']} - nothing to do"
+    try:
+        session = await stripe_api.retrieve_checkout_session(session_id)
+    except stripe_api.StripeError as e:
+        return f"couldn't ask Stripe ({e})"
+    state, paid = session.get("status"), session.get("payment_status")
+    if state == "expired" and paid not in ("paid", "no_payment_required"):
+        db.update_stripe_checkout(session_id, status="expired", note="Expired (confirmed with Stripe)")
+        db.release_stripe_holds(session_id)
+        log.info("Checkout %s confirmed expired with Stripe - hold released", session_id)
+        return "expired on Stripe - hold released"
+    if state == "complete" and paid in ("paid", "no_payment_required"):
+        db.update_stripe_checkout(session_id, status="paid")
+        await _fulfill_logged(bot, session_id)
+        return "paid on Stripe (missed payment event) - fulfilled"
+    return f"still {state}/{paid} on Stripe - hold kept"
+
+
+async def reconcile_open(bot) -> list:
+    """reconcile_session for every checkout the bot still has open."""
+    results = []
+    for checkout in db.list_stripe_checkouts(["open", "processing"], limit=100):
+        # Asked every run (one read per open checkout), so an expiry the bot
+        # missed - e.g. one expired early in Stripe's dashboard - is caught
+        # within minutes, not only when the hold runs out.
+        results.append((checkout["session_id"], await reconcile_session(bot, checkout["session_id"])))
+    return results
+
+
 async def _fulfill_logged(bot, session_id: str):
     try:
         await fulfill(bot, session_id)
@@ -554,6 +597,10 @@ async def retry_pending(bot) -> int:
             await shippo_orders.sync_labels(bot)
         except Exception:
             log.exception("Shippo order sync failed - will retry")
+    try:
+        await reconcile_open(bot)
+    except Exception:
+        log.exception("Reconciling open Stripe checkouts failed - will retry")
     for checkout in db.list_stripe_checkouts(["paid", "attention"], limit=50):
         if (checkout.get("note") or "").startswith(CONFLICT):
             continue  # sold-elsewhere conflict - needs a person

@@ -752,6 +752,42 @@ class AdminTools(commands.Cog):
             message += f"\n⚠️ Couldn't copy it to the backup copy folder: {backup.last_copy}"
         await interaction.followup.send(message, ephemeral=True)
 
+    @admin_group.command(name="website-hold",
+                         description="Why a website item shows 0 available: its checkout holds, checked with Stripe.")
+    @app_commands.describe(sku="The item's SKU, e.g. pallet-1-item-11")
+    async def website_hold_cmd(self, interaction: discord.Interaction, sku: str):
+        if not await _require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        import ebay_catalog
+        import stripe_shop
+        canon = ebay_catalog.canonical_sku(sku)
+        parsed = canon and canon.split("-")
+        item = db.get_item_by_pallet_and_number(int(parsed[1]), int(parsed[3])) if parsed else None
+        if item is None:
+            await interaction.followup.send(f"No item with SKU `{sku}`.", ephemeral=True)
+            return
+        lines = [f"**{canon}** - bot status **{item['status']}**"]
+        now = datetime.now(timezone.utc).isoformat()
+        holds = db.stripe_holds_for_item(item["id"])
+        if not holds:
+            lines.append("No checkout holds on it.")
+        for hold in holds:
+            active = hold["hold_expires_at"] > now or hold["status"] in ("processing", "paid", "attention")
+            lines.append(f"• checkout `…{hold['session_id'][-10:]}` ({hold['source'] or '?'}, "
+                         f"{'LIVE' if hold['session_id'].startswith('cs_live_') else 'test'}) - bot says "
+                         f"**{hold['status']}**, hold until {hold['hold_expires_at'][:16].replace('T', ' ')} UTC - "
+                         f"{'ACTIVE' if active else 'no longer counts'}")
+            if hold["status"] in ("open", "processing"):
+                lines.append(f"  ↳ Stripe: {await stripe_shop.reconcile_session(self.bot, hold['session_id'])}")
+        snapshot = db.current_active_listings().get(canon)
+        lines.append(f"eBay (last check): " + (f"live, listing {snapshot['listing_id']}, quantity {snapshot['quantity']}"
+                                               if snapshot else "no live listing found"))
+        held_now = db.active_stripe_holds([item["id"]])
+        lines.append("Website availability is now held by checkout `…" + held_now[item["id"]][-10:] + "`."
+                     if held_now else "No active hold now.")
+        await interaction.followup.send("\n".join(lines)[:1900], ephemeral=True)
+
     @admin_group.command(name="checkout-test",
                          description="The disposable $1 item for testing website checkout on Stripe test keys.")
     @app_commands.describe(action="create it, reset it to Listed after a test, show it, or retire it")

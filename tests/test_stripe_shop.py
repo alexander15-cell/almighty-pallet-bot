@@ -328,3 +328,26 @@ def test_session_status_for_the_website(shop, monkeypatch):
         finally:
             await c.close()
     asyncio.run(go())
+
+
+# ------------------------------------- missed / rejected webhooks: ask Stripe
+
+def test_reconcile_releases_an_expired_session_and_fulfils_a_missed_payment(shop, monkeypatch):
+    a, b, c = _listed(shop.db, number_of_items=3)
+    sid_a = asyncio.run(stripe_shop.start_checkout([a["id"]]))["session_id"]
+    sid_b = asyncio.run(stripe_shop.start_checkout([b["id"]]))["session_id"]
+    sid_c = asyncio.run(stripe_shop.start_checkout([c["id"]]))["session_id"]
+    states = {sid_a: {"status": "expired", "payment_status": "unpaid"},
+              sid_b: {**_paid_session(sid_b), "status": "complete"},
+              sid_c: {"status": "open", "payment_status": "unpaid"}}
+    monkeypatch.setattr(stripe_api, "retrieve_checkout_session", AsyncMock(side_effect=lambda sid: states[sid]))
+    bot = _bot(shop.db)
+
+    results = dict(asyncio.run(stripe_shop.reconcile_open(bot)))
+
+    assert "released" in results[sid_a] and shop.db.active_stripe_holds([a["id"]]) == {}
+    assert shop.db.get_stripe_checkout(sid_a)["status"] == "expired"
+    assert "fulfilled" in results[sid_b] and bot.flow.calls == [(b["id"], "Website")]
+    assert "hold kept" in results[sid_c] and shop.db.active_stripe_holds([c["id"]]) == {c["id"]: sid_c}
+    # running again changes nothing (idempotent)
+    assert dict(asyncio.run(stripe_shop.reconcile_open(bot))) == {sid_c: results[sid_c]}
