@@ -85,3 +85,27 @@ def test_already_ended_is_fine_and_other_errors_raise(monkeypatch):
     with pytest.raises(ebay_api.EbayAPIError, match="Not your listing"):
         asyncio.run(ebay_api.end_listing_for_item(ITEM, listing_id="1"))
     assert asyncio.run(ebay_api.end_listing_for_item(ITEM)) == "No live eBay listing found for it."
+
+
+def test_relist_hand_made_listing_returns_the_new_id(monkeypatch):
+    monkeypatch.setattr(ebay_api, "_request", AsyncMock(return_value={"offers": []}))
+    sent = _trading(monkeypatch, '<R xmlns="urn:ebay:apis:eBLBaseComponents"><Ack>Success</Ack>'
+                                 '<ItemID>318921999999</ItemID></R>')
+    assert asyncio.run(ebay_api.relist_listing_for_item(ITEM, listing_id="318921888862")) == "318921999999"
+    assert sent[0][2]["X-EBAY-API-CALL-NAME"] == "RelistFixedPriceItem" and "<ItemID>318921888862</ItemID>" in sent[0][1]
+    _trading(monkeypatch, _fail("21916750", "Item cannot be relisted"))
+    with pytest.raises(ebay_api.EbayAPIError, match="cannot be relisted"):
+        asyncio.run(ebay_api.relist_listing_for_item(ITEM, listing_id="1"))
+
+
+def test_relist_bot_made_listing_publishes_its_offer_again(monkeypatch):
+    calls = []
+
+    async def request(method, path, json_body=None):
+        calls.append((method, path))
+        if method == "GET":
+            return {"offers": [{"status": "UNPUBLISHED", "offerId": "o7"}]}
+        return {"listingId": "860000000123"}
+    monkeypatch.setattr(ebay_api, "_request", request)
+    assert asyncio.run(ebay_api.relist_listing_for_item(ITEM, listing_id="1")) == "860000000123"
+    assert ("POST", "/offer/o7/publish") in calls

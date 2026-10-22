@@ -411,3 +411,40 @@ def test_item_hold_reports_ineligible_status(fresh_db):
     asyncio.run(AdminTools.item_hold.callback(cog, interaction, 1, reason, note=None))
 
     assert "Can't place item #1 on hold" in interaction.followup.content
+
+
+# ------------------------------------------------ eBay pauses with the hold
+
+def test_hold_ends_the_ebay_listing_and_resolving_relists_it(fresh_db, monkeypatch):
+    from unittest.mock import AsyncMock
+    import config
+    import ebay_api
+    monkeypatch.setattr(config, "EBAY_ENABLED", True)
+    pallet_id = fresh_db.create_pallet("Hold eBay Pallet", category_id=3, created_by=1)
+    item_id = fresh_db.create_item(pallet_id, "lamp", [], 1)
+    fresh_db.save_ebay_listing_data(item_id, "Lamp", "1", "1500", 20.0, {})
+    fresh_db.set_ebay_item_id(item_id, "318921888862")
+    listed_channel, hold_channel = _FakeChannel(300), _FakeChannel(200)
+    old = asyncio.run(listed_channel.send(content="listed card"))
+    fresh_db.update_status(item_id, fresh_db.STATUS_LISTED, actor_id=1, new_message_id=old.id)
+    fresh_db.set_shared_channel("listed", 300)
+    fresh_db.set_shared_channel("hold", 200)
+    item = fresh_db.get_item(item_id)
+    fresh_db.record_active_snapshot([{"sku": f"pallet-{pallet_id}-item-{item['item_number']}",
+                                      "listing_id": "318921888862", "price": 20.0, "quantity": 1,
+                                      "listing_type": "FixedPriceItem"}], "2026-10-22T00:00:00+00:00")
+    ended = AsyncMock(return_value="eBay listing ended.")
+    relisted = AsyncMock(return_value="318921999999")
+    monkeypatch.setattr(ebay_api, "end_listing_for_item", ended)
+    monkeypatch.setattr(ebay_api, "relist_listing_for_item", relisted)
+    cog = ItemFlow(_FakeBot({300: listed_channel, 200: hold_channel}))
+
+    assert asyncio.run(cog.place_item_on_hold(item, reason=db.HOLD_REASON_OTHER, note="customer coming", actor_id=1))
+    ended.assert_awaited_once()
+    assert fresh_db.get_hold_ebay_end(item_id)["listing_id"] == "318921888862"
+
+    moved, stage = asyncio.run(cog.resolve_item_hold(fresh_db.get_item(item_id), actor_id=1))
+    assert moved and stage == "listed"
+    relisted.assert_awaited_once()
+    assert fresh_db.get_ebay_listing_data(item_id)["ebay_item_id"] == "318921999999"
+    assert fresh_db.get_hold_ebay_end(item_id) is None

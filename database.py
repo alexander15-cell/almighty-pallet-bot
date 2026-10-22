@@ -787,6 +787,16 @@ def init_db():
                 updated_at    TEXT NOT NULL
             );
 
+            -- eBay listings the bot ended because their item went on hold,
+            -- so resolving the hold can put them back up.
+            CREATE TABLE IF NOT EXISTS ebay_hold_ends (
+                item_id         INTEGER PRIMARY KEY,
+                listing_id      TEXT NOT NULL,
+                ended_at        TEXT NOT NULL,
+                relisted_at     TEXT,
+                new_listing_id  TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS stripe_events (
                 event_id     TEXT PRIMARY KEY,
                 event_type   TEXT,
@@ -2981,6 +2991,37 @@ def update_shippo_order(session_id: str, **fields):
     with get_conn() as conn:
         conn.execute(f"UPDATE shippo_orders SET {', '.join(f'{k} = ?' for k in fields)}, updated_at = ? "
                      "WHERE session_id = ?", (*fields.values(), _now(), session_id))
+
+
+# ------------------------------------------------- eBay listings ended elsewhere --
+
+def log_item_event(item_id: int, note: str, actor_id: int = None):
+    """A history line on the item without changing its status."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO item_events (item_id, from_status, to_status, actor_id, note, timestamp) "
+            "VALUES (?, NULL, (SELECT status FROM items WHERE id = ?), ?, ?, ?)",
+            (item_id, item_id, actor_id, note[:500], _now()))
+
+
+def record_hold_ebay_end(item_id: int, listing_id: str):
+    with get_conn() as conn:
+        conn.execute("INSERT OR REPLACE INTO ebay_hold_ends (item_id, listing_id, ended_at) VALUES (?, ?, ?)",
+                     (item_id, str(listing_id), _now()))
+
+
+def get_hold_ebay_end(item_id: int):
+    """The listing the bot ended for this item's hold, if not relisted yet."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM ebay_hold_ends WHERE item_id = ? AND relisted_at IS NULL",
+                           (item_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def mark_hold_ebay_relisted(item_id: int, new_listing_id: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE ebay_hold_ends SET relisted_at = ?, new_listing_id = ? WHERE item_id = ?",
+                     (_now(), str(new_listing_id), item_id))
 
 
 # ------------------------------------------------------- web dashboard reads --

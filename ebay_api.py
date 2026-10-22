@@ -855,6 +855,54 @@ async def end_listing_for_item(item: dict, listing_id: str = None) -> str:
     return "No live eBay listing found for it."
 
 
+async def relist_fixed_price_listing(listing_id: str) -> str:
+    """Relists an ended fixed-price listing (Trading API RelistFixedPriceItem
+    - works for listings made by hand in Seller Hub). Returns the NEW
+    listing ID. Raises EbayAPIError."""
+    import xml.etree.ElementTree as ET
+    token = await get_access_token()
+    headers = {"X-EBAY-API-CALL-NAME": "RelistFixedPriceItem", "X-EBAY-API-SITEID": "0",
+               "X-EBAY-API-COMPATIBILITY-LEVEL": "1349", "X-EBAY-API-IAF-TOKEN": token, "Content-Type": "text/xml"}
+    body = ('<?xml version="1.0" encoding="utf-8"?>'
+            '<RelistFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+            f"<Item><ItemID>{int(listing_id)}</ItemID></Item></RelistFixedPriceItemRequest>")
+    async with aiohttp.ClientSession() as session:
+        async with session.post(_trading_url(), data=body.encode(), headers=headers) as resp:
+            text = await resp.text()
+            if resp.status >= 300:
+                raise EbayAPIError(f"eBay RelistFixedPriceItem failed ({resp.status}): {text[:300]}")
+    root = ET.fromstring(text)
+    ns = _TRADING_NS
+    new_id = root.findtext(f"{ns}ItemID")
+    if (root.findtext(f"{ns}Ack") or "") == "Failure" or not new_id:
+        msg = root.findtext(f"{ns}Errors/{ns}LongMessage") or text[:300]
+        raise EbayAPIError(f"eBay RelistFixedPriceItem failed: {msg}")
+    return new_id
+
+
+async def relist_listing_for_item(item: dict, listing_id: str = None) -> str:
+    """Puts an ended listing back up after a hold. Bot-made listings
+    (Inventory API) get their withdrawn offer published again; anything
+    else is relisted by its old listing ID. Returns the live listing ID.
+    Raises EbayAPIError."""
+    if not config.EBAY_ENABLED:
+        raise EbayAPIError("eBay API isn't enabled.")
+    sku = ebay_listing_rules.custom_label(item)
+    try:
+        offers = (await _request("GET", f"/offer?sku={urllib.parse.quote(sku)}")).get("offers") or []
+    except EbayAPIError as e:
+        if "25713" not in str(e) and "404" not in str(e):
+            raise
+        offers = []
+    for offer in offers:
+        if offer.get("status") == "UNPUBLISHED" and offer.get("offerId"):
+            published = await _request("POST", f"/offer/{offer['offerId']}/publish")
+            return str(published.get("listingId") or listing_id)
+    if not listing_id:
+        raise EbayAPIError("No eBay listing ID on file to relist.")
+    return await relist_fixed_price_listing(listing_id)
+
+
 async def create_listing(item: dict, listing: dict) -> dict:
     """
     Creates a live eBay listing from `item` (items table dict) and `listing`

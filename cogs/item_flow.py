@@ -1765,6 +1765,12 @@ class ItemFlow(commands.Cog):
 
         db.place_item_on_hold(item["id"], reason=reason, note=note, pre_hold_status=item["status"], actor_id=actor_id)
         db.update_status(item["id"], db.STATUS_ON_HOLD, actor_id=actor_id, new_message_id=msg.id)
+        if item["status"] == db.STATUS_LISTED:
+            # Pause eBay too; resolving the hold puts the listing back up.
+            listing_id, units = self._live_ebay_listing(item)
+            result = await self.end_ebay_listing_elsewhere(item, f"on hold ({reason_label})")
+            if listing_id and units <= 1 and result.startswith(("eBay listing ended", "eBay listing had already")):
+                db.record_hold_ebay_end(item["id"], listing_id)
 
         old_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, old_stage))
         if old_channel and item.get("current_message_id"):
@@ -1809,6 +1815,8 @@ class ItemFlow(commands.Cog):
         msg = await send_item_card(channel, item, view=view, destination_status=pre_status)
         db.resolve_item_hold(item["id"], actor_id=actor_id)
         db.update_status(item["id"], pre_status, actor_id=actor_id, note="Hold resolved", new_message_id=msg.id)
+        if pre_status == db.STATUS_LISTED:
+            await self.relist_after_hold(item)
 
         old_channel = self.bot.get_channel(db.resolve_channel_id(pallet_id, "hold"))
         if old_channel and item.get("current_message_id"):
@@ -1820,6 +1828,25 @@ class ItemFlow(commands.Cog):
                 await self._clear_old_card(old_msg, item["id"], "resolve hold")
 
         return True, stage
+
+    async def relist_after_hold(self, item: dict) -> str:
+        """Puts back up the eBay listing the bot ended when this item went on
+        hold (records the new listing ID). Returns a note ('' if the bot
+        hadn't ended one)."""
+        ended = db.get_hold_ebay_end(item["id"])
+        if not ended:
+            return ""
+        try:
+            new_id = await ebay_api.relist_listing_for_item(item, listing_id=ended["listing_id"])
+        except ebay_api.EbayAPIError as e:
+            note = f"couldn't relist on eBay ({str(e)[:200]}) - relist it in Seller Hub."
+        else:
+            db.set_ebay_item_id(item["id"], new_id)
+            db.mark_hold_ebay_relisted(item["id"], new_id)
+            note = f"relisted on eBay as {new_id}."
+        db.log_item_event(item["id"], f"eBay: {note}")
+        await self._ebay_notice(f"🔁 #{item['item_number']} back from hold - {note}")
+        return note
 
     async def reject_to_data_entry(self, interaction: discord.Interaction, item_id: int):
         if not await self._require_role(interaction, config.ROLE_QUEUE_REVIEW):
@@ -2025,6 +2052,50 @@ class ItemFlow(commands.Cog):
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
         return channel.id
 
+    # -------------------------------------- eBay follows sales/holds elsewhere --
+
+    def _live_ebay_listing(self, item: dict):
+        """(listing_id, units) of the item's live eBay listing, or (None, 0)."""
+        listing = db.get_ebay_listing_data(item["id"]) or {}
+        if not config.EBAY_ENABLED or not listing.get("ebay_item_id"):
+            return None, 0
+        live = db.current_active_listings().get(f"pallet-{item['pallet_id']}-item-{item['item_number']}")
+        units = (live or {}).get("quantity")
+        return listing["ebay_item_id"], (units if units is not None else 1)
+
+    async def _ebay_notice(self, text: str):
+        channel = self.bot.get_channel(db.get_shared_channel_id("ebay-orders") or 0)
+        if channel is not None:
+            try:
+                await channel.send(text[:1900])
+            except Exception as e:
+                print(f"[item_flow] Couldn't post the eBay notice: {e}")
+
+    async def end_ebay_listing_elsewhere(self, item: dict, why: str) -> str:
+        """
+        Ends the item's live eBay listing because it {why} (sold in person /
+        on hold), so it can't be bought twice. A listing selling several
+        units is left alone (ending it would end the other units too) -
+        the notice says to lower its quantity instead. Returns a note ('' if
+        there's no eBay listing); the result is also logged on the item and
+        posted in #ebay-orders.
+        """
+        listing_id, units = self._live_ebay_listing(item)
+        if not listing_id:
+            return ""
+        name = f"#{item['item_number']}"
+        if units and units > 1:
+            note = (f"eBay listing {listing_id} has {units} units - lower its quantity by 1 in Seller Hub "
+                    f"(the bot doesn't end multi-unit listings).")
+        else:
+            try:
+                note = await ebay_api.end_listing_for_item(item, listing_id=listing_id)
+            except ebay_api.EbayAPIError as e:
+                note = f"couldn't end the eBay listing ({str(e)[:200]}) - end it in Seller Hub NOW so it can't sell twice."
+        db.log_item_event(item["id"], f"eBay: {note}")
+        await self._ebay_notice(f"🔚 {name} {why} - {note}")
+        return note
+
     async def do_mark_sold(self, item_id: int, platform: str, actor_id: int, old_card=None) -> int:
         """Listed's Mark as Sold, once a platform's been picked. Returns the #sold channel ID."""
         item = self._expect_status(item_id, db.STATUS_LISTED)
@@ -2037,6 +2108,10 @@ class ItemFlow(commands.Cog):
         if card is not None:
             await self._clear_old_card(card, item_id, "mark sold")
         await self._post_to_accounting_channel(item_id, platform)
+        # Sold anywhere but eBay -> its eBay listing comes down. (Website sales
+        # do this in stripe_shop.fulfill, which reports it on the order notice.)
+        if (platform or "").strip().lower() not in ("ebay", "website"):
+            await self.end_ebay_listing_elsewhere(item, f"sold ({platform})")
         await finance_utils.refresh_finance_message(self.bot, pallet_id)
         return channel.id
 
