@@ -147,6 +147,9 @@ SHIPPO_API_TOKEN = os.getenv("SHIPPO_API_TOKEN", "").strip()
 SHIPPO_CARRIERS = tuple(c.strip() for c in (os.getenv("SHIPPO_CARRIERS") or "").split(",") if c.strip())  # blank = any
 SHIPPO_HANDLING = float(os.getenv("SHIPPO_HANDLING") or "1.00")          # added per item, dollars
 SHIPPO_MARKUP_PERCENT = float(os.getenv("SHIPPO_MARKUP_PERCENT") or "0")  # on top of the carrier rate
+# Send paid, shipped website orders into the Shippo dashboard to buy the
+# label there; the bot then marks them shipped (shippo_orders.py).
+SHIPPO_ORDERS = (os.getenv("SHIPPO_ORDERS") or "").strip().lower() in ("1", "true", "yes", "on")
 SHIPPO_QUOTE_MINUTES = int(os.getenv("SHIPPO_QUOTE_MINUTES") or "60")     # how long a quote can be used
 # Box used when an item has no weight/size saved: "L x W x H x lb".
 SHIP_DEFAULT_PARCEL = os.getenv("SHIP_DEFAULT_PARCEL", "14x12x10x8").strip()

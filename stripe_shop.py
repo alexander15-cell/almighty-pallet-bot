@@ -37,6 +37,7 @@ import ebay_listing_rules
 import finance_utils
 import quickbooks
 import shipping
+import shippo_orders
 import stripe_api
 
 log = logging.getLogger(__name__)
@@ -412,6 +413,12 @@ async def fulfill(bot, session_id: str) -> dict:
             await _notify(bot, checkout, session, total, tax, fee, notes + problems, attention=True)
             return {"ok": False, "message": " ".join(problems)}
 
+        # 1b. Hand the shipment to Shippo to buy the label there (once).
+        if checkout["delivery"] == "ship" and shippo_orders.enabled():
+            note = await shippo_orders.send_for_checkout(checkout, session, items, _addr(session))
+            if note:
+                notes.append(note)
+
         # 2. Log the sale + Sales Receipt (Website Sales, no QuickBooks tax on top).
         sale_id = checkout["sale_id"]
         if not sale_id:
@@ -518,7 +525,9 @@ async def _notify(bot, checkout: dict, session: dict, total: float, tax: float, 
     items = [db.get_item(i) for i in checkout["item_ids"]]
     names = ", ".join(f"{(db.get_pallet(i['pallet_id']) or {}).get('name', '?')} #{i['item_number']}" for i in items)
     address = _addr(session)
-    where = (f"ship to {address['name']}, {address['city']}, {address['state']} (in the Pirate Ship export)"
+    sent = db.get_shippo_order(checkout["session_id"])
+    label_tool = "in Shippo" if sent and sent["status"] != "failed" else "in the Pirate Ship export"
+    where = (f"ship to {address['name']}, {address['city']}, {address['state']} ({label_tool})"
              if address else "local pickup")
     head = "⚠️ **Website order needs attention**" if attention else "🛒 **Website order paid**"
     text = (f"{head} - {names} - ${total:.2f} (tax ${tax:.2f}"
@@ -539,6 +548,12 @@ async def retry_pending(bot) -> int:
     """Re-runs fulfillment for paid orders that didn't finish (QuickBooks
     or Discord was down, the fee wasn't ready yet)."""
     done = 0
+    if shippo_orders.enabled():
+        try:
+            await shippo_orders.retry_failed(bot)
+            await shippo_orders.sync_labels(bot)
+        except Exception:
+            log.exception("Shippo order sync failed - will retry")
     for checkout in db.list_stripe_checkouts(["paid", "attention"], limit=50):
         if (checkout.get("note") or "").startswith(CONFLICT):
             continue  # sold-elsewhere conflict - needs a person

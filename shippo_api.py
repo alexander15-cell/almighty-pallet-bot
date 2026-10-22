@@ -36,6 +36,38 @@ def ready() -> str:
     return ", ".join(missing)
 
 
+async def _call(method: str, path: str, body: dict = None) -> dict:
+    if not config.SHIPPO_API_TOKEN:
+        raise ShippoError("SHIPPO_API_TOKEN isn't set in .env.")
+    headers = {"Authorization": f"ShippoToken {config.SHIPPO_API_TOKEN}", "Content-Type": "application/json"}
+    try:
+        async with aiohttp.ClientSession(timeout=TIMEOUT) as session:
+            async with session.request(method, f"{API_BASE}{path}", json=body, headers=headers) as resp:
+                data = await resp.json(content_type=None)
+                status = resp.status
+    except (aiohttp.ClientError, TimeoutError) as e:
+        raise ShippoError(f"Couldn't reach Shippo ({type(e).__name__}).")
+    if status >= 300:
+        raise ShippoError(f"Shippo {method} {path} answered {status}: {str(data)[:300]}")
+    return data or {}
+
+
+async def create_order(order: dict) -> dict:
+    return await _call("POST", "/orders/", order)
+
+
+async def get_order(order_id: str) -> dict:
+    return await _call("GET", f"/orders/{order_id}")
+
+
+async def get_transaction(transaction_id: str) -> dict:
+    return await _call("GET", f"/transactions/{transaction_id}")
+
+
+async def get_rate(rate_id: str) -> dict:
+    return await _call("GET", f"/rates/{rate_id}")
+
+
 async def get_rates(parcel: dict, to_zip: str) -> list:
     """Rates for one parcel {length, width, height (in), weight (lb)} to a
     US ZIP: [{'amount' (dollars), 'provider', 'service', 'days', 'id'}],
