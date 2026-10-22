@@ -108,7 +108,7 @@ LOGIN_TRIES, LOGIN_WINDOW = 10, 300
 
 def _login_page(message: str = "") -> str:
     oauth = bool(config.DISCORD_CLIENT_ID and config.DISCORD_CLIENT_SECRET)
-    parts = ["<h1>4 Guys 1 Pallet</h1>"]
+    parts = ["<h1>Team dashboard</h1>"]
     if message:
         parts.append(f"<p class='error'>{esc(message)}</p>")
     if config.WEB_USERNAME_LOGIN:
@@ -165,7 +165,7 @@ async def login(request):
                                        "<code>DISCORD_CLIENT_ID</code> and <code>DISCORD_CLIENT_SECRET</code> to "
                                        "<code>.env</code> and restart the bot.</p>"), status=503)
     if request.query.get("go") != "1":
-        return html_response(bare_page("Sign in", "<h1>4 Guys 1 Pallet</h1><p class='muted'>Sign in with the "
+        return html_response(bare_page("Sign in", "<h1>Team dashboard</h1><p class='muted'>Sign in with the "
                                        "Discord account you use in the pallet server.</p>"
                                        "<p><a class='btn primary big' href='/login?go=1'>Sign in with Discord</a></p>"))
     state = auth.new_state()
