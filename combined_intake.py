@@ -278,6 +278,10 @@ class IntakeAdapter:
         counts = {"created": 0, "refreshed": 0, "invalidated": 0, "posted": 0, "blocked": 0}
         with self.db.get_conn() as connection:
             numbers = {str(row[0]) for row in connection.execute("SELECT id FROM items WHERE id>=?", (self.settings.item_id_floor,))}
+        # Extra units of a multi-unit eBay listing (unit_groups.py) are copies
+        # of a listing that already exists - never new website products here.
+        import unit_groups
+        numbers -= {str(i) for i in unit_groups.secondary_member_ids()}
         # Include tracked records whose source row is now missing, for safe withdrawal.
         for review in self.store.delivery_reviews():
             if review.product_ref.startswith("intake-"):

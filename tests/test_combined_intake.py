@@ -255,3 +255,13 @@ def test_source_id_collision_never_changes_an_unowned_review(case):
     assert run(case.adapter.reconcile())["blocked"] == 1
     assert case.store.system_get_review(str(case.item_id)) == foreign
     assert case.channel.sent == []
+
+
+def test_extra_units_of_a_multi_unit_listing_are_never_offered(case):
+    # the case item becomes the anchor of a 3-unit group; its two copies must be skipped
+    sku = f"pallet-{case.pallet}-item-2"
+    case.db.create_unit_group(sku, case.item_id, None, "trading", 0)
+    for _ in range(2):
+        case.db.add_unit_group_member(sku, case.db.clone_item_as_unit(case.item_id, actor_id=1))
+    counts = run(case.adapter.reconcile())
+    assert counts["blocked"] == 0 and counts["created"] == 1  # only the anchor, no invalid_intake_photos spam
