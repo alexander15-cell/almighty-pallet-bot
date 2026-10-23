@@ -30,6 +30,7 @@ import ebay_listing_rules
 import finance_utils
 import shipping
 import shippo_api
+import unit_groups
 
 log = logging.getLogger(__name__)
 SYSTEM_ACTOR = 0
@@ -50,7 +51,7 @@ def _line(item: dict) -> tuple:
     title = (listing.get("ebay_title") or item.get("ai_title") or f"Item #{item['item_number']}")[:150]
     box = (f"box {parcel['length']:g}x{parcel['width']:g}x{parcel['height']:g} in, {parcel['weight']:g} lb"
            + (" - DEFAULT BOX, measure it" if source == "default" else ""))
-    return ({"title": f"{title} [{box}]", "sku": ebay_listing_rules.custom_label(item), "quantity": 1,
+    return ({"title": f"{title} [{box}]", "sku": unit_groups.public_sku(item), "quantity": 1,
              "total_price": _money(item.get("sale_price") or listing.get("price")), "currency": "USD",
              "weight": f"{parcel['weight']:.2f}", "weight_unit": "lb"}, parcel["weight"])
 

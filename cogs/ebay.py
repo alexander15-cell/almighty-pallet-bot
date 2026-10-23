@@ -42,6 +42,7 @@ import ebay_aspects
 import ebay_books
 import ebay_catalog
 import price_sync
+import unit_groups
 import ebay_fee_expenses
 import ebay_finances
 import ebay_listing_rules
@@ -242,16 +243,24 @@ def _match_order_line_items(order: dict) -> list:
     /ebay order-card, and EbayOrderConfirmButton (re-resolved fresh on click).
     """
     matched, seen_ids = [], set()
-    for line_item in order["line_items"]:
+    for line_index, line_item in enumerate(order["line_items"]):
         item = None
         parsed = ebay_listing_rules.parse_custom_label(line_item.get("sku") or "")
         if parsed:
             item = db.get_item_by_pallet_and_number(*parsed)
         if not item and line_item.get("legacy_item_id"):
             item = db.get_item_by_ebay_listing_id(line_item["legacy_item_id"])
-        if item and item["id"] not in seen_ids:
-            matched.append(item)
-            seen_ids.add(item["id"])
+        if not item:
+            continue
+        if unit_groups.group_of(item) is not None and (order.get("payment_status") or "PAID") == "PAID":
+            units = unit_groups.assign_units(order["order_id"], line_item, item, line_index,
+                                             order.get("order_date") or order.get("sale_date"))
+        else:
+            units = [item]
+        for unit in units:
+            if unit["id"] not in seen_ids:
+                matched.append(unit)
+                seen_ids.add(unit["id"])
     return matched
 
 
@@ -524,6 +533,7 @@ async def _reconcile_ebay_order_statuses(bot: discord.Client, orders: list) -> d
     if cog is None:
         return counts
 
+    touched_units = []
     for order in orders:
         order_id = order["order_id"]
         cancel_state = order.get("cancel_state") or "NONE_REQUESTED"
@@ -532,60 +542,76 @@ async def _reconcile_ebay_order_statuses(bot: discord.Client, orders: list) -> d
         paid = order.get("payment_status") not in _UNPAID_PAYMENT_STATUSES
         sold_items = []
 
-        for line in order["line_items"]:
-            item = ebay_finances.match_line_to_item({**line, "order_date": order.get("order_date")})
-            if not item:
+        for line_index, line in enumerate(order["line_items"]):
+            base = ebay_finances.match_line_to_item({**line, "order_date": order.get("order_date")})
+            if not base:
                 continue
-            label = _item_label(item)
-            try:
-                if cancelled:
-                    if item["status"] in (db.STATUS_SOLD, db.STATUS_SHIPPED) and \
-                            db.record_ebay_order_automation(order_id, item["id"], "cancel_alert"):
-                        await _post_order_alert(
-                            bot,
-                            f"⚠️ eBay order `{order_id}` was **cancelled**, but **{label}** is marked "
-                            f"**{item['status']}** here. If it's back on the shelf, use `/item move-back` to "
-                            f"return it to Listed (void its QuickBooks Sales Receipt first if the sale was logged).",
-                        )
-                        counts["alerts"] += 1
-                    continue
+            # A multi-unit listing's order line takes specific units (see
+            # unit_groups.assign_units) - only once the order's paid.
+            group = unit_groups.group_of(base)
+            if group is None:
+                units = [base]
+            elif paid and not cancelled and not cancel_requested:
+                units = unit_groups.assign_units(order_id, line, base, line_index, order.get("order_date"))
+            else:
+                units = [u for u in (db.get_item(i) for i in db.order_units(
+                    order_id, unit_groups.line_key(line, line_index))) if u]
+            touched_units.extend(units)
+            for item in units:
+                label = _item_label(item)
+                try:
+                    if cancelled:
+                        if item["status"] in (db.STATUS_SOLD, db.STATUS_SHIPPED) and \
+                                db.record_ebay_order_automation(order_id, item["id"], "cancel_alert"):
+                            await _post_order_alert(
+                                bot,
+                                f"⚠️ eBay order `{order_id}` was **cancelled**, but **{label}** is marked "
+                                f"**{item['status']}** here. If it's back on the shelf, use `/item move-back` to "
+                                f"return it to Listed (void its QuickBooks Sales Receipt first if the sale was logged).",
+                            )
+                            counts["alerts"] += 1
+                        continue
 
-                if item["status"] == db.STATUS_ON_HOLD:
-                    if db.record_ebay_order_automation(order_id, item["id"], "hold_alert"):
-                        await _post_order_alert(
-                            bot,
-                            f"⚠️ **{label}** sold on eBay (order `{order_id}`) but is **on hold** here - "
-                            f"resolve the hold, then mark it sold. Nothing was changed automatically.",
-                        )
-                        counts["alerts"] += 1
-                    continue
+                    if item["status"] == db.STATUS_ON_HOLD:
+                        if db.record_ebay_order_automation(order_id, item["id"], "hold_alert"):
+                            await _post_order_alert(
+                                bot,
+                                f"⚠️ **{label}** sold on eBay (order `{order_id}`) but is **on hold** here - "
+                                f"resolve the hold, then mark it sold. Nothing was changed automatically.",
+                            )
+                            counts["alerts"] += 1
+                        continue
 
-                if paid and not cancel_requested \
-                        and item["status"] == db.STATUS_LISTED \
-                        and not _order_predates_listing(order, item) \
-                        and not db.has_ebay_order_automation(order_id, item["id"], "sold"):
-                    if await cog.auto_mark_sold_from_ebay(item, order_id, ebay_item_id=line.get("legacy_item_id")):
-                        db.record_ebay_order_automation(order_id, item["id"], "sold")
-                        counts["sold"] += 1
-                        await _post_order_alert(bot, f"🤖 **{label}** sold on eBay (order `{order_id}`) - moved to Sold.")
-                    item = db.get_item(item["id"])
+                    if paid and not cancel_requested \
+                            and item["status"] == db.STATUS_LISTED \
+                            and (group is not None or not _order_predates_listing(order, item)) \
+                            and not db.has_ebay_order_automation(order_id, item["id"], "sold"):
+                        if await cog.auto_mark_sold_from_ebay(item, order_id, ebay_item_id=line.get("legacy_item_id")):
+                            db.record_ebay_order_automation(order_id, item["id"], "sold")
+                            counts["sold"] += 1
+                            await _post_order_alert(bot, f"🤖 **{label}** sold on eBay (order `{order_id}`) - moved to Sold.")
+                        item = db.get_item(item["id"])
 
-                if line.get("fulfillment_status") == "FULFILLED" and item["status"] == db.STATUS_SOLD \
-                        and not db.has_ebay_order_automation(order_id, item["id"], "shipped"):
-                    if await cog.auto_mark_shipped_from_ebay(item, order_id):
-                        db.record_ebay_order_automation(order_id, item["id"], "shipped")
-                        counts["shipped"] += 1
-                    item = db.get_item(item["id"])
+                    if line.get("fulfillment_status") == "FULFILLED" and item["status"] == db.STATUS_SOLD \
+                            and not db.has_ebay_order_automation(order_id, item["id"], "shipped"):
+                        if await cog.auto_mark_shipped_from_ebay(item, order_id):
+                            db.record_ebay_order_automation(order_id, item["id"], "shipped")
+                            counts["shipped"] += 1
+                        item = db.get_item(item["id"])
 
-                if item["status"] in (db.STATUS_SOLD, db.STATUS_SHIPPED) and not _order_predates_listing(order, item):
-                    sold_items.append(item)
-            except discord_resilience.TRANSIENT_DISCORD_ERRORS:
-                log.exception("eBay order automation failed for %s (order %s) - will retry next poll", label, order_id)
+                    if item["status"] in (db.STATUS_SOLD, db.STATUS_SHIPPED) and (
+                        group is not None or not _order_predates_listing(order, item)):
+                        sold_items.append(item)
+                except discord_resilience.TRANSIENT_DISCORD_ERRORS:
+                    log.exception("eBay order automation failed for %s (order %s) - will retry next poll", label, order_id)
 
         if sold_items and paid and not cancelled and not cancel_requested \
                 and not db.has_seen_ebay_order(order_id) \
                 and not any(db.get_item_sale(i["id"]) for i in sold_items):
             await _ensure_order_card(bot, order_id)
+    for sku, result in await unit_groups.sync_for_items(touched_units):
+        if not result.ok:
+            log.warning("Unit group %s eBay sync after orders: %s", sku, result.note)
     return counts
 
 
@@ -1097,6 +1123,7 @@ class Ebay(commands.Cog):
             self.fee_card_loop.start()
             self.price_sync_loop.start()
             self.price_card_loop.start()
+            self.unit_sync_loop.start()
             self.catalog_snapshot_loop.start()
 
     async def cog_load(self):
@@ -1114,6 +1141,7 @@ class Ebay(commands.Cog):
         self.fee_card_loop.cancel()
         self.price_sync_loop.cancel()
         self.price_card_loop.cancel()
+        self.unit_sync_loop.cancel()
         self.catalog_snapshot_loop.cancel()
 
     @tasks.loop(minutes=config.EBAY_PRICE_SYNC_MINUTES)
@@ -1156,6 +1184,24 @@ class Ebay(commands.Cog):
 
     @catalog_snapshot_loop.before_loop
     async def _before_catalog_snapshot_loop(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(minutes=10)
+    async def unit_sync_loop(self):
+        """Safety net for multi-unit listings: eBay's quantity = units still
+        for sale here (unit_groups.sync) - catches anything a missed event,
+        an expired hold or a restart left out of step."""
+        if config.PRESERVE_DISCORD_HISTORY or not config.EBAY_ENABLED:
+            return
+        try:
+            for sku, result in await unit_groups.sync_all():
+                if not result.ok:
+                    log.warning("Unit group %s: %s", sku, result.note)
+        except Exception:
+            log.exception("Unit group sync failed - will retry next run")
+
+    @unit_sync_loop.before_loop
+    async def _before_unit_sync_loop(self):
         await self.bot.wait_until_ready()
 
     @price_card_loop.before_loop

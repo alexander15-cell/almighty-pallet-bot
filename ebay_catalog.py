@@ -27,6 +27,7 @@ import config
 import database as db
 import price_sync
 import shipping
+import unit_groups
 
 log = logging.getLogger(__name__)
 
@@ -129,18 +130,55 @@ def _items_by_sku() -> dict:
     return out
 
 
+def _group_view(sku: str, anchor: dict, listing):
+    """(item, listing) to report a multi-unit listing as ONE product: Listed
+    while any unit is, quantity = units a new buyer can reserve now (never
+    more than eBay itself shows)."""
+    members = db.unit_group_member_items(sku)
+    sellable = len(unit_groups.sellable_units(sku))
+    if any(u["status"] == db.STATUS_LISTED for u in members):
+        item = dict(anchor, status=db.STATUS_LISTED)
+    else:
+        item = dict(anchor, status=next((u["status"] for u in members if u["status"] != db.STATUS_DELETED),
+                                        anchor["status"]))
+    if listing is not None:
+        ebay_units = listing.get("quantity")
+        listing = dict(listing, quantity=sellable if ebay_units is None else min(sellable, int(ebay_units)))
+    return item, listing
+
+
 def _records(skus: list, checked_at, test: dict = None) -> list:
     """One record per SKU. The checkout test item (shop_test_item.py) gets
     its simulated listing and a simulated check time - on Stripe test keys
-    only; on live keys it's reported like an unknown SKU."""
+    only; on live keys it's reported like an unknown SKU. A multi-unit
+    listing (unit_groups.py) is reported under its anchor's SKU with the
+    number of units a new buyer can reserve; its added units' own SKUs are
+    not products and read as unknown."""
     test = shop_test_item.test_skus() if test is None else test
     items = _items_by_sku()
     active = db.current_active_listings()
+    groups = {g["group_sku"]: g for g in db.all_unit_groups()}
+    secondary = unit_groups.secondary_member_ids()
     held = db.active_stripe_holds([items[s]["id"] for s in skus if s in items])
     simulated_at = _now().isoformat()
     out = []
     for sku in skus:
         item = items.get(sku)
+        if item is not None and item["id"] in secondary:
+            out.append(_record(sku, None, None, False, None))
+            continue
+        if sku in groups and item is not None:
+            if sku in test:
+                listing = shop_test_item.simulated_listing(test[sku])
+                if listing is None:
+                    out.append(_record(sku, None, None, False, None))
+                    continue
+                gitem, glisting = _group_view(sku, item, dict(listing, quantity=None))
+                out.append(_record(sku, gitem, glisting, False, simulated_at))
+            else:
+                gitem, glisting = _group_view(sku, item, active.get(sku))
+                out.append(_record(sku, gitem, glisting, False, checked_at))
+            continue
         is_held = item is not None and item["id"] in held
         if sku in test:
             listing = shop_test_item.simulated_listing(test[sku])
@@ -166,7 +204,8 @@ def catalog(scope: str = None) -> dict:
         return {"catalog_contract": CONTRACT, "complete": True, "scope": "test", "generated_at": _now().isoformat(),
                 "items": _records(list(test), None, test)}
     checked_at = _fresh_checked_at()
-    skus = [s for s in _items_by_sku() if s not in test]
+    secondary = unit_groups.secondary_member_ids()
+    skus = [s for s, item in _items_by_sku().items() if s not in test and item["id"] not in secondary]
     return {"catalog_contract": CONTRACT, "complete": True, "generated_at": _now().isoformat(),
             "items": _records(skus, checked_at, test)}
 
@@ -204,12 +243,18 @@ async def _sync_bot_prices(records: list):
             continue
         pallet_id, number = map(int, SKU_RE.match(record["sku"]).groups())
         item = db.get_item_by_pallet_and_number(pallet_id, number)
-        listing = db.get_ebay_listing_data(item["id"]) if item else None
-        new = record["price_cents"] / 100
-        if not listing or (listing.get("price") is not None and round(listing["price"], 2) == new):
+        if not item:
             continue
-        db.update_listing_price(item["id"], new, listing.get("price"), "Price synced from eBay")
-        db.queue_price_card_update(item["id"], new)
+        group_sku = db.unit_group_of(item["id"])
+        units = [u for u in db.unit_group_member_items(group_sku) if u["status"] == db.STATUS_LISTED] \
+            if group_sku else [item]
+        new = record["price_cents"] / 100
+        for unit in units:
+            listing = db.get_ebay_listing_data(unit["id"])
+            if not listing or (listing.get("price") is not None and round(listing["price"], 2) == new):
+                continue
+            db.update_listing_price(unit["id"], new, listing.get("price"), "Price synced from eBay")
+            db.queue_price_card_update(unit["id"], new)
 
 
 async def verify_for_checkout(skus: list, website_prices: dict) -> dict:
@@ -226,12 +271,18 @@ async def verify_for_checkout(skus: list, website_prices: dict) -> dict:
     records = _records(skus, checked_at, test)
     await _sync_bot_prices([rec for rec in records if rec["sku"] not in test])
     on_test_keys = shop_test_item.whole_bot_on_test_keys()
+    grouped = {g["group_sku"] for g in db.all_unit_groups()}
     unavailable, changes, prices = [], [], {}
     for record in records:
         sku = record["sku"]
-        # On Stripe test keys only the test item can be bought, so a test
-        # payment can never touch real stock.
-        if (on_test_keys and sku not in test) or record["available_quantity"] != 1 or record["price_cents"] is None:
+        # One unit of each SKU per checkout: a single-unit listing needs its
+        # one unit; a multi-unit listing (unit group) needs at least one
+        # reservable unit. A multi-unit listing that hasn't been set up as a
+        # group (/admin sync-units) can't be sold here yet. On Stripe test
+        # keys only the test item can be bought.
+        units = record["available_quantity"]
+        sellable = units >= 1 if sku in grouped else units == 1
+        if (on_test_keys and sku not in test) or not sellable or record["price_cents"] is None:
             unavailable.append(sku)
             continue
         prices[sku] = record["price_cents"]

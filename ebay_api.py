@@ -857,6 +857,60 @@ async def end_listing_for_item(item: dict, listing_id: str = None) -> str:
     return "No live eBay listing found for it."
 
 
+async def _trading_call(call_name: str, inner_xml: str) -> "object":
+    """One Trading API call with the seller's token; returns the parsed XML
+    root. Raises EbayAPIError on HTTP or Ack=Failure."""
+    import xml.etree.ElementTree as ET
+    token = await get_access_token()
+    headers = {"X-EBAY-API-CALL-NAME": call_name, "X-EBAY-API-SITEID": "0",
+               "X-EBAY-API-COMPATIBILITY-LEVEL": "1349", "X-EBAY-API-IAF-TOKEN": token, "Content-Type": "text/xml"}
+    body = (f'<?xml version="1.0" encoding="utf-8"?><{call_name}Request xmlns="urn:ebay:apis:eBLBaseComponents">'
+            f"{inner_xml}</{call_name}Request>")
+    async with aiohttp.ClientSession() as session:
+        async with session.post(_trading_url(), data=body.encode(), headers=headers) as resp:
+            text = await resp.text()
+            if resp.status >= 300:
+                raise EbayAPIError(f"eBay {call_name} failed ({resp.status}): {text[:300]}")
+    root = ET.fromstring(text)
+    ns = _TRADING_NS
+    if (root.findtext(f"{ns}Ack") or "") == "Failure":
+        msg = root.findtext(f"{ns}Errors/{ns}LongMessage") or text[:300]
+        raise EbayAPIError(f"eBay {call_name} failed: {msg}")
+    return root
+
+
+async def get_listing_quantity(listing_id: str) -> dict:
+    """{'total', 'sold', 'available', 'status'} for a listing, straight from
+    eBay (Trading GetItem). Raises EbayAPIError."""
+    ns = _TRADING_NS
+    root = await _trading_call("GetItem", f"<ItemID>{int(listing_id)}</ItemID><DetailLevel>ReturnAll</DetailLevel>")
+    total = int(root.findtext(f"{ns}Item/{ns}Quantity") or 0)
+    sold = int(root.findtext(f"{ns}Item/{ns}SellingStatus/{ns}QuantitySold") or 0)
+    return {"total": total, "sold": sold, "available": max(0, total - sold),
+            "status": root.findtext(f"{ns}Item/{ns}SellingStatus/{ns}ListingStatus") or ""}
+
+
+async def set_available_quantity(listing_id: str, quantity: int):
+    """Sets how many units a hand-made fixed-price listing has AVAILABLE
+    (Trading ReviseInventoryStatus - its Quantity is the available count).
+    Not for Inventory-API listings. Raises EbayAPIError."""
+    await _trading_call("ReviseInventoryStatus",
+                        f"<InventoryStatus><ItemID>{int(listing_id)}</ItemID><Quantity>{int(quantity)}</Quantity>"
+                        "</InventoryStatus>")
+
+
+async def is_inventory_model_listing(item: dict) -> bool:
+    """True when the bot made this listing (Inventory API offer for its SKU)."""
+    sku = ebay_listing_rules.custom_label(item)
+    try:
+        offers = (await _request("GET", f"/offer?sku={urllib.parse.quote(sku)}")).get("offers") or []
+    except EbayAPIError as e:
+        if "25713" in str(e) or "404" in str(e):
+            return False
+        raise
+    return bool(offers)
+
+
 async def relist_fixed_price_listing(listing_id: str) -> str:
     """Relists an ended fixed-price listing (Trading API RelistFixedPriceItem
     - works for listings made by hand in Seller Hub). Returns the NEW

@@ -55,8 +55,18 @@ def test_skus() -> dict:
     return out
 
 
+def test_item_ids() -> set:
+    """Every test item ID - the registered ones plus all units of a test
+    multi-unit group."""
+    ids = set(test_skus().values())
+    for group in db.all_unit_groups():
+        if group["is_test"]:
+            ids |= {u["id"] for u in db.unit_group_member_items(group["group_sku"])}
+    return ids
+
+
 def is_test_item(item_id: int) -> bool:
-    return item_id in test_skus().values()
+    return item_id in test_item_ids()
 
 
 def simulated_listing(item_id: int):
@@ -71,9 +81,43 @@ def simulated_listing(item_id: int):
             "quantity": 1, "listing_type": "FixedPriceItem"}
 
 
+def _test_pallet_id(actor_id: int) -> int:
+    pallet = db.get_pallet_by_name(PALLET_NAME)
+    if pallet is not None:
+        return pallet["id"]
+    pallet_id = db.create_pallet(PALLET_NAME, category_id=db.unused_negative_category_id(), created_by=actor_id,
+                                 notes="Website checkout testing only - not real stock.")
+    db.archive_pallet(pallet_id)  # keeps it out of every pallet list and picker
+    return pallet_id
+
+
+MULTI_UNITS = 3
+
+
+def create_multi(actor_id: int) -> dict:
+    """The disposable MULTI-UNIT test listing: an anchor item plus two more
+    units in a test unit group (3 sellable units, $1.00 each, no eBay
+    listing - simulated like the single test item). Made once."""
+    import unit_groups  # noqa: F401 (keeps the dependency obvious)
+    for group in db.all_unit_groups():
+        if group["is_test"]:
+            return db.get_item(group["anchor_item_id"])
+    pallet_id = _test_pallet_id(actor_id)
+    anchor_id = db.create_item(pallet_id, "Website checkout MULTI-UNIT test item - not real stock.", [], actor_id)
+    db.save_ebay_listing_data(anchor_id, TITLE + " (3 units)", "", "", PRICE, {}, actor_id=actor_id)
+    db.update_status(anchor_id, db.STATUS_LISTED, actor_id=actor_id, note="Multi-unit checkout test item created")
+    db.add_shop_test_item(anchor_id)
+    anchor = db.get_item(anchor_id)
+    sku = ebay_listing_rules.custom_label(anchor)
+    db.create_unit_group(sku, anchor_id, None, "test", 0, is_test=True)
+    for _ in range(MULTI_UNITS - 1):
+        db.add_unit_group_member(sku, db.clone_item_as_unit(anchor_id, actor_id=actor_id))
+    return anchor
+
+
 def create(actor_id: int) -> dict:
-    """The test item - made (with its own archived pallet) if there isn't one."""
-    existing = db.shop_test_items()
+    """The single-unit test item - made (with its own archived pallet) if there isn't one."""
+    existing = [row for row in db.shop_test_items() if not db.unit_group_of(row["id"])]
     if existing:
         return db.get_item(existing[0]["id"])
     pallet = db.get_pallet_by_name(PALLET_NAME)
@@ -94,9 +138,11 @@ async def reset(actor_id: int) -> list:
     """Back to Listed, with any open checkout holding it cancelled. Returns
     one line per test item describing what was done."""
     lines = []
-    for sku, item_id in test_skus().items():
+    for sku, anchor_id in test_skus().items():
+        group_sku = db.unit_group_of(anchor_id)
+        unit_ids = [u["id"] for u in db.unit_group_member_items(group_sku)] if group_sku else [anchor_id]
         cancelled = 0
-        for checkout in db.open_stripe_checkouts_for_item(item_id):
+        for checkout in [c for item_id in unit_ids for c in db.open_stripe_checkouts_for_item(item_id)]:
             if test_mode() and checkout["session_id"].startswith("cs_test_"):
                 try:
                     await stripe_api.expire_checkout_session(checkout["session_id"])
@@ -105,10 +151,11 @@ async def reset(actor_id: int) -> list:
             db.update_stripe_checkout(checkout["session_id"], status="expired", note="Reset by /admin checkout-test")
             db.release_stripe_holds(checkout["session_id"])
             cancelled += 1
-        item = db.get_item(item_id)
-        if item["status"] != db.STATUS_LISTED:
-            db.update_status(item_id, db.STATUS_LISTED, actor_id=actor_id, note="Checkout test item reset")
-        lines.append(f"`{sku}`: Listed again" + (f", {cancelled} open checkout(s) cancelled" if cancelled else ""))
+        for item_id in unit_ids:
+            if db.get_item(item_id)["status"] != db.STATUS_LISTED:
+                db.update_status(item_id, db.STATUS_LISTED, actor_id=actor_id, note="Checkout test item reset")
+        units = f" ({len(unit_ids)} units)" if group_sku else ""
+        lines.append(f"`{sku}`{units}: Listed again" + (f", {cancelled} open checkout(s) cancelled" if cancelled else ""))
     return lines
 
 
@@ -116,7 +163,10 @@ def retire(actor_id: int) -> list:
     """Soft-deletes the registered test item(s) (rows kept, like /item delete)."""
     done = []
     for row in db.shop_test_items():
-        db.update_status(row["id"], db.STATUS_DELETED, actor_id=actor_id, note="Checkout test item retired")
+        group_sku = db.unit_group_of(row["id"])
+        for unit in (db.unit_group_member_items(group_sku) if group_sku else [row]):
+            if unit["status"] != db.STATUS_DELETED:
+                db.update_status(unit["id"], db.STATUS_DELETED, actor_id=actor_id, note="Checkout test item retired")
         done.append(ebay_listing_rules.custom_label(row))
     return done
 
@@ -127,10 +177,18 @@ def status_lines() -> list:
     for sku, item_id in test_skus().items():
         item = db.get_item(item_id)
         listing = db.get_ebay_listing_data(item_id) or {}
+        group_sku = db.unit_group_of(item_id)
+        if group_sku:
+            import unit_groups
+            units = db.unit_group_member_items(group_sku)
+            lines.append(f"`{sku}` - {listing.get('ebay_title') or TITLE} - ${listing.get('price') or 0:.2f} - "
+                         f"{len(unit_groups.sellable_units(group_sku))} of {len(units)} units sellable "
+                         f"({', '.join(u['status'] for u in units)})")
+            continue
         lines.append(f"`{sku}` - {listing.get('ebay_title') or TITLE} - ${listing.get('price') or 0:.2f} - "
                      f"status **{item['status']}**")
     if len(lines) == 1:
-        lines.append("No test item yet - `/admin checkout-test action:create`.")
+        lines.append("No test item yet - `/admin checkout-test action:create` (or `create-multi`).")
     return lines
 
 

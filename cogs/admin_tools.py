@@ -32,6 +32,7 @@ from discord.ext import commands, tasks
 
 import backup
 import buyer_data
+import ebay_listing_rules
 import shop_test_item
 import config
 import database as db
@@ -840,12 +841,83 @@ class AdminTools(commands.Cog):
                      if held_now else "No active hold now.")
         await interaction.followup.send("\n".join(lines)[:1900], ephemeral=True)
 
+    @admin_group.command(name="sync-units",
+                         description="Set up multi-unit eBay listings: one bot item per unit (preview first).")
+    @app_commands.describe(sku="Only this listing's SKU (default: every live listing with more than 1 unit)",
+                           apply="Set True to actually add the units - default is preview-only")
+    async def sync_units_cmd(self, interaction: discord.Interaction, sku: str = None, apply: bool = False):
+        if not await _require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        import ebay_catalog
+        import unit_groups
+        from cogs.item_flow import _channel_and_view_for_status, send_item_card
+        snapshot = db.current_active_listings()
+        if not snapshot:
+            await interaction.followup.send("No eBay listing check yet - run `/ebay sync-prices` first.", ephemeral=True)
+            return
+        wanted = ebay_catalog.canonical_sku(sku) if sku else None
+        plans = []
+        for listing_sku, row in sorted(snapshot.items()):
+            if (wanted and listing_sku != wanted) or (not wanted and (row.get("quantity") or 0) <= 1
+                                                     and not db.get_unit_group(listing_sku)):
+                continue
+            parsed = ebay_listing_rules.parse_custom_label(listing_sku)
+            anchor = db.get_item_by_pallet_and_number(*parsed) if parsed else None
+            if anchor and anchor["status"] != db.STATUS_DELETED:
+                plans.append(unit_groups.plan(row, anchor))
+        if not plans:
+            await interaction.followup.send("No live multi-unit eBay listings to set up.", ephemeral=True)
+            return
+        lines = []
+        for p in plans:
+            line = (f"`{p['sku']}` - eBay {p['ebay_available']}, unsold here {p['unsold']}"
+                    + (f" -> add **{p['add']}**" if p["add"] else " - ok")
+                    + (f" ⚠️ {p['excess']} more unsold here than on eBay - check by hand" if p["excess"] else "")
+                    + ("" if p["grouped"] else " (new group)"))
+            lines.append(line)
+        if not apply:
+            total = sum(p["add"] for p in plans)
+            await interaction.followup.send(
+                ("**Preview** - nothing changed yet.\n" + "\n".join(lines) +
+                 f"\n\nApplying adds {total} item(s) (one per extra unit; nothing existing changes). "
+                 "Run again with `apply:True`.")[:1900], ephemeral=True)
+            return
+        flow = self.bot.get_cog("ItemFlow")
+        made, problems = 0, []
+        for p in plans:
+            try:
+                new_ids = await unit_groups.apply_plan(p, interaction.user.id)
+            except Exception as e:  # eBay lookups while creating the group
+                problems.append(f"`{p['sku']}`: {e}")
+                continue
+            made += len(new_ids)
+            for new_id in new_ids:
+                item = db.get_item(new_id)
+                stage, view = _channel_and_view_for_status(new_id, db.STATUS_LISTED)
+                channel = self.bot.get_channel(db.resolve_channel_id(item["pallet_id"], stage)) if stage else None
+                if channel is not None and flow is not None:
+                    try:
+                        msg = await send_item_card(channel, item, view=view, destination_status=db.STATUS_LISTED)
+                        db.update_status(new_id, db.STATUS_LISTED, actor_id=interaction.user.id,
+                                         note="Card posted", new_message_id=msg.id)
+                        await asyncio.sleep(1.2)  # Discord rate limits
+                    except Exception as e:
+                        problems.append(f"card for #{item['item_number']}: {e}")
+            result = await unit_groups.sync(p["sku"])
+            if not result.ok:
+                problems.append(f"`{p['sku']}` eBay: {result.note}")
+        await interaction.followup.send(
+            (f"✅ Added {made} unit item(s) across {len(plans)} listing(s).\n" + "\n".join(lines)
+             + ("\n⚠️ " + "\n⚠️ ".join(problems) if problems else ""))[:1900], ephemeral=True)
+
     @admin_group.command(name="checkout-test",
                          description="The disposable $1 item for testing website checkout on Stripe test keys.")
     @app_commands.describe(action="create it, reset it to Listed after a test, show it, or retire it")
     @app_commands.choices(action=[
         app_commands.Choice(name="status", value="status"),
         app_commands.Choice(name="create", value="create"),
+        app_commands.Choice(name="create-multi", value="create-multi"),
         app_commands.Choice(name="reset", value="reset"),
         app_commands.Choice(name="retire", value="retire"),
     ])
@@ -858,6 +930,11 @@ class AdminTools(commands.Cog):
             lines = [f"✅ Test item ready: `pallet-{item['pallet_id']}-item-{item['item_number']}` "
                      f"(\"{shop_test_item.TITLE}\", ${shop_test_item.PRICE:.2f}). It lives in an archived pallet "
                      "with no channels and is only sellable while the bot is on Stripe **test** keys."]
+        elif action.value == "create-multi":
+            item = shop_test_item.create_multi(interaction.user.id)
+            lines = [f"✅ Multi-unit test item ready: `pallet-{item['pallet_id']}-item-{item['item_number']}` "
+                     f"({shop_test_item.MULTI_UNITS} units at ${shop_test_item.PRICE:.2f}), test keys only. "
+                     "Each checkout reserves one unit; `reset` puts every unit back."]
         elif action.value == "reset":
             lines = await shop_test_item.reset(interaction.user.id) or ["No test item to reset."]
         elif action.value == "retire":

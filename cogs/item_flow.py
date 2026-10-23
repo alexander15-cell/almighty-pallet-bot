@@ -45,6 +45,7 @@ import discord_resilience
 import ebay_api
 import ebay_aspects
 import ebay_taxonomy
+import unit_groups
 import finance_utils
 import r2_storage
 import runtime_settings
@@ -1833,6 +1834,11 @@ class ItemFlow(commands.Cog):
         """Puts back up the eBay listing the bot ended when this item went on
         hold (records the new listing ID). Returns a note ('' if the bot
         hadn't ended one)."""
+        if db.unit_group_of(item["id"]):
+            (sku, result), = await unit_groups.sync_for_items([item])
+            note = f"eBay quantity updated ({result.note})" if result.ok else f"couldn't update eBay ({result.note})"
+            db.log_item_event(item["id"], f"eBay: {note}")
+            return note
         ended = db.get_hold_ebay_end(item["id"])
         if not ended:
             return ""
@@ -2080,10 +2086,19 @@ class ItemFlow(commands.Cog):
         there's no eBay listing); the result is also logged on the item and
         posted in #ebay-orders.
         """
+        name = f"#{item['item_number']}"
+        if db.unit_group_of(item["id"]):
+            # One unit of a multi-unit listing: eBay's quantity follows the
+            # units still for sale (unit_groups.sync) - the listing stays up.
+            (sku, result), = await unit_groups.sync_for_items([item])
+            note = (f"eBay quantity updated ({result.note})" if result.ok else
+                    f"couldn't update the eBay quantity ({result.note}) - fix it in Seller Hub NOW.")
+            db.log_item_event(item["id"], f"eBay: {note}")
+            await self._ebay_notice(f"🔢 {name} ({sku}) {why} - {note}")
+            return note
         listing_id, units = self._live_ebay_listing(item)
         if not listing_id:
             return ""
-        name = f"#{item['item_number']}"
         if units and units > 1:
             note = (f"eBay listing {listing_id} has {units} units - lower its quantity by 1 in Seller Hub "
                     f"(the bot doesn't end multi-unit listings).")

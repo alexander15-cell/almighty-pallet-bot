@@ -389,6 +389,9 @@ def match_line_to_item(line: dict):
     for item in candidates:
         if not item or item.get("status") == db.STATUS_DELETED:
             continue
+        group_sku = db.unit_group_of(item["id"])
+        if group_sku:  # a multi-unit listing is matched as its anchor (see unit_groups.py)
+            item = db.get_item(db.get_unit_group(group_sku)["anchor_item_id"])
         created = _parse_dt(item.get("created_at"))
         if order_dt and created and created > order_dt:
             continue

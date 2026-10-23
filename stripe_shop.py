@@ -23,6 +23,7 @@ on the Stripe page, fulfill() flags the order for a refund instead of
 marking anything twice.
 """
 import asyncio
+import contextlib
 import json
 import re
 import logging
@@ -38,6 +39,7 @@ import finance_utils
 import quickbooks
 import shipping
 import shippo_orders
+import unit_groups
 import stripe_api
 
 log = logging.getLogger(__name__)
@@ -93,7 +95,7 @@ def check_sellable(items: list) -> list:
     for item in items:
         listing = db.get_ebay_listing_data(item["id"]) or {}
         title = listing.get("ebay_title") or item.get("ai_title") or f"Item #{item['item_number']}"
-        sku = ebay_listing_rules.custom_label(item)
+        sku = unit_groups.public_sku(item)
         if item["status"] != db.STATUS_LISTED:
             raise CheckoutError(f"Sorry - \"{title}\" just sold.", skus=[sku])
         if item["id"] in held:
@@ -110,7 +112,7 @@ def _uses_test_keys(items: list) -> bool:
     real items always through the live ones - never mixed in one cart, and
     never a test item on live keys (shop_test_item.py)."""
     import shop_test_item
-    test_ids = set(shop_test_item.test_skus().values())
+    test_ids = shop_test_item.test_item_ids()
     flags = {i["id"] in test_ids for i in items}
     if flags == {True, False}:
         raise CheckoutError("The checkout test item can't be in a cart with real items.")
@@ -210,6 +212,36 @@ async def start_checkout(refs: list, source: str = "website", delivery: str = "s
     if not refs or len(refs) > 20:
         raise CheckoutError("The cart needs between 1 and 20 items.")
     items = resolve_items(refs)
+    quote_ids = [i["id"] for i in items]  # quotes are made for the listing (anchor), not a unit
+    grouped = any(unit_groups.group_of(i) for i in items)
+    # Multi-unit listings: picking a free unit and reserving it happen under
+    # one lock, so two buyers can't be handed the same unit.
+    async with (_locks["unit-groups"] if grouped else contextlib.nullcontext()):
+        if grouped:
+            items = _pick_units(items)
+        return await _start_checkout_locked(refs, items, quote_ids, grouped, source, delivery, actor_id,
+                                            website_prices, shipping_quote_id)
+
+
+def _pick_units(items: list) -> list:
+    """Each multi-unit listing's anchor swapped for one of its sellable units."""
+    out, used = [], set()
+    for item in items:
+        group = unit_groups.group_of(item)
+        if group is None:
+            out.append(item)
+            continue
+        free = [u for u in unit_groups.sellable_units(group["group_sku"]) if u["id"] not in used]
+        if not free:
+            raise CheckoutError("Sorry - every unit of that item is sold or being checked out right now.",
+                                skus=[group["group_sku"]])
+        out.append(free[0])
+        used.add(free[0]["id"])
+    return out
+
+
+async def _start_checkout_locked(refs, items, quote_ids, grouped, source, delivery, actor_id, website_prices,
+                                 shipping_quote_id) -> dict:
     test = _uses_test_keys(items)
     unit_amounts = _website_unit_amounts(refs, items, website_prices) if website_prices is not None else None
     key = ",".join(sorted(str(i["id"]) for i in items))
@@ -224,7 +256,7 @@ async def start_checkout(refs: list, source: str = "website", delivery: str = "s
         if delivery == "ship":
             try:
                 if shipping.live_rates():
-                    quote_row = shipping.usable_quote(shipping_quote_id, [i["id"] for i in items])
+                    quote_row = shipping.usable_quote(shipping_quote_id, quote_ids)
                     ship_cents = quote_row["cents"]
                 else:
                     ship_cents = shipping.order_cents(sellable, "ship")
@@ -250,7 +282,7 @@ async def start_checkout(refs: list, source: str = "website", delivery: str = "s
             except stripe_api.StripeError:
                 log.exception("Couldn't expire Stripe session %s after losing an item race", session["id"])
             raise CheckoutError("Someone else is checking out one of these items right now.",
-                                skus=[ebay_listing_rules.custom_label(i) for i in items])
+                                skus=[unit_groups.public_sku(i) for i in items])
         db.save_checkout_shipping(session["id"], quote_row["quote_id"] if quote_row else None,
                                   quote_row["zip"] if quote_row else None, ship_cents)
         # What Stripe will actually charge before tax/shipping - from Stripe's
@@ -259,11 +291,21 @@ async def start_checkout(refs: list, source: str = "website", delivery: str = "s
         if subtotal is not None and subtotal != sum(sent.values()):
             await _cancel(session["id"])
             raise CheckoutError("Checkout prices didn't come out right - please try again.")
+        if grouped:
+            # The reserved unit comes off eBay before the buyer can pay; if eBay
+            # can't be brought in line safely, the checkout doesn't go ahead.
+            failed = [(sku, res) for sku, res in await unit_groups.sync_for_items(items) if not res.ok]
+            if failed:
+                await _cancel(session["id"])
+                raise CheckoutError("We couldn't confirm this item's stock with eBay right now - try again shortly.",
+                                    skus=[sku for sku, _ in failed],
+                                    detail="; ".join(f"{sku}: {res.note}" for sku, res in failed))
     return {"url": session.get("url"), "session_id": session["id"], "expires_at": expires_at.isoformat(),
             "livemode": session.get("livemode", not session["id"].startswith("cs_test_")),
             "delivery": delivery, "shipping_cents": ship_cents,
             "subtotal_cents": subtotal if subtotal is not None else sum(sent.values()),
-            "unit_amounts": {ref: sent[item["id"]] for ref, item in zip(refs, items)}}
+            "unit_amounts": {ref: sent[item["id"]] for ref, item in zip(refs, items)},
+            "item_ids": [i["id"] for i in items]}
 
 
 async def _cancel(session_id: str):
@@ -271,8 +313,20 @@ async def _cancel(session_id: str):
         await stripe_api.expire_checkout_session(session_id)
     except stripe_api.StripeError:
         log.exception("Couldn't expire Stripe session %s", session_id)
-    db.update_stripe_checkout(session_id, status="expired", note="Cancelled: amounts didn't match")
+    db.update_stripe_checkout(session_id, status="expired", note="Cancelled before payment")
     db.release_stripe_holds(session_id)
+    await _resync_units(session_id)
+
+
+async def _resync_units(session_id: str):
+    """After a checkout's holds change, multi-unit listings' eBay quantity
+    follows (unit_groups.sync)."""
+    checkout = db.get_stripe_checkout(session_id)
+    if not checkout:
+        return
+    for sku, result in await unit_groups.sync_for_items([db.get_item(i) for i in checkout["item_ids"]]):
+        if not result.ok:
+            log.warning("Unit group %s eBay sync after checkout %s: %s", sku, session_id, result.note)
 
 
 def session_state(session_id: str):
@@ -291,7 +345,7 @@ def session_state(session_id: str):
     items = [db.get_item(i) for i in checkout["item_ids"]]
     total = checkout.get("amount_total")
     return {"session_id": session_id, "state": state, "paid": state == "paid",
-            "items": [ebay_listing_rules.custom_label(i) for i in items if i],
+            "items": [unit_groups.public_sku(i) for i in items if i],
             "amount_total_cents": round(total * 100) if total is not None else None}
 
 
@@ -319,6 +373,7 @@ async def handle_event(bot, event: dict) -> str:
         if checkout["status"] in ("open", "processing"):
             db.update_stripe_checkout(session_id, status=status)
             db.release_stripe_holds(session_id)
+            await _resync_units(session_id)
         return f"{status} - items released"
     return "ignored"
 
@@ -346,6 +401,7 @@ async def reconcile_session(bot, session_id: str) -> str:
     if state == "expired" and paid not in ("paid", "no_payment_required"):
         db.update_stripe_checkout(session_id, status="expired", note="Expired (confirmed with Stripe)")
         db.release_stripe_holds(session_id)
+        await _resync_units(session_id)
         log.info("Checkout %s confirmed expired with Stripe - hold released", session_id)
         return "expired on Stripe - hold released"
     if state == "complete" and paid in ("paid", "no_payment_required"):
@@ -442,7 +498,7 @@ async def fulfill(bot, session_id: str) -> dict:
                                          address["city"], address["state"], address["postal_code"],
                                          address["country"], actor_id=SYSTEM_ACTOR)
                 listing = db.get_ebay_listing_data(item["id"]) or {}
-                if listing.get("ebay_item_id"):
+                if listing.get("ebay_item_id") and unit_groups.group_of(item) is None:
                     try:
                         notes.append(f"#{item['item_number']}: " + await ebay_api.end_listing_for_item(
                             item, listing_id=listing["ebay_item_id"]))
@@ -451,6 +507,9 @@ async def fulfill(bot, session_id: str) -> dict:
                                      "Seller Hub NOW so it can't sell twice.")
             db.update_stripe_checkout(session_id, sold_marked=1)
             db.release_stripe_holds(session_id)
+            for sku, result in await unit_groups.sync_for_items(items):
+                notes.append(f"{sku}: eBay {result.note}" if result.ok else
+                             f"{sku}: couldn't update the eBay quantity ({result.note}) - check it in Seller Hub.")
         if problems:
             db.update_stripe_checkout(session_id, status="attention", note=CONFLICT + " " + " ".join(problems))
             await _notify(bot, checkout, session, total, tax, fee, notes + problems, attention=True)
@@ -504,7 +563,7 @@ async def _fulfill_test_payment(bot, checkout, session, items, total, tax, fee) 
     No Discord cards, no eBay, no sale log, no QuickBooks, no buyer messages."""
     import shop_test_item
     session_id = checkout["session_id"]
-    test_ids = set(shop_test_item.test_skus().values())
+    test_ids = shop_test_item.test_item_ids()
     stray = [i for i in items if i["id"] not in test_ids]
     if stray:
         note = ("TEST MODE payment for real item(s) " + ", ".join(f"#{i['item_number']}" for i in stray) +

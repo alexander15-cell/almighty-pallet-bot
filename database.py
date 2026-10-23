@@ -807,6 +807,40 @@ def init_db():
                 PRIMARY KEY (kind, card_key)
             );
 
+            -- Multi-unit eBay listings (unit_groups.py): one bot item per
+            -- physical unit, grouped under the listing's Custom label (the
+            -- anchor item's SKU). Members are the anchor plus its added units.
+            CREATE TABLE IF NOT EXISTS unit_groups (
+                group_sku           TEXT PRIMARY KEY,
+                anchor_item_id      INTEGER NOT NULL,
+                listing_id          TEXT,
+                model               TEXT,               -- 'trading' / 'inventory' / 'test'
+                ebay_sold_baseline  INTEGER NOT NULL DEFAULT 0,
+                ended_by_bot        INTEGER NOT NULL DEFAULT 0,
+                is_test             INTEGER NOT NULL DEFAULT 0,
+                created_at          TEXT NOT NULL,
+                last_sync_at        TEXT,
+                last_synced_qty     INTEGER,
+                last_error          TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS unit_group_members (
+                item_id     INTEGER PRIMARY KEY,
+                group_sku   TEXT NOT NULL,
+                added_at    TEXT NOT NULL
+            );
+
+            -- Which group units each eBay order line took, so re-reading an
+            -- order never sells a different unit.
+            CREATE TABLE IF NOT EXISTS ebay_order_units (
+                order_id     TEXT NOT NULL,
+                line_key     TEXT NOT NULL,
+                item_id      INTEGER NOT NULL,
+                group_sku    TEXT NOT NULL,
+                assigned_at  TEXT NOT NULL,
+                PRIMARY KEY (order_id, line_key, item_id)
+            );
+
             CREATE TABLE IF NOT EXISTS stripe_events (
                 event_id     TEXT PRIMARY KEY,
                 event_type   TEXT,
@@ -3046,6 +3080,126 @@ def finish_auto_book(kind: str, card_key: str, outcome: str):
     with get_conn() as conn:
         conn.execute("UPDATE auto_book_attempts SET outcome = ? WHERE kind = ? AND card_key = ?",
                      (outcome[:300], kind, card_key))
+
+
+# --------------------------------------------------------------- unit groups --
+
+def create_unit_group(group_sku: str, anchor_item_id: int, listing_id, model: str, sold_baseline: int,
+                      is_test: bool = False):
+    now = _now()
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO unit_groups (group_sku, anchor_item_id, listing_id, model, ebay_sold_baseline, is_test,
+                   created_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (group_sku, anchor_item_id, str(listing_id) if listing_id else None, model, int(sold_baseline or 0),
+             1 if is_test else 0, now))
+        conn.execute("INSERT OR IGNORE INTO unit_group_members (item_id, group_sku, added_at) VALUES (?, ?, ?)",
+                     (anchor_item_id, group_sku, now))
+
+
+def get_unit_group(group_sku: str):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM unit_groups WHERE group_sku = ?", (group_sku,)).fetchone()
+        return dict(row) if row else None
+
+
+def all_unit_groups(include_test: bool = True) -> list:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM unit_groups" + ("" if include_test else " WHERE is_test = 0")
+                            + " ORDER BY group_sku").fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_unit_group(group_sku: str, **fields):
+    allowed = {"listing_id", "model", "ebay_sold_baseline", "ended_by_bot", "last_sync_at", "last_synced_qty",
+               "last_error"}
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    if fields:
+        with get_conn() as conn:
+            conn.execute(f"UPDATE unit_groups SET {', '.join(f'{k} = ?' for k in fields)} WHERE group_sku = ?",
+                         (*fields.values(), group_sku))
+
+
+def add_unit_group_member(group_sku: str, item_id: int):
+    with get_conn() as conn:
+        conn.execute("INSERT OR IGNORE INTO unit_group_members (item_id, group_sku, added_at) VALUES (?, ?, ?)",
+                     (item_id, group_sku, _now()))
+
+
+def unit_group_of(item_id: int):
+    with get_conn() as conn:
+        row = conn.execute("SELECT group_sku FROM unit_group_members WHERE item_id = ?", (item_id,)).fetchone()
+        return row["group_sku"] if row else None
+
+
+def unit_group_member_items(group_sku: str) -> list:
+    """Every unit (items rows) in the group, anchor first."""
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            """SELECT i.* FROM unit_group_members m JOIN items i ON i.id = m.item_id
+               JOIN unit_groups g ON g.group_sku = m.group_sku
+               WHERE m.group_sku = ? ORDER BY (i.id = g.anchor_item_id) DESC, i.item_number""", (group_sku,))]
+
+
+def all_unit_group_member_ids() -> dict:
+    """{item_id: group_sku} for every member."""
+    with get_conn() as conn:
+        return {r["item_id"]: r["group_sku"] for r in conn.execute("SELECT * FROM unit_group_members")}
+
+
+def order_units(order_id: str, line_key: str) -> list:
+    with get_conn() as conn:
+        return [r["item_id"] for r in conn.execute(
+            "SELECT item_id FROM ebay_order_units WHERE order_id = ? AND line_key = ? ORDER BY item_id",
+            (order_id, line_key))]
+
+
+def record_order_units(order_id: str, line_key: str, group_sku: str, item_ids: list):
+    now = _now()
+    with get_conn() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO ebay_order_units (order_id, line_key, item_id, group_sku, assigned_at) "
+            "VALUES (?, ?, ?, ?, ?)", [(order_id, line_key, i, group_sku, now) for i in item_ids])
+
+
+def group_units_taken_by_orders(group_sku: str) -> set:
+    with get_conn() as conn:
+        return {r["item_id"] for r in conn.execute("SELECT item_id FROM ebay_order_units WHERE group_sku = ?",
+                                                   (group_sku,))}
+
+
+def count_group_ebay_units(group_sku: str) -> int:
+    """eBay order units the bot has recorded for the group since it was made."""
+    with get_conn() as conn:
+        return conn.execute("SELECT COUNT(*) FROM ebay_order_units WHERE group_sku = ?", (group_sku,)).fetchone()[0]
+
+
+def clone_item_as_unit(anchor_id: int, actor_id: int = None) -> int:
+    """A new item that's another physical unit of the anchor: same pallet,
+    note, photos, AI write-up and listing details (incl. the eBay listing
+    ID), status Listed. The anchor itself is untouched."""
+    anchor = get_item(anchor_id)
+    listing = get_ebay_listing_data(anchor_id) or {}
+    new_id = create_item(anchor["pallet_id"], anchor.get("raw_description") or "", [], actor_id or 0)
+    with get_conn() as conn:
+        conn.execute(
+            """UPDATE items SET photo_urls = ?, photo_public_urls = ?, ai_title = ?, ai_description = ?, ai_flags = ?,
+                   ai_suggested_category = ?, ai_suggested_price = ?, ai_suggested_weight_lb = ?,
+                   ai_suggested_length_in = ?, ai_suggested_width_in = ?, ai_suggested_height_in = ?
+               WHERE id = ?""",
+            (anchor.get("photo_urls"), anchor.get("photo_public_urls"), anchor.get("ai_title"),
+             anchor.get("ai_description"), anchor.get("ai_flags"), anchor.get("ai_suggested_category"),
+             anchor.get("ai_suggested_price"), anchor.get("ai_suggested_weight_lb"),
+             anchor.get("ai_suggested_length_in"), anchor.get("ai_suggested_width_in"),
+             anchor.get("ai_suggested_height_in"), new_id))
+        if listing:
+            cols = [c for c in listing if c not in ("item_id", "id")]
+            conn.execute(
+                f"INSERT INTO ebay_listing_data (item_id, {', '.join(cols)}) VALUES (?, {', '.join('?' * len(cols))})",
+                (new_id, *[json.dumps(listing[c]) if c == "item_specifics" else listing[c] for c in cols]))
+    update_status(new_id, STATUS_LISTED, actor_id=actor_id,
+                  note=f"Added as another unit of item #{anchor['item_number']} (same eBay listing)")
+    return new_id
 
 
 # ------------------------------------------------------- web dashboard reads --

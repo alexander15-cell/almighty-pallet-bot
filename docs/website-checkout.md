@@ -195,6 +195,38 @@ POST /shop/shipping/quote
 - In this mode the catalog's per-item `shipping_cents` is `null` (it
   depends on the ZIP).
 
+## 4c. Multi-unit listings
+
+A listing with several units (e.g. `pallet-1-item-43`, 17 on eBay) is one
+product to the website, under the listing's SKU. Inside the bot each unit
+is its own item (set up with `/admin sync-units`), so one unit can be sold,
+held or shipped without touching the others.
+
+- **Catalog / refresh:** `available_quantity` is the NET number a new buyer
+  can reserve now - Listed units not reserved by another checkout, never
+  more than eBay itself shows. `bot_status` stays `listed` while any unit
+  is. The added units' own SKUs never appear and read as unknown.
+- **Checkout:** unchanged contract. Each SKU in `items` still means ONE
+  unit (no duplicates; a quantity selector would be a new contract). The
+  bot reserves one specific unit; `website_prices` / `subtotal_cents` are
+  per unit. `not_available` only when no unit can be reserved.
+- **Quote:** one sellable unit's box per SKU, same binding to the cart.
+- **eBay stays in step:** eBay's available quantity is set to the units
+  still for sale here - a unit reserved by a website checkout comes off eBay
+  before the buyer can pay; an expired/cancelled checkout puts it back; a
+  paid one keeps it off. Before every eBay write the bot re-reads the
+  listing: if eBay shows a sale the bot hasn't recorded yet, it doesn't
+  write (that would resurrect a sold unit) and the checkout gets
+  `409 not_available` until the order is recorded (every ~20 min). At 0
+  units the listing is ended, and relisted (new listing ID in the catalog)
+  if a reserved unit comes back. If eBay can't be updated, the checkout is
+  cancelled before payment and the owner is told. A 10-minute sync repairs
+  anything a missed event or restart left out of step.
+- **Only listings made in Seller Hub** are supported for multi-unit; a
+  bot-made (Inventory API) multi-unit listing is left eBay-only.
+- **Test:** `/admin checkout-test action:create-multi` makes a disposable
+  3-unit item (test keys only, `?scope=test`, no eBay listing).
+
 ## 5. Pages Stripe sends the buyer back to
 
 - Success: `https://4guys1palletoverstock.com/checkout/success?session_id={CHECKOUT_SESSION_ID}`
