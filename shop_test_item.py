@@ -60,7 +60,9 @@ def test_item_ids() -> set:
     multi-unit group."""
     ids = set(test_skus().values())
     for group in db.all_unit_groups():
-        if group["is_test"]:
+        # a test group, or a real-listing group whose SKU is in SHOP_TEST_SKUS
+        # (for checking real eBay quantity writes on Stripe TEST keys)
+        if group["is_test"] or group["anchor_item_id"] in ids:
             ids |= {u["id"] for u in db.unit_group_member_items(group["group_sku"])}
     return ids
 

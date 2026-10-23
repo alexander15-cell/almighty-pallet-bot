@@ -27,6 +27,7 @@ import contextlib
 import json
 import re
 import logging
+import secrets
 import sqlite3
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -266,12 +267,21 @@ async def _start_checkout_locked(refs, items, quote_ids, grouped, source, delive
                                       unit_amounts=unit_amounts, shipping_cents=ship_cents)
         sent = {item["id"]: line["price_data"]["unit_amount"]
                 for (item, _), line in zip(sellable, params["line_items"])}
-        try:
-            session = await stripe_api.create_checkout_session(params, test=test)
-        except stripe_api.StripeError as e:
-            log.error("Stripe checkout creation failed (%s keys, items %s): %s",
-                      "TEST" if test else "LIVE", key, e)
-            raise CheckoutError("Checkout couldn't start - please try again in a minute.", detail=str(e))
+        # One Idempotency-Key per attempt: if Stripe's answer is lost (timeout)
+        # the retry gets back the SAME session instead of a second, unrecorded
+        # one a buyer could pay for. See also handle_event's orphan alert.
+        attempt = f"pallet-bot-{secrets.token_urlsafe(18)}"
+        params["metadata"]["attempt"] = attempt
+        session = None
+        for try_no in range(2):
+            try:
+                session = await stripe_api.create_checkout_session(params, idempotency_key=attempt, test=test)
+                break
+            except stripe_api.StripeError as e:
+                log.error("Stripe checkout creation failed (%s keys, items %s, try %d): %s",
+                          "TEST" if test else "LIVE", key, try_no + 1, e)
+                if not getattr(e, "ambiguous", False) or try_no == 1:
+                    raise CheckoutError("Checkout couldn't start - please try again in a minute.", detail=str(e))
         try:
             db.create_stripe_checkout(session["id"], source, [i["id"] for i in items], session.get("url"), delivery,
                                       expires_at.isoformat(), created_by=actor_id)
@@ -356,7 +366,9 @@ async def handle_event(bot, event: dict) -> str:
     event_type = event.get("type", "")
     obj = (event.get("data") or {}).get("object") or {}
     session_id = obj.get("id") if obj.get("object") == "checkout.session" else None
-    if not session_id or not db.get_stripe_checkout(session_id):
+    if session_id and not db.get_stripe_checkout(session_id):
+        return await _orphan_event(bot, event_type, obj)
+    if not session_id:
         return "ignored (not a bot checkout)"
     if event.get("id") and not db.record_stripe_event(event["id"], event_type):
         return "duplicate"
@@ -420,6 +432,32 @@ async def reconcile_open(bot) -> list:
         # within minutes, not only when the hold runs out.
         results.append((checkout["session_id"], await reconcile_session(bot, checkout["session_id"])))
     return results
+
+
+async def _orphan_event(bot, event_type: str, obj: dict) -> str:
+    """A checkout the bot made but never recorded (Stripe answered after the
+    bot had given up, twice). Nothing is reserved for it, so if it's PAID a
+    person must decide: refund it in Stripe (or fulfil it by hand if the
+    item is still here). Alerted in #ebay-orders and the finance log."""
+    if (obj.get("metadata") or {}).get("source") != "pallet-bot":
+        return "ignored (not a bot checkout)"
+    if event_type not in ("checkout.session.completed", "checkout.session.async_payment_succeeded") \
+            or obj.get("payment_status") not in ("paid", "no_payment_required"):
+        return "ignored (unrecorded bot checkout, not paid)"
+    text = (f"⚠️ **{CONFLICT}** a Stripe checkout the bot never recorded was PAID - session `{obj.get('id')}`, "
+            f"items {(obj.get('metadata') or {}).get('item_ids') or '?'}, total "
+            f"${(obj.get('amount_total') or 0) / 100:.2f}. Nothing was reserved or marked sold for it: refund it in "
+            "Stripe, or if the item is still here sell it to this buyer by hand.")
+    channel_id = db.get_shared_channel_id("ebay-orders")
+    channel = bot.get_channel(channel_id) if (bot and channel_id) else None
+    if channel is not None:
+        try:
+            await channel.send(text[:1900])
+        except Exception:
+            log.exception("Couldn't post the orphan checkout alert")
+    await finance_utils.post_to_finance_audit_log(bot, text[:1900])
+    log.error(text)
+    return "ALERT: unrecorded bot checkout was paid"
 
 
 async def _fulfill_logged(bot, session_id: str):

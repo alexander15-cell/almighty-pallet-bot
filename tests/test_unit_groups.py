@@ -283,3 +283,52 @@ def test_order_card_and_sale_logging_use_the_assigned_unit(shop, group):
     shop.db.update_status(group.anchor["id"], shop.db.STATUS_SOLD, actor_id=0)
     later = ebay_cog._match_order_line_items({**order, "order_id": "27-56"})
     assert later[0]["id"] not in (group.anchor["id"], first[0]["id"])
+
+
+# ------------------------------------------------- verification follow-ups
+
+def test_stripe_timeout_retries_with_the_same_key_and_gets_the_same_session(shop, monkeypatch):
+    item = _listed(shop.db)[0]
+    keys, calls = [], {"n": 0}
+
+    async def flaky(params, idempotency_key=None, test=False):
+        keys.append(idempotency_key)
+        calls["n"] += 1
+        if calls["n"] == 1:  # Stripe made it, but the answer was lost
+            raise stripe_api.StripeError("no answer (TimeoutError)", ambiguous=True)
+        return {"id": "cs_test_same", "url": "https://checkout.stripe.com/c/pay/cs_test_same"}
+    monkeypatch.setattr(stripe_api, "create_checkout_session", flaky)
+    result = asyncio.run(stripe_shop.start_checkout([item["id"]]))
+    assert result["session_id"] == "cs_test_same" and len(keys) == 2 and keys[0] == keys[1]
+    assert shop.db.active_stripe_holds([item["id"]]) == {item["id"]: "cs_test_same"}
+
+
+def test_a_clear_stripe_refusal_is_not_retried(shop, monkeypatch):
+    item = _listed(shop.db)[0]
+    create = AsyncMock(side_effect=stripe_api.StripeError("card declined setup", ambiguous=False))
+    monkeypatch.setattr(stripe_api, "create_checkout_session", create)
+    with pytest.raises(stripe_shop.CheckoutError):
+        asyncio.run(stripe_shop.start_checkout([item["id"]]))
+    assert create.await_count == 1 and shop.db.active_stripe_holds([item["id"]]) == {}
+
+
+def test_a_paid_checkout_the_bot_never_recorded_raises_refund_needed(shop, monkeypatch):
+    sent = []
+    monkeypatch.setattr(shop.db, "get_shared_channel_id", lambda name: 9)
+    bot = type("B", (), {"get_channel": lambda self, cid: type("C", (), {"send": AsyncMock(side_effect=sent.append)})()})()
+    paid = {"id": "evt_o", "type": "checkout.session.completed", "data": {"object": {
+        "id": "cs_live_orphan", "object": "checkout.session", "payment_status": "paid", "amount_total": 2354,
+        "metadata": {"source": "pallet-bot", "item_ids": "7"}}}}
+    assert asyncio.run(stripe_shop.handle_event(bot, paid)).startswith("ALERT")
+    assert "REFUND NEEDED" in sent[0] and "cs_live_orphan" in sent[0]
+    other = {**paid, "data": {"object": {**paid["data"]["object"], "metadata": {}}}}
+    assert asyncio.run(stripe_shop.handle_event(bot, other)) == "ignored (not a bot checkout)"
+
+
+def test_a_real_listing_group_named_in_shop_test_skus_uses_test_keys(shop, group, monkeypatch):
+    import shop_test_item
+    monkeypatch.setattr(config, "SHOP_TEST_SKUS", frozenset({group.sku}))
+    monkeypatch.setattr(config, "STRIPE_TEST_SECRET_KEY", "sk_test_separate")
+    ids = shop_test_item.test_item_ids()
+    assert {u["id"] for u in shop.db.unit_group_member_items(group.sku)} <= ids
+    assert stripe_shop._uses_test_keys(unit_groups.sellable_units(group.sku)[:1]) is True

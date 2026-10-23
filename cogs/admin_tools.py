@@ -292,6 +292,21 @@ class ConfirmWipeModal(discord.ui.Modal, title="⚠️ Confirm Full Database Wip
 
 
 _SYNC_UNITS_LOCK = asyncio.Lock()  # one /admin sync-units apply at a time
+STARTED_AT = datetime.now(timezone.utc)
+
+
+def _running_commit() -> str:
+    """The git commit this bot process was started from (read once)."""
+    import subprocess
+    try:
+        out = subprocess.run(["git", "log", "-1", "--format=%h %cI %s"], cwd=Path(__file__).resolve().parent.parent,
+                             capture_output=True, text=True, timeout=5)
+        return out.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+RUNNING_COMMIT = _running_commit()
 
 
 class AdminTools(commands.Cog):
@@ -843,6 +858,55 @@ class AdminTools(commands.Cog):
         lines.append("Website availability is now held by checkout `…" + held_now[item["id"]][-10:] + "`."
                      if held_now else "No active hold now.")
         await interaction.followup.send("\n".join(lines)[:1900], ephemeral=True)
+
+    @admin_group.command(name="version", description="Which code this bot is running, and since when.")
+    async def version_cmd(self, interaction: discord.Interaction):
+        if not await _require_admin(interaction):
+            return
+        up = datetime.now(timezone.utc) - STARTED_AT
+        await interaction.response.send_message(
+            f"Running commit: `{RUNNING_COMMIT}`\nStarted: {STARTED_AT.strftime('%Y-%m-%d %H:%M:%S')} UTC "
+            f"(up {up.days}d {up.seconds // 3600}h {(up.seconds // 60) % 60}m)", ephemeral=True)
+
+    @admin_group.command(name="unit-report",
+                         description="Multi-unit listings: setup status and what the website catalog reports for each.")
+    async def unit_report_cmd(self, interaction: discord.Interaction):
+        if not await _require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        import ebay_catalog
+        import unit_groups
+        checked_at = db.snapshot_checked_at()
+        groups = [g for g in db.all_unit_groups() if not g["is_test"]]
+        if not groups:
+            await interaction.followup.send("No multi-unit listings set up yet - `/admin sync-units`.", ephemeral=True)
+            return
+        records = {r["sku"]: r for r in ebay_catalog._records([g["group_sku"] for g in groups], checked_at, {})}
+        lines = [f"eBay last checked: {checked_at or 'never'}", ""]
+        for g in groups:
+            sku, rec = g["group_sku"], records[g["group_sku"]]
+            members = db.unit_group_member_items(sku)
+            counts = {}
+            for u in members:
+                counts[u["status"]] = counts.get(u["status"], 0) + 1
+            held = len(unit_groups.sellable_units(sku, exclude_held=False)) - len(unit_groups.sellable_units(sku))
+            blocked = []
+            if g["model"] != "trading":
+                blocked.append(f"{g['model']} listing - not supported")
+            if g["last_error"]:
+                blocked.append(g["last_error"][:120])
+            if not rec["ebay_active"]:
+                blocked.append("no live eBay listing at the last check")
+            status = "BLOCKED: " + "; ".join(blocked) if blocked else "configured"
+            lines.append(
+                f"`{sku}` {status} - listing {rec['ebay_listing_id'] or '-'}, {rec['bot_status']}, available "
+                f"{rec['available_quantity']}, price {rec['price_cents']}c, units "
+                + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())) + (f", held {held}" if held else "")
+                + f", synced {(g['last_sync_at'] or 'never')[:16]}")
+        text = "\n".join(lines)
+        while text:
+            await interaction.followup.send(text[:1900], ephemeral=True)
+            text = text[1900:]
 
     @admin_group.command(name="sync-units",
                          description="Set up multi-unit eBay listings: one bot item per unit (preview first).")

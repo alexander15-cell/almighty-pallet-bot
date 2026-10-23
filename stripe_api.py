@@ -20,8 +20,16 @@ import config
 API_BASE = "https://api.stripe.com/v1"
 
 
+TIMEOUT = aiohttp.ClientTimeout(total=30)
+
+
 class StripeError(Exception):
-    pass
+    """A Stripe call failed. ambiguous=True: no answer came back, so Stripe
+    may or may not have done it."""
+
+    def __init__(self, message: str = "", ambiguous: bool = False):
+        super().__init__(message)
+        self.ambiguous = ambiguous
 
 
 def _flatten(data, prefix="") -> list:
@@ -67,15 +75,20 @@ async def _request(method: str, path: str, params: dict = None, idempotency_key:
     if idempotency_key:
         headers["Idempotency-Key"] = idempotency_key
     pairs = _flatten(params or {})
-    async with aiohttp.ClientSession() as session:
-        if method == "GET":
-            async with session.get(f"{API_BASE}{path}", params=pairs, headers=headers) as resp:
-                body = await resp.json(content_type=None)
-                status, request_id = resp.status, resp.headers.get("Request-Id")
-        else:
-            async with session.request(method, f"{API_BASE}{path}", data=pairs, headers=headers) as resp:
-                body = await resp.json(content_type=None)
-                status, request_id = resp.status, resp.headers.get("Request-Id")
+    try:
+        async with aiohttp.ClientSession(timeout=TIMEOUT) as session:
+            if method == "GET":
+                async with session.get(f"{API_BASE}{path}", params=pairs, headers=headers) as resp:
+                    body = await resp.json(content_type=None)
+                    status, request_id = resp.status, resp.headers.get("Request-Id")
+            else:
+                async with session.request(method, f"{API_BASE}{path}", data=pairs, headers=headers) as resp:
+                    body = await resp.json(content_type=None)
+                    status, request_id = resp.status, resp.headers.get("Request-Id")
+    except (aiohttp.ClientError, TimeoutError) as e:
+        # We can't tell whether Stripe acted on it - callers that create
+        # things retry with the same Idempotency-Key (see stripe_shop).
+        raise StripeError(f"Stripe {method} {path}: no answer ({type(e).__name__})", ambiguous=True)
     if status >= 300:
         err = (body or {}).get("error") or {}
         raise StripeError(f"Stripe {method} {path} failed ({status}, request {request_id or '?'}): "
