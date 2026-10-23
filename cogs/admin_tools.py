@@ -291,6 +291,9 @@ class ConfirmWipeModal(discord.ui.Modal, title="⚠️ Confirm Full Database Wip
             pass
 
 
+_SYNC_UNITS_LOCK = asyncio.Lock()  # one /admin sync-units apply at a time
+
+
 class AdminTools(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -851,7 +854,6 @@ class AdminTools(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         import ebay_catalog
         import unit_groups
-        from cogs.item_flow import _channel_and_view_for_status, send_item_card
         snapshot = db.current_active_listings()
         if not snapshot:
             await interaction.followup.send("No eBay listing check yet - run `/ebay sync-prices` first.", ephemeral=True)
@@ -883,33 +885,62 @@ class AdminTools(commands.Cog):
                  f"\n\nApplying adds {total} item(s) (one per extra unit; nothing existing changes). "
                  "Run again with `apply:True`.")[:1900], ephemeral=True)
             return
-        flow = self.bot.get_cog("ItemFlow")
-        made, problems = 0, []
-        for p in plans:
-            try:
-                new_ids = await unit_groups.apply_plan(p, interaction.user.id)
-            except Exception as e:  # eBay lookups while creating the group
-                problems.append(f"`{p['sku']}`: {e}")
-                continue
-            made += len(new_ids)
-            for new_id in new_ids:
-                item = db.get_item(new_id)
-                stage, view = _channel_and_view_for_status(new_id, db.STATUS_LISTED)
-                channel = self.bot.get_channel(db.resolve_channel_id(item["pallet_id"], stage)) if stage else None
-                if channel is not None and flow is not None:
-                    try:
-                        msg = await send_item_card(channel, item, view=view, destination_status=db.STATUS_LISTED)
-                        db.update_status(new_id, db.STATUS_LISTED, actor_id=interaction.user.id,
-                                         note="Card posted", new_message_id=msg.id)
-                        await asyncio.sleep(1.2)  # Discord rate limits
-                    except Exception as e:
-                        problems.append(f"card for #{item['item_number']}: {e}")
-            result = await unit_groups.sync(p["sku"])
-            if not result.ok:
-                problems.append(f"`{p['sku']}` eBay: {result.note}")
+        if _SYNC_UNITS_LOCK.locked():
+            await interaction.followup.send("⏳ A sync-units run is already in progress - wait for it to finish, "
+                                            "then run the preview again.", ephemeral=True)
+            return
+        await _SYNC_UNITS_LOCK.acquire()
+        made, problems, cards = 0, [], []
+        try:
+            for p in plans:
+                try:
+                    new_ids = await unit_groups.apply_plan(p, interaction.user.id)
+                except Exception as e:  # eBay lookups while creating the group
+                    problems.append(f"`{p['sku']}`: {e}")
+                    continue
+                made += len(new_ids)
+                cards += new_ids
+                result = await unit_groups.sync(p["sku"])
+                if not result.ok:
+                    problems.append(f"`{p['sku']}` eBay: {result.note}")
+        except BaseException:
+            _SYNC_UNITS_LOCK.release()
+            raise
+        # Units an earlier, interrupted run made without a card get one too.
+        for group in db.all_unit_groups(include_test=False):
+            for unit in db.unit_group_member_items(group["group_sku"]):
+                if unit["status"] == db.STATUS_LISTED and not unit.get("current_message_id") and unit["id"] not in cards:
+                    cards.append(unit["id"])
         await interaction.followup.send(
-            (f"✅ Added {made} unit item(s) across {len(plans)} listing(s).\n" + "\n".join(lines)
+            (f"✅ Added {made} unit item(s) across {len(plans)} listing(s). Their Discord cards are being posted in "
+             f"the background (~{max(1, len(cards) * 2 // 60)} min) - run the preview again afterwards; every "
+             "listing should say ok.\n" + "\n".join(lines)
              + ("\n⚠️ " + "\n⚠️ ".join(problems) if problems else ""))[:1900], ephemeral=True)
+        # Cards go out slowly (Discord rate limits) without holding up the reply;
+        # the lock stays held until they're done, so a second run can't overlap.
+        asyncio.get_running_loop().create_task(self._post_unit_cards(cards, interaction.user.id))
+
+    async def _post_unit_cards(self, item_ids: list, actor_id: int):
+        from cogs.item_flow import _channel_and_view_for_status, send_item_card
+        try:
+            for item_id in item_ids:
+                item = db.get_item(item_id)
+                if not item or item.get("current_message_id"):
+                    continue
+                stage, view = _channel_and_view_for_status(item_id, db.STATUS_LISTED)
+                channel = self.bot.get_channel(db.resolve_channel_id(item["pallet_id"], stage)) if stage else None
+                if channel is None:
+                    continue
+                try:
+                    msg = await send_item_card(channel, item, view=view, destination_status=db.STATUS_LISTED)
+                    db.update_status(item_id, db.STATUS_LISTED, actor_id=actor_id, note="Card posted",
+                                     new_message_id=msg.id)
+                except Exception:
+                    log.exception("Couldn't post the card for new unit item %s", item_id)
+                await asyncio.sleep(1.5)  # Discord rate limits
+            log.info("Posted cards for %d new unit item(s)", len(item_ids))
+        finally:
+            _SYNC_UNITS_LOCK.release()
 
     @admin_group.command(name="checkout-test",
                          description="The disposable $1 item for testing website checkout on Stripe test keys.")
