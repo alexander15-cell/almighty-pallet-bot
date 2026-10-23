@@ -908,6 +908,40 @@ class AdminTools(commands.Cog):
             await interaction.followup.send(text[:1900], ephemeral=True)
             text = text[1900:]
 
+    @admin_group.command(name="unit-fix",
+                         description="Correct a multi-unit listing to the real number of unsold units you have.")
+    @app_commands.describe(sku="The listing's SKU, e.g. pallet-1-item-25",
+                           units="How many unsold units you really have (count them)")
+    async def unit_fix_cmd(self, interaction: discord.Interaction, sku: str, units: int):
+        if not await _require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        import ebay_catalog
+        import unit_groups
+        canon = ebay_catalog.canonical_sku(sku) or sku
+        try:
+            result = await unit_groups.fix_count(canon, units, interaction.user.id)
+        except ValueError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
+        flow = self.bot.get_cog("ItemFlow")
+        for item_id in result["retired"]:  # take the removed units' cards down
+            item = db.get_item(item_id)
+            try:
+                card = await flow._fetch_current_card(item, "listed") if flow else None
+                if card is not None:
+                    await card.delete()
+            except Exception:
+                log.exception("Couldn't remove the card for retired unit item %s", item_id)
+        numbers = ", ".join(f"#{db.get_item(i)['item_number']}" for i in result["retired"]) or "none"
+        sync = result["sync"]
+        lines = [f"`{canon}` now counts **{units}** real unsold unit(s).",
+                 f"Extra unit items removed (kept as deleted records): {numbers}.",
+                 f"eBay: {sync.note}" if sync.ok else f"⚠️ eBay not updated: {sync.note}"]
+        if result["short"]:
+            lines.append(f"{result['short']} unit item(s) still missing - run `/admin sync-units sku:{canon} apply:True`.")
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
     @admin_group.command(name="sync-units",
                          description="Set up multi-unit eBay listings: one bot item per unit (preview first).")
     @app_commands.describe(sku="Only this listing's SKU (default: every live listing with more than 1 unit)",

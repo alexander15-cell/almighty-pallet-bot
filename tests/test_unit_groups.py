@@ -332,3 +332,39 @@ def test_a_real_listing_group_named_in_shop_test_skus_uses_test_keys(shop, group
     ids = shop_test_item.test_item_ids()
     assert {u["id"] for u in shop.db.unit_group_member_items(group.sku)} <= ids
     assert stripe_shop._uses_test_keys(unit_groups.sellable_units(group.sku)[:1]) is True
+
+
+# ------------------------------------------------- physical-stock ceiling
+
+def test_an_extra_unit_item_can_never_inflate_ebay_or_the_website(shop, group):
+    # a duplicate unit item appears (e.g. setup run twice) - real stock is still 3
+    extra = shop.db.clone_item_as_unit(group.anchor["id"], actor_id=1)
+    shop.db.add_unit_group_member(group.sku, extra)
+    assert len(unit_groups.sellable_units(group.sku)) == 4
+    assert asyncio.run(unit_groups.sync(group.sku)).ok
+    assert group.ebay.available == 3 and group.ebay.writes == []  # never raised to 4
+    assert unit_groups.reservable_count(group.sku) == 3
+
+    async def steps(c):
+        rec = (await (await c.post("/shop/catalog/refresh", json={"items": [group.sku]}, headers=H)).json())["items"][0]
+        assert rec["available_quantity"] == 3
+        statuses = [(await _checkout(c, {group.sku: 2200})).status for _ in range(4)]
+        assert statuses == [200, 200, 200, 409]  # the 4th "unit" doesn't exist
+    _run(shop, steps)
+
+
+def test_unit_fix_sets_the_real_count_and_retires_extras(shop, group):
+    extra = shop.db.clone_item_as_unit(group.anchor["id"], actor_id=1)
+    shop.db.add_unit_group_member(group.sku, extra)
+    group.ebay.total = 4  # the bad sync had raised eBay to 4
+    result = asyncio.run(unit_groups.fix_count(group.sku, 2, actor_id=1))
+    assert len(result["retired"]) == 2 and group.anchor["id"] not in result["retired"]
+    assert all(shop.db.get_item(i)["status"] == shop.db.STATUS_DELETED for i in result["retired"])
+    assert result["short"] == 0 and result["sync"].ok and group.ebay.available == 2
+    assert len(unit_groups.unsold_units(group.sku)) == 2 and unit_groups.reservable_count(group.sku) == 2
+    # selling one leaves one; the ceiling follows sales
+    unit = unit_groups.sellable_units(group.sku)[0]
+    shop.db.update_status(unit["id"], shop.db.STATUS_SOLD, actor_id=1)
+    assert unit_groups.physical_unsold(group.sku) == 1 and unit_groups.reservable_count(group.sku) == 1
+    with pytest.raises(ValueError):
+        asyncio.run(unit_groups.fix_count(group.sku, -1, actor_id=1))

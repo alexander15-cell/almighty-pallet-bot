@@ -841,6 +841,16 @@ def init_db():
                 PRIMARY KEY (order_id, line_key, item_id)
             );
 
+            -- How many physical units a multi-unit listing really had when
+            -- counted (set_at); the eBay quantity is never set above that
+            -- minus units sold since - see unit_groups.physical_unsold.
+            CREATE TABLE IF NOT EXISTS unit_group_caps (
+                group_sku    TEXT PRIMARY KEY,
+                total_units  INTEGER NOT NULL,
+                set_at       TEXT NOT NULL,
+                set_by       INTEGER
+            );
+
             CREATE TABLE IF NOT EXISTS stripe_events (
                 event_id     TEXT PRIMARY KEY,
                 event_type   TEXT,
@@ -3200,6 +3210,18 @@ def clone_item_as_unit(anchor_id: int, actor_id: int = None) -> int:
     update_status(new_id, STATUS_LISTED, actor_id=actor_id,
                   note=f"Added as another unit of item #{anchor['item_number']} (same eBay listing)")
     return new_id
+
+
+def set_unit_group_cap(group_sku: str, total_units: int, actor_id: int = None):
+    with get_conn() as conn:
+        conn.execute("INSERT OR REPLACE INTO unit_group_caps (group_sku, total_units, set_at, set_by) "
+                     "VALUES (?, ?, ?, ?)", (group_sku, int(total_units), _now(), actor_id))
+
+
+def get_unit_group_cap(group_sku: str):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM unit_group_caps WHERE group_sku = ?", (group_sku,)).fetchone()
+        return dict(row) if row else None
 
 
 # ------------------------------------------------------- web dashboard reads --

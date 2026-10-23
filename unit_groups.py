@@ -136,6 +136,54 @@ def assign_units(order_id: str, line: dict, base_item: dict, line_index: int = 0
     return chosen
 
 
+# --------------------------------------------------- physical-stock ceiling
+
+UNSOLD = (db.STATUS_LISTED, db.STATUS_ON_HOLD)
+
+
+def unsold_units(group_sku: str) -> list:
+    return [u for u in db.unit_group_member_items(group_sku) if u["status"] in UNSOLD]
+
+
+def physical_unsold(group_sku: str) -> int:
+    """The real number of unsold units: what was counted when the cap was
+    set (eBay's count at setup, or /admin unit-fix) minus units sold since.
+    The bot never offers eBay more than this - so an extra unit item in the
+    bot (e.g. a setup run twice) can't inflate eBay's stock."""
+    cap = db.get_unit_group_cap(group_sku)
+    if cap is None:
+        # Groups made before the ceiling existed: start it from today's
+        # unsold count, but never above what eBay last showed.
+        live = (db.current_active_listings().get(group_sku) or {}).get("quantity")
+        unsold = len(unsold_units(group_sku))
+        total = unsold if live is None else min(unsold, int(live) + _held_count(group_sku))
+        db.set_unit_group_cap(group_sku, total)
+        cap = db.get_unit_group_cap(group_sku)
+    sold_since = sum(1 for u in db.unit_group_member_items(group_sku)
+                     if u["status"] in (db.STATUS_SOLD, db.STATUS_SHIPPED) and (u.get("sold_at") or "") > cap["set_at"])
+    return max(0, cap["total_units"] - sold_since)
+
+
+def _held_count(group_sku: str) -> int:
+    """Unsold units not offered for sale right now: on hold, or reserved by
+    an open website checkout."""
+    listed = [u for u in db.unit_group_member_items(group_sku) if u["status"] == db.STATUS_LISTED]
+    reserved = len(db.active_stripe_holds([u["id"] for u in listed])) if listed else 0
+    on_hold = sum(1 for u in db.unit_group_member_items(group_sku) if u["status"] == db.STATUS_ON_HOLD)
+    return reserved + on_hold
+
+
+def reservable_count(group_sku: str) -> int:
+    """Units a new buyer can have right now: sellable units, never more
+    than the physical ceiling minus units held/reserved. This is what eBay
+    is set to and what the website catalog reports."""
+    sellable = len(sellable_units(group_sku))
+    return max(0, min(sellable, physical_unsold(group_sku) - _held_count(group_sku)))
+
+
+ebay_target = reservable_count
+
+
 # ------------------------------------------------------------ eBay quantity
 
 class SyncResult:
@@ -157,7 +205,7 @@ async def sync(group_sku: str) -> SyncResult:
             return SyncResult(False, "not a unit group")
         if group["is_test"] or not config.EBAY_ENABLED:
             return SyncResult(True, "nothing to sync (test group or eBay off)")
-        want = len(sellable_units(group_sku))
+        want = ebay_target(group_sku)
         result = await _sync(group, want)
         db.update_unit_group(group_sku, last_sync_at=_now(), last_error=None if result.ok else result.note[:300],
                              **({"last_synced_qty": want} if result.ok else {}))
@@ -251,6 +299,33 @@ def plan(snapshot_row: dict, anchor: dict) -> dict:
             "excess": max(0, len(unsold) - ebay_available)}
 
 
+async def fix_count(group_sku: str, real_units: int, actor_id: int) -> dict:
+    """/admin unit-fix: the owner's real count of unsold units. Sets the
+    ceiling, soft-deletes extra Listed unit items (rows kept, like /item
+    delete - newest added units first, never the anchor, never one reserved
+    by a checkout) and syncs eBay. Returns {'retired': [item ids],
+    'short': units still missing (run /admin sync-units apply), 'sync'}."""
+    if real_units < 0:
+        raise ValueError("The count can't be negative.")
+    group = db.get_unit_group(group_sku)
+    if group is None:
+        raise ValueError(f"{group_sku} isn't a multi-unit listing.")
+    db.set_unit_group_cap(group_sku, real_units, actor_id)
+    unsold = unsold_units(group_sku)
+    extra = len(unsold) - real_units
+    retired = []
+    if extra > 0:
+        reserved = db.active_stripe_holds([u["id"] for u in unsold])
+        candidates = [u for u in reversed(unsold) if u["status"] == db.STATUS_LISTED
+                      and u["id"] != group["anchor_item_id"] and u["id"] not in reserved]
+        for unit in candidates[:extra]:
+            db.update_status(unit["id"], db.STATUS_DELETED, actor_id=actor_id,
+                             note=f"Extra unit removed by /admin unit-fix ({group_sku} really has {real_units})")
+            retired.append(unit["id"])
+    short = max(0, real_units - len(unsold_units(group_sku)))
+    return {"retired": retired, "short": short, "sync": await sync(group_sku)}
+
+
 async def apply_plan(p: dict, actor_id: int) -> list:
     """Creates the group (if new) and the missing units. Returns the new
     item IDs. The anchor and every existing record are left as they are."""
@@ -262,6 +337,7 @@ async def apply_plan(p: dict, actor_id: int) -> list:
         model = "inventory" if await ebay_api.is_inventory_model_listing(anchor) else "trading"
         live = await ebay_api.get_listing_quantity(listing_id) if listing_id and model == "trading" else {"sold": 0}
         db.create_unit_group(sku, anchor["id"], listing_id, model, live["sold"])
+        db.set_unit_group_cap(sku, p["ebay_available"], actor_id)  # eBay's count = the real stock at setup
     new_ids = []
     for _ in range(p["add"]):
         new_id = db.clone_item_as_unit(anchor["id"], actor_id=actor_id)

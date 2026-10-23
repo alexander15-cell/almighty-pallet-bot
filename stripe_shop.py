@@ -233,6 +233,9 @@ def _pick_units(items: list) -> list:
             out.append(item)
             continue
         free = [u for u in unit_groups.sellable_units(group["group_sku"]) if u["id"] not in used]
+        if unit_groups.reservable_count(group["group_sku"]) - sum(
+                1 for u in out if db.unit_group_of(u["id"]) == group["group_sku"]) < 1:
+            free = []  # the physical ceiling is reached, whatever unit items exist
         if not free:
             raise CheckoutError("Sorry - every unit of that item is sold or being checked out right now.",
                                 skus=[group["group_sku"]])

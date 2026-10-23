@@ -135,7 +135,7 @@ def _group_view(sku: str, anchor: dict, listing):
     while any unit is, quantity = units a new buyer can reserve now (never
     more than eBay itself shows)."""
     members = db.unit_group_member_items(sku)
-    sellable = len(unit_groups.sellable_units(sku))
+    sellable = unit_groups.reservable_count(sku)
     if any(u["status"] == db.STATUS_LISTED for u in members):
         item = dict(anchor, status=db.STATUS_LISTED)
     else:
